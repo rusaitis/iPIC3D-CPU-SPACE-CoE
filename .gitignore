@@ -1,5 +1,64 @@
+# Build directories
 build*/
+Debug*/
+Release*/
+
+# Eclipse IDE
 .cproject
 .project
-.settings
-Debug*
+.settings/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled output
+*.o
+*.a
+*.so
+*.dylib
+
+# Scratch/local directories
+scratch*/
+
+# Tags files (ctags/gtags)
+tags
+TAGS
+.tags
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+.netrwhist
+*.un~
+
+# Vim sessions
+Session.vim
+*.vim.session
+
+# Neovim
+.nvim/
+.nvimrc.lua
+
+# LLM config
+CLAUDE.md
+.claude/
+.cursorrules
+.cursor/
+.copilot/
+copilot-instructions.md
+
+# Output and data files (common in simulation codes)
+*.h5
+*.hdf5
+*.dat
+*.log

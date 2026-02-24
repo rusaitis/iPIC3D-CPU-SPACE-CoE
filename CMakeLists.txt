@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.13)
 
 project(iPic3D)
 
@@ -46,6 +46,7 @@ option(PROFILE_MOMENTS "Profile Moment Gatherer" OFF)
 option(PROFILE_FIELDS "Profile Field Solver" OFF)
 
 include(GNUInstallDirs)
+include(CheckCSourceCompiles)
 
 ############### PARAVIEW/CATALYST ###############
 
@@ -58,60 +59,66 @@ if(USE_CATALYST)
     if (BUILD_SHARED_LIBS)
         install(TARGETS iPICAdaptor)
     endif()
-    target_link_libraries(iPICAdaptor PRIVATE stdc++fs ParaView::PythonCatalyst VTK::CommonDataModel Python3::Python)
+    target_link_libraries(iPICAdaptor PRIVATE ParaView::PythonCatalyst VTK::CommonDataModel Python3::Python)
     target_include_directories(iPICAdaptor INTERFACE ${CMAKE_SOURCE_DIR}/catalyst)
     target_compile_definitions(iPICAdaptor INTERFACE USE_CATALYST)
+endif()
+
+############### MPI and OpenMP ###############
+
+# Find MPI early so HDF5 parallel checks can link against MPI::MPI_C
+find_package(MPI REQUIRED COMPONENTS C CXX)
+
+if(USE_OPENMP)
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
 
 ############### HDF5 ###############
 
 if (USE_HDF5)
-	if(BUILD_SHARED_LIBS)
-		set(HDF5_USE_STATIC_LIBRARIES OFF)
-	else()
-		set(HDF5_USE_STATIC_LIBRARIES ON)
-	endif()
-	find_package(HDF5 COMPONENTS C HL REQUIRED)
+    if(BUILD_SHARED_LIBS)
+        set(HDF5_USE_STATIC_LIBRARIES OFF)
+    else()
+        set(HDF5_USE_STATIC_LIBRARIES ON)
+    endif()
 
-    if (HDF5_IS_PARALLEL)
+    find_package(HDF5 REQUIRED COMPONENTS C HL)
+
+    # Parallel-HDF5 detection (Better than relying on CMake's HDF5 discovery)
+    # Try compiling+linking a tiny program that uses the MPIO file driver API
+    set(_CMAKE_REQUIRED_INCLUDES_SAVE "${CMAKE_REQUIRED_INCLUDES}")
+    set(_CMAKE_REQUIRED_LIBRARIES_SAVE "${CMAKE_REQUIRED_LIBRARIES}")
+
+    set(CMAKE_REQUIRED_INCLUDES "${HDF5_INCLUDE_DIRS}")
+    set(CMAKE_REQUIRED_LIBRARIES "${HDF5_LIBRARIES};MPI::MPI_C")
+
+    check_c_source_compiles("
+        #include <mpi.h>
+        #include <hdf5.h>
+        int main(void) {
+            hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+            if (fapl < 0) return 1;
+            herr_t status = H5Pset_fapl_mpio(fapl, MPI_COMM_WORLD, MPI_INFO_NULL);
+            (void)status;
+            H5Pclose(fapl);
+            return 0;
+        }
+    " HDF5_HAS_PARALLEL_MPIO)
+
+    set(CMAKE_REQUIRED_INCLUDES "${_CMAKE_REQUIRED_INCLUDES_SAVE}")
+    set(CMAKE_REQUIRED_LIBRARIES "${_CMAKE_REQUIRED_LIBRARIES_SAVE}")
+
+    if (HDF5_HAS_PARALLEL_MPIO)
         add_compile_definitions(PHDF5 USING_PARALLEL_HDF5)
         message(STATUS "HDF5 is parallel: enabling PHDF5/USING_PARALLEL_HDF5")
     else()
-        message(STATUS "HDF5 is NOT parallel: PHDF5 disabled")
+        message(STATUS "HDF5 is NOT parallel (no H5Pset_fapl_mpio): PHDF5 disabled")
     endif()
-
-
-	if (NOT DEFINED HDF5_C_TARGET)
-		message(STATUS "Creating a proper target for HDF5")
-		#add_library(hdf5::hdf5 INTERFACE IMPORTED)
-		set_target_properties(hdf5::hdf5 PROPERTIES
-		INTERFACE_COMPILE_DEFINITIONS "${HDF5_C_DEFINITIONS}"
-		INTERFACE_INCLUDE_DIRECTORIES "${HDF5_C_INCLUDE_DIRS}"
-		INTERFACE_LINK_LIBRARIES "${HDF5_C_LIBRARIES}"
-		)
-		set(HDF5_C_TARGET hdf5::hdf5)
-	endif()
-
-	if (NOT DEFINED HDF5_C_HL_TARGET)
-		message(STATUS "Creating a proper target for HDF5 HL")
-		#add_library(hdf5::hdf5_hl INTERFACE IMPORTED)
-		set_target_properties(hdf5::hdf5_hl PROPERTIES
-		INTERFACE_LINK_LIBRARIES "hdf5::hdf5;${HDF5_C_HL_LIBRARIES}"
-		)
-		set(HDF5_C_HL_TARGET hdf5::hdf5_hl)
-	endif()
-endif()
-
-############### MPI and OpenMP ###############
-
-find_package(MPI REQUIRED COMPONENTS CXX)
-if(USE_OPENMP)
-    find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
 
 ############### Source Files ###############
 
-file(GLOB 
+file(GLOB
     src_files
     ConfigFile/src/*.cpp
     PSKOutput3D/*.cpp
@@ -142,11 +149,18 @@ if(USE_OPENMP)
 endif()
 
 if(USE_HDF5)
-    target_link_libraries(iPIC3Dlib PRIVATE ${HDF5_C_HL_TARGET})
+    target_include_directories(iPIC3Dlib PRIVATE ${HDF5_INCLUDE_DIRS})
+
+    # Ensure the linker can find HDF5 libs installed in non-standard prefixes
+    if (DEFINED HDF5_LIBRARY_DIRS)
+        target_link_directories(iPIC3Dlib PRIVATE ${HDF5_LIBRARY_DIRS})
+    endif()
+
+    target_link_libraries(iPIC3Dlib PRIVATE ${HDF5_LIBRARIES} ${HDF5_HL_LIBRARIES})
 endif()
 
 if(USE_CATALYST)
-    target_link_libraries(iPIC3Dlib PUBLIC iPICAdaptor PRIVATE stdc++fs)
+    target_link_libraries(iPIC3Dlib PUBLIC iPICAdaptor PRIVATE)
 endif()
 
 ############### Compiler Definitions ###############
@@ -181,10 +195,10 @@ endif()
 ############### Executable ###############
 
 add_executable(iPIC3D iPIC3D.cpp)
-target_link_libraries(iPIC3D iPIC3Dlib stdc++fs)
+target_link_libraries(iPIC3D iPIC3Dlib)
 
 if(NOT CMAKE_BUILD_TYPE)
-  	set(CMAKE_BUILD_TYPE Release)
+    set(CMAKE_BUILD_TYPE Release)
 endif()
 
 set_target_properties(iPIC3D PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} DEBUG_POSTFIX "_d")
