@@ -38,6 +38,9 @@
 #include "TimeTasks.h"
 #include "ipicmath.h" // for roundup_to_multiple
 #include "Alloc.h"
+#ifdef USE_PETSC
+#include "PetscSolver.h"
+#endif
 #include "asserts.h"
 #include <iomanip>
 #include <iostream>
@@ -2603,8 +2606,15 @@ void EMfields3D::calculateE()
     time_gmres.start();
     #endif
     
-    //? Solve using GMRes
-    GMRES(&Field::MaxwellImage, xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2), bkrylov, 20, 50, GMREStol, this);
+    //? Solve using GMRes or PETSc
+#ifdef USE_PETSC
+    if (petscSolver_ != nullptr) {
+        petscSolver_->solve(xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2), bkrylov);
+    } else
+#endif
+    {
+        GMRES(&Field::MaxwellImage, xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2), bkrylov, 20, 50, GMREStol, this);
+    }
 
     #ifdef __PROFILE_FIELDS__
     time_gmres.stop();

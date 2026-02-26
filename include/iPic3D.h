@@ -38,6 +38,9 @@ using std::string;
 #ifndef NO_HDF5
 class OutputWrapperFPP;
 #endif
+#ifdef USE_PETSC
+class PetscSolver;
+#endif
 namespace iPic3D {
 
   class c_Solver {
@@ -49,6 +52,9 @@ namespace iPic3D {
       vct(0),
       grid(0),
       EMf(0),
+#ifdef USE_PETSC
+      petscSolver(0),
+#endif
       particles(0),
 #ifndef NO_HDF5
       outputWrapperFPP(0),
@@ -96,7 +102,10 @@ namespace iPic3D {
     Collective    *col; // the input parameters
     VCtopology3D  *vct; // mpi topology 
     Grid3DCU      *grid; // 3d cartesion grid, local grid
-    EMfields3D    *EMf; // 
+    EMfields3D    *EMf; //
+#ifdef USE_PETSC
+    PetscSolver   *petscSolver;
+#endif
     Particles3D   *particles;
     Particles3D   *testpart;
     double        *kinetic_energy_species;  //* kinetic energy of each species, the normal one, added up

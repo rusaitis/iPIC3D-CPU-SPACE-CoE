@@ -55,6 +55,10 @@
     #include "Adaptor.h"
 #endif
 
+#ifdef USE_PETSC
+    #include "PetscSolver.h"
+#endif
+
 using namespace iPic3D;
 
 c_Solver::~c_Solver()
@@ -62,6 +66,9 @@ c_Solver::~c_Solver()
     delete col; // configuration parameters ("collectiveIO")
     delete vct; // process topology
     delete grid; // grid
+#ifdef USE_PETSC
+    delete petscSolver;
+#endif
     delete EMf; // field
     #ifndef NO_HDF5
         delete outputWrapperFPP;
@@ -152,6 +159,26 @@ int c_Solver::Init(int argc, char **argv)
         col->save();
     }
 
+    // Validate SolverType
+    if (col->getSolverType() != "GMRES" && col->getSolverType() != "PETSc") {
+        if (myrank == 0) {
+            cerr << "Error: Unknown SolverType '" << col->getSolverType()
+                 << "'. Valid options: GMRES, PETSc" << endl;
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+#ifndef USE_PETSC
+    if (col->getSolverType() == "PETSc") {
+        if (myrank == 0) {
+            cerr << "Error: SolverType=PETSc requested but iPIC3D was built without USE_PETSC."
+                 << " Rebuild with -DUSE_PETSC=ON" << endl;
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+#endif
+
     //* Create local grid
     grid = new Grid3DCU(col, vct);          // Create the local grid
     EMf = new EMfields3D(col, grid, vct);   // Create Electromagnetic Fields Object
@@ -231,6 +258,16 @@ int c_Solver::Init(int argc, char **argv)
         }
         abort();
     }
+
+#ifdef USE_PETSC
+    if (col->getSolverType() == "PETSc") {
+        int localSize = 3 * (grid->getNXN() - 2) * (grid->getNYN() - 2) * (grid->getNZN() - 2);
+        petscSolver = new PetscSolver(localSize, EMf, col->getGMREStol());
+        EMf->setPetscSolver(petscSolver);
+        if (myrank == 0)
+            cout << "PETSc solver enabled for E-field computation" << endl;
+    }
+#endif
 
     //! ======================= Initial Particle Distribution (if NOT starting from RESTART) ======================= !//
 

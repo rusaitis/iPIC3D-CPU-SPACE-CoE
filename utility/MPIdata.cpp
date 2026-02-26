@@ -59,8 +59,12 @@ void MPIdata::init(int *argc, char ***argv)
         rank = 0;
         nprocs = 1;
     #else
-    /* Initialize the MPI API */
-    MPI_Init(argc, argv);
+    /* Initialize the MPI API (guard against double-init, e.g. when PETSc already called MPI_Init) */
+    int mpi_already_initialized = 0;
+    MPI_Initialized(&mpi_already_initialized);
+    if (!mpi_already_initialized) {
+        MPI_Init(argc, argv);
+    }
 
     MPI_Comm_dup(MPI_COMM_WORLD, &PIC_COMM);
     MPI_Comm_rank(PIC_COMM, &rank);
@@ -77,11 +81,14 @@ void MPIdata::exit(int code)
     ::exit(code);
 }
 
-void MPIdata::finalize_mpi() 
+void MPIdata::finalize_mpi()
 {
     #ifndef NO_MPI
-        MPI_Finalize();
-        // MPI_Barrier(MPI_COMM_WORLD);
+        int mpi_finalized = 0;
+        MPI_Finalized(&mpi_finalized);
+        if (!mpi_finalized) {
+            MPI_Finalize();
+        }
     #endif
 }
 

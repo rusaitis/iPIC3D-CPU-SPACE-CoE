@@ -44,6 +44,7 @@ option(USE_OPENMP "Use OpenMP in support loops" ON)
 option(PROFILING "Measure runtimes of substages" OFF)
 option(PROFILE_MOMENTS "Profile Moment Gatherer" OFF)
 option(PROFILE_FIELDS "Profile Field Solver" OFF)
+option(USE_PETSC "Use PETSc library for field solver" OFF)
 
 include(GNUInstallDirs)
 include(CheckCSourceCompiles)
@@ -116,6 +117,14 @@ if (USE_HDF5)
     endif()
 endif()
 
+############### PETSc ###############
+
+if(USE_PETSC)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PETSC REQUIRED IMPORTED_TARGET PETSc)
+    message(STATUS "PETSc found: ${PETSC_PREFIX}")
+endif()
+
 ############### Source Files ###############
 
 file(GLOB
@@ -161,6 +170,11 @@ endif()
 
 if(USE_CATALYST)
     target_link_libraries(iPIC3Dlib PUBLIC iPICAdaptor PRIVATE)
+endif()
+
+if(USE_PETSC)
+    target_link_libraries(iPIC3Dlib PUBLIC PkgConfig::PETSC)
+    target_compile_definitions(iPIC3Dlib PUBLIC USE_PETSC)
 endif()
 
 ############### Compiler Definitions ###############
@@ -235,3 +249,4 @@ message("HDF5_INCLUDE_DIRS      = ${HDF5_INCLUDE_DIRS}")
 message("HDF5_LIBRARIES         = ${HDF5_LIBRARIES}")
 message("HDF5_HL_LIBRARIES      = ${HDF5_HL_LIBRARIES}")
 message("MPI_LIBRARIES          = ${MPI_LIBRARIES}")
+message("USE_PETSC              = ${USE_PETSC}")

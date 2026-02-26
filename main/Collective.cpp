@@ -155,6 +155,7 @@ void Collective::ReadInput(string inputfile)
         PoissonMAres                = config.read<double>   ("PoissonMAres", 0.01);
         PoissonMArho                = config.read<double>   ("PoissonMArho", 0.01);
         GMREStol                    = config.read<double>   ("GMREStol", 1e-8);
+        SolverType                  = config.read<string>   ("SolverType", "GMRES");
         NiterMover                  = config.read<int>      ("NiterMover", 3);
         Vinj                        = config.read<double>   ("Vinj", 0.0);
         SaveHeatFluxTensor          = config.read<bool>     ("SaveHeatFluxTensor", false);
@@ -1370,7 +1371,8 @@ void Collective::Print()
     cout << "Grid resolution                        = " << nxc << " x " << nyc << " x " << nzc << endl;
     cout << "Number of time steps                   = " << getNcycles() << endl;
     cout << "Time step size (dt)                    = " << dt << endl;
-    cout << "Tolerance of the field (GMRes) solver  = " << getGMREStol() << endl << endl;
+    cout << "Tolerance of the field (GMRes) solver  = " << getGMREStol() << endl;
+    cout << "Field solver type                      = " << getSolverType() << endl << endl;
 
     if (Smooth == 1)
         cout << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s)" << endl<< endl;
@@ -1442,7 +1444,8 @@ void Collective::save()
     my_file << "Grid resolution                        = " << nxc << " x " << nyc << " x " << nzc << endl;
     my_file << "Number of time steps                   = " << getNcycles() << endl;
     my_file << "Time step size (dt)                    = " << dt << endl;
-    my_file << "Tolerance of the field (GMRes) solver  = " << getGMREStol() << endl << endl;
+    my_file << "Tolerance of the field (GMRes) solver  = " << getGMREStol() << endl;
+    my_file << "Field solver type                      = " << getSolverType() << endl << endl;
     if (Smooth == 1)
         my_file << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s)" << endl<< endl;
     else

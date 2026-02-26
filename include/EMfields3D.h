@@ -42,6 +42,9 @@ const int DFIELD_3or4 = 4; // 4 pads with garbage but is needed for alignment
 class Particles3Dcomm;
 class Moments10;
 class ECSIM_Moments13;
+#ifdef USE_PETSC
+class PetscSolver;
+#endif
 class EMfields3D                // :public Field
 {
 public:
@@ -126,6 +129,9 @@ public:
 
     /*! Calculate Electric field using the implicit Maxwell solver */
     void calculateE();
+#ifdef USE_PETSC
+    void setPetscSolver(PetscSolver *solver) { petscSolver_ = solver; }
+#endif
     /*! Image of Poisson Solver (for SOLVER) */
     void PoissonImage(double *image, double *vector);
     /*! Image of Maxwell Solver (for Solver) */
@@ -733,9 +739,13 @@ private:
     
     void OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, arr3_double vectorZ, int nx, int ny, int nz);
     void OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, arr3_double vectorZ, int nx, int ny, int nz);
-    void OpenBoundaryInflowEImage(arr3_double imageX, arr3_double imageY, arr3_double imageZ, 
+    void OpenBoundaryInflowEImage(arr3_double imageX, arr3_double imageY, arr3_double imageZ,
                                  const_arr3_double vectorX, const_arr3_double vectorY, const_arr3_double vectorZ,
                                  int nx, int ny, int nz);
+
+#ifdef USE_PETSC
+    PetscSolver *petscSolver_ = nullptr;
+#endif
 };
 
 //* Add an amount of charge density to charge density field at node X,Y,Z

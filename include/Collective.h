@@ -178,6 +178,7 @@ class Collective
 
     double getVinj()                    const{ return (Vinj); }
     double getGMREStol()                const{ return (GMREStol); }
+    string getSolverType()              const{ return (SolverType); }
     int getLast_cycle()                 const{ return (last_cycle); }
     int getNiterMover()                 const{ return (NiterMover); }
     int getFieldOutputCycle()           const{ return (FieldOutputCycle); }
@@ -404,6 +405,9 @@ class Collective
 
     //* Tolerance for GMRES solver
     double GMREStol;
+
+    //* Field solver type: "GMRES" (default) or "PETSc"
+    string SolverType;
 
     //* mover predictor correction iteration (not needed for ECSIM)
     int NiterMover;

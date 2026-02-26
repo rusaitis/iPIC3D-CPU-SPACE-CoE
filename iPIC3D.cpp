@@ -27,10 +27,17 @@
 
 #include "LeXInt_Timer.hpp"
 
+#ifdef USE_PETSC
+#include <petscsys.h>
+#endif
+
 using namespace iPic3D;
 
-int main(int argc, char **argv) 
+int main(int argc, char **argv)
 {
+#ifdef USE_PETSC
+    PetscInitialize(&argc, &argv, NULL, NULL);
+#endif
     MPIdata::init(&argc, &argv);
     {
         #ifdef DEBUG_MODE
@@ -96,6 +103,10 @@ int main(int argc, char **argv)
 
     //? close MPI
     MPIdata::instance().finalize_mpi();
+
+#ifdef USE_PETSC
+    PetscFinalize();
+#endif
 
     return 0;
 }

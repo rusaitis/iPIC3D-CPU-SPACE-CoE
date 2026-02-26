@@ -21,8 +21,8 @@ restart_status                 = 0                                             #
 
 DiagnosticsOutputCycle         = 5                                             # Diagnostics cycle
 RestartOutputCycle             = 0                                             # Restart cycle (final time cycle is automatically written to restart files)
-FieldOutputCycle               = 25                                            # Output for moments and fields (if <= 0, data is NOT saved)
-ParticlesOutputCycle           = 40                                           # Output for particles (if <= 0, data is NOT saved)
+FieldOutputCycle               = 10                                            # Output for moments and fields (if <= 0, data is NOT saved)
+ParticlesOutputCycle           = 20                                           # Output for particles (if <= 0, data is NOT saved)
 ParticlesDownsampleOutputCycle = 0                                             # Downsample output cycle (if <= 0, data is NOT saved)
 ParticlesDownsampleFactor      = 1                                             # Downsampling factor (must be >= 1; if = 1 NO downsampling)
 
@@ -79,7 +79,7 @@ B0z                            = 0.0                                            
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 dt                             = 0.125	                                       # Time-step size
-ncycles                        = 200                                           # Number of time steps
+ncycles                        = 20                                           # Number of time steps
 th                             = 0.5                                           # Decentering parameter
 c                              = 1.0                                           # Speed of light 
 GMREStol                       = 1E-15                                         # GMRES tolerance (must be <= 1e-15 for exact energy conservation)
@@ -108,8 +108,8 @@ nzc                            = 1                                              
 # %                                  MPI TOPOLOGY                              %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-XLEN                           = 10                                              # Number of MPI subdomains along X
-YLEN                           = 10                                              # Number of MPI subdomains along Y
+XLEN                           = 2                                              # Number of MPI subdomains along X
+YLEN                           = 4                                              # Number of MPI subdomains along Y
 ZLEN                           = 1                                               # Number of MPI subdomains along Z
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
