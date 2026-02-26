@@ -104,7 +104,7 @@ void eprintf_fileLine(FILE * fptr, const char *type,
       snprintf(process_thread_str, 50, ", thread %d",
         omp_get_thread_num());
     #else
-      sprintf(process_thread_str, "");
+      process_thread_str[0] = '\0';
     #endif
   #endif
   char *sptr = error_msg;
@@ -119,7 +119,8 @@ void eprintf_fileLine(FILE * fptr, const char *type,
   /* print out remainder of message */
   chars_so_far += vsnprintf(sptr+chars_so_far, maxchars-chars_so_far, format, args);
   va_end(args);
-  sprintf(sptr+chars_so_far, "\n");
+  sptr[chars_so_far] = '\n';
+  sptr[chars_so_far + 1] = '\0';
 
   // print the message
   fflush(fptr);
