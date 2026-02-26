@@ -19,6 +19,7 @@ NOTES.md
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
+compile_commands.json
 Makefile
 
 # Compiled output
@@ -29,6 +30,7 @@ Makefile
 
 # Scratch/local directories
 scratch*/
+.cache/
 
 # Tags files (ctags/gtags)
 tags
