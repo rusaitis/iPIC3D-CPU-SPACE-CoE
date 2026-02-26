@@ -2,6 +2,13 @@
 build*/
 Debug*/
 Release*/
+data*/
+
+# Local build and notes
+build-script.sh
+build.sh
+PLAN.md
+NOTES.md
 
 # Eclipse IDE
 .cproject
@@ -12,6 +19,7 @@ Release*/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
+compile_commands.json
 Makefile
 
 # Compiled output
@@ -22,6 +30,7 @@ Makefile
 
 # Scratch/local directories
 scratch*/
+.cache/
 
 # Tags files (ctags/gtags)
 tags
@@ -51,6 +60,10 @@ Session.vim
 
 # LLM config
 CLAUDE.md
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/cache/
+.claude/tmp/
 .claude/
 .cursorrules
 .cursor/
