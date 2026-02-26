@@ -101,12 +101,12 @@ int main(int argc, char **argv)
         KCode.Finalize();
     }
 
-    //? close MPI
-    MPIdata::instance().finalize_mpi();
-
 #ifdef USE_PETSC
     PetscFinalize();
 #endif
+
+    //? close MPI
+    MPIdata::instance().finalize_mpi();
 
     return 0;
 }
