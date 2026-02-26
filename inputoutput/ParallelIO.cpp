@@ -588,7 +588,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 					  }
 
 	      //Write VTK header
-		  sprintf(header, "# vtk DataFile Version 2.0\n"
+		  snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Magnetic Field from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -608,7 +608,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 					  }
 
 		  //Write VTK header
-		   sprintf(header, "# vtk DataFile Version 2.0\n"
+		   snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Electric Field from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -628,7 +628,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 					  }
 
 		  //Write VTK header
-		   sprintf(header, "# vtk DataFile Version 2.0\n"
+		   snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Electron current from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -648,7 +648,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 					  }
 
 		  //Write VTK header
-		   sprintf(header, "# vtk DataFile Version 2.0\n"
+		   snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Ion current from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -734,7 +734,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 			  }
 
 		//Write VTK header
-		sprintf(headerRhoe, "# vtk DataFile Version 2.0\n"
+		snprintf(headerRhoe, sizeof(headerRhoe), "# vtk DataFile Version 2.0\n"
 						   "Electron density from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -745,7 +745,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 						   "SCALARS rhoe float\n"
 						   "LOOKUP_TABLE default\n",  dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
 
-		sprintf(headerRhoi, "# vtk DataFile Version 2.0\n"
+		snprintf(headerRhoi, sizeof(headerRhoi), "# vtk DataFile Version 2.0\n"
 						   "Ion density from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -888,7 +888,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 				  }
 
 		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
+		 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 					   "Magnetic Field from iPIC3D\n"
 					   "BINARY\n"
 					   "DATASET STRUCTURED_POINTS\n"
@@ -908,7 +908,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 				  }
 
 		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
+		 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 					   "Electric Field from iPIC3D\n"
 					   "BINARY\n"
 					   "DATASET STRUCTURED_POINTS\n"
@@ -928,7 +928,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 				  }
 
 		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
+		 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 					   "Electron current from iPIC3D\n"
 					   "BINARY\n"
 					   "DATASET STRUCTURED_POINTS\n"
@@ -948,7 +948,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 				  }
 
 		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
+		 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 					   "Ion current from iPIC3D\n"
 					   "BINARY\n"
 					   "DATASET STRUCTURED_POINTS\n"
@@ -967,7 +967,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 				  }
 
 		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
+		 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 				 "Electron2 current from iPIC3D\n"
 					   "BINARY\n"
 					   "DATASET STRUCTURED_POINTS\n"
@@ -987,7 +987,7 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 				  }
 
 		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
+		 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 				 "Ion3 current from iPIC3D\n"
 					   "BINARY\n"
 					   "DATASET STRUCTURED_POINTS\n"
@@ -1072,7 +1072,7 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getRHOns(ix+1, iy+1, iz+1, si)*4*3.1415926535897;
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s%d density from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1089,7 +1089,7 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 				      momentswritebuffer[iz][iy][ix] = (float)EMf->getpXXsn(ix+1, iy+1, iz+1, si);
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						"%s%d pressure PXX from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1107,7 +1107,7 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXYsn(ix+1, iy+1, iz+1, si);
 
 			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
+			snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 					"%s%d pressure PXY from iPIC3D\n"
 							   "BINARY\n"
 							   "DATASET STRUCTURED_POINTS\n"
@@ -1125,7 +1125,7 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXZsn(ix+1, iy+1, iz+1, si);
 
 			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
+			snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 							   "%s%d pressure PXZ from iPIC3D\n"
 							   "BINARY\n"
 							   "DATASET STRUCTURED_POINTS\n"
@@ -1143,7 +1143,7 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYYsn(ix+1, iy+1, iz+1, si);
 
 			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
+			snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 							   "%s%d pressure PYY from iPIC3D\n"
 							   "BINARY\n"
 							   "DATASET STRUCTURED_POINTS\n"
@@ -1161,7 +1161,7 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYZsn(ix+1, iy+1, iz+1, si);
 
 			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
+			snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 							   "%s%d pressure PYZ from iPIC3D\n"
 							   "BINARY\n"
 							   "DATASET STRUCTURED_POINTS\n"
@@ -1179,7 +1179,7 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpZZsn(ix+1, iy+1, iz+1, si);
 
 			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
+			snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 							   "%s%d pressure PZZ from iPIC3D\n"
 							   "BINARY\n"
 							   "DATASET STRUCTURED_POINTS\n"
@@ -1267,7 +1267,7 @@ int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
 					  }
 
 			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
+			 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Magnetic Field from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -1287,7 +1287,7 @@ int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
 					  }
 
 			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
+			 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Electric Field from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -1307,7 +1307,7 @@ int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
 					  }
 
 			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
+			 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Electron current from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -1327,7 +1327,7 @@ int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
 					  }
 
 			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
+			 snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 						   "Ion current from iPIC3D\n"
 						   "BINARY\n"
 						   "DATASET STRUCTURED_POINTS\n"
@@ -1414,7 +1414,7 @@ int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, V
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getRHOns(ix+1, iy+1, iz+1, si)*4*3.1415926535897;
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s density from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1432,7 +1432,7 @@ int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, V
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXXsn(ix+1, iy+1, iz+1, si);
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s pressure PXX from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1450,7 +1450,7 @@ int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, V
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXYsn(ix+1, iy+1, iz+1, si);
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s pressure PXY from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1468,7 +1468,7 @@ int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, V
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXZsn(ix+1, iy+1, iz+1, si);
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s pressure PXZ from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1486,7 +1486,7 @@ int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, V
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYYsn(ix+1, iy+1, iz+1, si);
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s pressure PYY from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1504,7 +1504,7 @@ int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, V
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYZsn(ix+1, iy+1, iz+1, si);
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s pressure PYZ from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"
@@ -1522,7 +1522,7 @@ int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, V
 						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpZZsn(ix+1, iy+1, iz+1, si);
 
 				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
+				snprintf(header, sizeof(header), "# vtk DataFile Version 2.0\n"
 								   "%s pressure PZZ from iPIC3D\n"
 								   "BINARY\n"
 								   "DATASET STRUCTURED_POINTS\n"

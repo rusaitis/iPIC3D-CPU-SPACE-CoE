@@ -674,6 +674,8 @@ bool c_Solver::ParticlesMover()
             case Parameters::AoS:
                 particles[i].ECSIM_position(EMf);
             break;
+            default:
+            break;
         }
 
         //* Should integrate BC into separate_and_send_particles
@@ -984,7 +986,7 @@ void c_Solver::WriteOutput(int cycle)
                         for (int iu=0; iu<N_bins-1; iu++)
                             du[iu] = uDist[iu+1] - uDist[iu];
             
-                        sprintf(place,"%s/uDist_%d.txt",dirtxt,is);
+                        snprintf(place, sizeof(place), "%s/uDist_%d.txt",dirtxt,is);
                         fd = fopen(place,"w");
                         
                         for (int iu=0; iu<N_bins; iu++)
@@ -998,7 +1000,7 @@ void c_Solver::WriteOutput(int cycle)
                     // Output this species' distribution to txt
                     if (myrank == 0) 
                     {
-                        sprintf(place, "%s/fDist_%d_%06d.txt", dirtxt, is, cycle);
+                        snprintf(place, sizeof(place), "%s/fDist_%d_%06d.txt", dirtxt, is, cycle);
                         fd = fopen(place, "w");
                         
                         for (int iu = 0; iu < N_bins-1; iu++)
