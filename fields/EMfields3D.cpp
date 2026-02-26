@@ -39,7 +39,7 @@
 #include "ipicmath.h" // for roundup_to_multiple
 #include "Alloc.h"
 #ifdef USE_PETSC
-#include "PetscSolver.h"
+#include "PETSC.h"
 #endif
 #include "asserts.h"
 #include <iomanip>

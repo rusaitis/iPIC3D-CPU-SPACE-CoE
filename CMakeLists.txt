@@ -120,8 +120,20 @@ endif()
 ############### PETSc ###############
 
 if(USE_PETSC)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(PETSC REQUIRED IMPORTED_TARGET PETSc)
+    find_package(PkgConfig QUIET)
+    if(NOT PkgConfig_FOUND)
+        message(FATAL_ERROR
+            "USE_PETSC=ON requires pkg-config to locate PETSc, but pkg-config was not found.\n"
+            "  Install it (e.g. 'brew install pkg-config' or 'apt install pkg-config'),\n"
+            "  then re-run CMake.")
+    endif()
+    pkg_check_modules(PETSC QUIET IMPORTED_TARGET PETSc)
+    if(NOT PETSC_FOUND)
+        message(FATAL_ERROR
+            "USE_PETSC=ON but PETSc was not found by pkg-config.\n"
+            "  Install PETSc (e.g. 'brew install petsc') or set PKG_CONFIG_PATH to include\n"
+            "  the directory containing PETSc.pc (typically <petsc-prefix>/lib/pkgconfig).")
+    endif()
     message(STATUS "PETSc found: ${PETSC_PREFIX}")
 endif()
 

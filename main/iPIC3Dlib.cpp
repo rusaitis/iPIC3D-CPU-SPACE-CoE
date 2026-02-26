@@ -56,7 +56,7 @@
 #endif
 
 #ifdef USE_PETSC
-    #include "PetscSolver.h"
+    #include "PETSC.h"
 #endif
 
 using namespace iPic3D;

@@ -1,5 +1,5 @@
 /***************************************************************************
-  PetscSolver.cpp  -  PETSc KSP solver for the implicit Maxwell system
+  PETSC.cpp  -  PETSc KSP solver for the implicit Maxwell system
   -------------------
   Matrix-free method: uses EMfields3D::MaxwellImage() as the A*x product,
   identical to the built-in GMRES solver.
@@ -7,7 +7,7 @@
 
 #ifdef USE_PETSC
 
-#include "PetscSolver.h"
+#include "PETSC.h"
 #include "EMfields3D.h"
 
 /*****************************/

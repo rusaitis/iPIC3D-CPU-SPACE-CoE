@@ -1250,38 +1250,58 @@ void Collective::read_particles_restart(const VCtopology3D* vct, int species_num
 
 
 /*! constructor */
-Collective::Collective(int argc, char **argv) 
+Collective::Collective(int argc, char **argv)
 {
-    if (argc < 2) 
-    {
-        inputfile = "inputfile";
-        RESTART1 = false;
+    // Collect positional arguments (skip flags like -solver, -ksp_type, etc.)
+    // Positional args are: [inputfile] [restart]
+    vector<string> positional;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            i++; // skip the flag's value too
+            continue;
+        }
+        positional.push_back(argv[i]);
     }
-    else if (argc < 3) 
-    {
-        inputfile = argv[1];
-        RESTART1 = false;
+
+    inputfile = "inputfile";
+    RESTART1 = false;
+
+    if (positional.empty()) {
+        // no args: use default
     }
-    else 
-    {
-        if (strcmp(argv[1], "restart") == 0) 
-        {
-            inputfile = argv[2];
+    else if (positional.size() == 1) {
+        if (positional[0] == "restart") {
+            RESTART1 = true;
+        } else {
+            inputfile = positional[0];
+        }
+    }
+    else {
+        // two positional args: inputfile and restart (in either order)
+        if (positional[0] == "restart") {
+            inputfile = positional[1];
             RESTART1 = true;
         }
-        else if (strcmp(argv[2], "restart") == 0) 
-        {
-            inputfile = argv[1];
+        else if (positional[1] == "restart") {
+            inputfile = positional[0];
             RESTART1 = true;
         }
-        else 
-        {
-            cout << "Error: syntax error in mpirun arguments. Did you mean to write 'restart' ?" << endl;
-            return;
+        else {
+            inputfile = positional[0];
+            cout << "Warning: ignoring unexpected positional argument '" << positional[1] << "'" << endl;
         }
     }
 
     ReadInput(inputfile);
+
+    // Command-line override: -solver GMRES  or  -solver PETSc
+    for (int i = 1; i < argc - 1; i++) {
+        if (strcmp(argv[i], "-solver") == 0) {
+            SolverType = argv[i + 1];
+            break;
+        }
+    }
+
     init_derived_parameters();
 }
 

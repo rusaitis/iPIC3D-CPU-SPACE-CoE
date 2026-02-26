@@ -1,9 +1,9 @@
 /***************************************************************************
-  PetscSolver.h  -  PETSc KSP solver for the implicit Maxwell system
+  PETSC.h  -  PETSc KSP solver for the implicit Maxwell system
  ***************************************************************************/
 
-#ifndef PETSCSOLVER_H
-#define PETSCSOLVER_H
+#ifndef PETSC_H
+#define PETSC_H
 #ifdef USE_PETSC
 
 #include <petscksp.h>
@@ -34,4 +34,4 @@ private:
 PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y);
 
 #endif // USE_PETSC
-#endif // PETSCSOLVER_H
+#endif // PETSC_H
