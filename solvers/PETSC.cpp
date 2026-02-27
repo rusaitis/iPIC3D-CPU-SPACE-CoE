@@ -10,96 +10,111 @@
 #include "PETSC.h"
 #include "EMfields3D.h"
 
-/*****************************/
-/*  Matrix-free A*x callback */
-/*****************************/
+/*  Matrix-free A*x callback: computes y = A*x.
+ *  PETSc calls this whenever the KSP solver needs a matrix-vector product.
+ *
+ *  A   — shell matrix (carries our context, not actual matrix entries)
+ *  x   — input vector  (Krylov basis vector)
+ *  y   — output vector (result of A*x)
+ */
 PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y)
 {
+    PetscFunctionBeginUser;
+
     PetscSolverContext *ctx;
-    MatShellGetContext(A, &ctx);
+    PetscCall(MatShellGetContext(A, &ctx));
 
-    const double *d_x;
-    double *d_y;
-    VecGetArrayRead(x, &d_x);
-    VecGetArray(y, &d_y);
+    const double *d_x;  // raw read-only pointer into x's data
+    double       *d_y;  // raw writable   pointer into y's data
+    PetscCall(VecGetArrayRead(x, &d_x));
+    PetscCall(VecGetArray(y, &d_y));
 
-    // MaxwellImage takes (double*, double*) but does not modify the input vector.
-    // const_cast is safe here.
+    // const_cast is safe: MaxwellImage's signature lacks const, but it only reads the input.
     ctx->emf->MaxwellImage(d_y, const_cast<double*>(d_x));
 
-    VecRestoreArrayRead(x, &d_x);
-    VecRestoreArray(y, &d_y);
+    PetscCall(VecRestoreArrayRead(x, &d_x));
+    PetscCall(VecRestoreArray(y, &d_y));
 
-    return 0;
+    PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-/*****************************/
-/*  Constructor              */
-/*****************************/
+/*  Constructor
+ *
+ *  localSize — number of unknowns on this MPI rank (3 E-field components per interior node)
+ *  emf       — the EMfields3D object whose MaxwellImage() provides the A*x product
+ *  tol       — relative convergence tolerance (same GMREStol used by the built-in GMRES)
+ */
 PetscSolver::PetscSolver(int localSize, EMfields3D *emf, double tol)
-    : localSize_(localSize)
+    : localSize_(localSize), petsc_x_(nullptr), petsc_b_(nullptr)
 {
     ctx_.emf = emf;
 
-    // Create matrix-free shell matrix
-    MatCreateShell(PETSC_COMM_WORLD, localSize_, localSize_,
-                   PETSC_DETERMINE, PETSC_DETERMINE, &ctx_, &A_);
+    // Matrix-free shell: PETSc calls PetscMaxwellMatMult for A*x products
+    PetscCallAbort(PETSC_COMM_WORLD,
+        MatCreateShell(PETSC_COMM_WORLD, localSize_, localSize_,
+                       PETSC_DETERMINE, PETSC_DETERMINE, &ctx_, &A_));
     MatShellSetOperation(A_, MATOP_MULT, (void(*)(void))PetscMaxwellMatMult);
-    MatSetFromOptions(A_);
-    MatAssemblyBegin(A_, MAT_FINAL_ASSEMBLY);
-    MatAssemblyEnd(A_, MAT_FINAL_ASSEMBLY);
 
-    // Create KSP solver
-    KSPCreate(PETSC_COMM_WORLD, &ksp_);
-    KSPSetType(ksp_, KSPGMRES);
-    KSPSetInitialGuessNonzero(ksp_, PETSC_TRUE);
-    KSPSetOperators(ksp_, A_, A_);
-    KSPSetTolerances(ksp_, tol, 1e-17, 10000, 1000);
-    KSPSetFromOptions(ksp_);  // allows runtime override via -ksp_type, -pc_type, etc.
-    KSPSetUp(ksp_);
+    // KSP solver setup
+    // Match the built-in GMRES defaults: restart=20, max 50 restarts (= 1000 total iterations)
+    PetscCallAbort(PETSC_COMM_WORLD, KSPCreate(PETSC_COMM_WORLD, &ksp_));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetType(ksp_, KSPGMRES));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGMRESSetRestart(ksp_, 20));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetInitialGuessNonzero(ksp_, PETSC_TRUE));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(ksp_, A_, A_));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetTolerances(ksp_, tol, PETSC_DEFAULT, PETSC_DEFAULT, 1000));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetFromOptions(ksp_));  // allows runtime override via -ksp_type, -ksp_rtol, etc.
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetUp(ksp_));
+
+    // Pre-allocate PETSc Vec wrappers with no underlying array yet.
+    // In solve(), VecPlaceArray/VecResetArray swap in the caller's arrays (zero-copy).
+    // petsc_x_ — solution vector (E-field unknowns, read/write)
+    // petsc_b_ — right-hand side vector (Maxwell source, read-only)
+    PetscCallAbort(PETSC_COMM_WORLD,
+        VecCreateMPIWithArray(PETSC_COMM_WORLD, 1, localSize_, PETSC_DECIDE, nullptr, &petsc_x_));
+    PetscCallAbort(PETSC_COMM_WORLD,
+        VecCreateMPIWithArray(PETSC_COMM_WORLD, 1, localSize_, PETSC_DECIDE, nullptr, &petsc_b_));
 }
 
-/*****************************/
-/*  Destructor               */
-/*****************************/
+/*  Destructor  */
 PetscSolver::~PetscSolver()
 {
-    KSPDestroy(&ksp_);
-    MatDestroy(&A_);
+    PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&petsc_x_));
+    PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&petsc_b_));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPDestroy(&ksp_));
+    PetscCallAbort(PETSC_COMM_WORLD, MatDestroy(&A_));
 }
 
-/*****************************/
-/*  Solve                    */
-/*****************************/
+/*  Solve  */
 void PetscSolver::solve(double *x, int size, const double *b)
 {
-    // Wrap user arrays as PETSc Vecs (zero-copy)
-    Vec petsc_x, petsc_b;
-    VecCreateMPIWithArray(PETSC_COMM_WORLD, 1, size, PETSC_DECIDE, x, &petsc_x);
-    VecCreateMPIWithArray(PETSC_COMM_WORLD, 1, size, PETSC_DECIDE, b, &petsc_b);
+    // Point the pre-allocated Vecs at the caller's arrays (zero-copy)
+    PetscCallAbort(PETSC_COMM_WORLD, VecPlaceArray(petsc_x_, x));
+    PetscCallAbort(PETSC_COMM_WORLD, VecPlaceArray(petsc_b_, b));
 
-    // Solve
-    KSPSolve(ksp_, petsc_b, petsc_x);
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSolve(ksp_, petsc_b_, petsc_x_));
 
     // Report convergence
     PetscInt iter;
     PetscReal residual;
-    KSPGetIterationNumber(ksp_, &iter);
-    KSPGetResidualNorm(ksp_, &residual);
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGetIterationNumber(ksp_, &iter));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGetResidualNorm(ksp_, &residual));
 
     KSPConvergedReason reason;
-    KSPGetConvergedReason(ksp_, &reason);
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGetConvergedReason(ksp_, &reason));
     if (reason > 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "PETSc KSP converged in %d iterations, residual = %e\n",
-                    (int)iter, (double)residual);
+        PetscCallAbort(PETSC_COMM_WORLD,
+            PetscPrintf(PETSC_COMM_WORLD, "PETSc KSP converged in %d iterations, residual = %e\n",
+                        (int)iter, (double)residual));
     } else {
-        PetscPrintf(PETSC_COMM_WORLD, "WARNING: PETSc KSP did NOT converge (reason=%d) after %d iterations, residual = %e\n",
-                    (int)reason, (int)iter, (double)residual);
+        PetscCallAbort(PETSC_COMM_WORLD,
+            PetscPrintf(PETSC_COMM_WORLD, "WARNING: PETSc KSP did NOT converge (reason=%d) after %d iterations, residual = %e\n",
+                        (int)reason, (int)iter, (double)residual));
     }
 
-    // Destroy temporary Vec wrappers (does NOT free the underlying arrays)
-    VecDestroy(&petsc_x);
-    VecDestroy(&petsc_b);
+    // Release the caller's arrays from the Vecs (does NOT free them)
+    PetscCallAbort(PETSC_COMM_WORLD, VecResetArray(petsc_x_));
+    PetscCallAbort(PETSC_COMM_WORLD, VecResetArray(petsc_b_));
 }
 
 #endif // USE_PETSC

@@ -29,6 +29,8 @@ private:
     PetscSolverContext ctx_;
     Mat A_;
     KSP ksp_;
+    Vec petsc_x_;   // persistent Vec wrappers (zero-copy, reused across solves)
+    Vec petsc_b_;
 };
 
 PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y);
