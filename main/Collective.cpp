@@ -1252,54 +1252,48 @@ void Collective::read_particles_restart(const VCtopology3D* vct, int species_num
 /*! constructor */
 Collective::Collective(int argc, char **argv)
 {
-    // Collect positional arguments (skip flags like -solver, -ksp_type, etc.)
+    // Parse command line: separate positional args from flags.
+    // Flags start with '-' and may have a value (e.g. -solver PETSc, -ksp_type gmres).
+    // Standalone flags like -ksp_monitor (no value) are also supported.
     // Positional args are: [inputfile] [restart]
     vector<string> positional;
+    string solver_override;
+
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
-            i++; // skip the flag's value too
+            string flag = argv[i];
+
+            // Peek ahead: if next arg exists and doesn't start with '-',
+            // treat it as this flag's value
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                string value = argv[i + 1];
+                if (flag == "-solver") solver_override = value;
+                i++; // skip the value
+            }
             continue;
         }
         positional.push_back(argv[i]);
     }
 
+    // Resolve positional args: [inputfile] [restart] in either order
     inputfile = "inputfile";
     RESTART1 = false;
 
-    if (positional.empty()) {
-        // no args: use default
-    }
-    else if (positional.size() == 1) {
-        if (positional[0] == "restart") {
+    for (const auto &arg : positional) {
+        if (arg == "restart") {
             RESTART1 = true;
+        } else if (inputfile == "inputfile") {
+            inputfile = arg;
         } else {
-            inputfile = positional[0];
-        }
-    }
-    else {
-        // two positional args: inputfile and restart (in either order)
-        if (positional[0] == "restart") {
-            inputfile = positional[1];
-            RESTART1 = true;
-        }
-        else if (positional[1] == "restart") {
-            inputfile = positional[0];
-            RESTART1 = true;
-        }
-        else {
-            inputfile = positional[0];
-            cout << "Warning: ignoring unexpected positional argument '" << positional[1] << "'" << endl;
+            cout << "Warning: ignoring unexpected argument '" << arg << "'" << endl;
         }
     }
 
     ReadInput(inputfile);
 
-    // Command-line override: -solver GMRES  or  -solver PETSc
-    for (int i = 1; i < argc - 1; i++) {
-        if (strcmp(argv[i], "-solver") == 0) {
-            SolverType = argv[i + 1];
-            break;
-        }
+    // Command-line -solver flag overrides input file SolverType
+    if (!solver_override.empty()) {
+        SolverType = solver_override;
     }
 
     init_derived_parameters();
