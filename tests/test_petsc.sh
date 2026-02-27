@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-# ─────────────────────────── defaults ───────────────────────────
+# --------------------------- defaults ----------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXECUTABLE="$PROJECT_DIR/build/iPIC3D"
@@ -31,7 +31,7 @@ XLEN=""       # MPI decomposition X (empty = use input file default)
 YLEN=""       # MPI decomposition Y (empty = use input file default)
 TMPDIR_BASE=$(mktemp -d "${TMPDIR:-/tmp}/ipic3d_test_petsc.XXXXXX")
 
-# ─────────────────────────── parse args ─────────────────────────
+# --------------------------- parse args --------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --np)      NP="$2";         shift 2 ;;
@@ -46,7 +46,41 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ─────────────────────────── checks ─────────────────────────────
+# If --topo was not given, auto-compute XLEN * YLEN = NP (ZLEN=1).
+# Picks the most square-like factorization.
+if [[ -z "$XLEN" || -z "$YLEN" ]]; then
+    YLEN=$(python3 -c "
+import math
+n = $NP
+best = (1, n)
+for i in range(1, int(math.isqrt(n)) + 1):
+    if n % i == 0:
+        best = (i, n // i)
+print(best[0])
+")
+    XLEN=$(( NP / YLEN ))
+fi
+
+# If --grid was not given, ensure the input file grid is divisible by the topology.
+# Read nxc/nyc from the input file and round up to the nearest multiple if needed.
+if [[ -z "$NXC" ]]; then
+    file_nxc=$(grep -m1 '^nxc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')
+    file_nxc=${file_nxc:-100}
+    rem=$((file_nxc % XLEN))
+    if [[ $rem -ne 0 ]]; then
+        NXC=$(( file_nxc + XLEN - rem ))
+    fi
+fi
+if [[ -z "$NYC" ]]; then
+    file_nyc=$(grep -m1 '^nyc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')
+    file_nyc=${file_nyc:-100}
+    rem=$((file_nyc % YLEN))
+    if [[ $rem -ne 0 ]]; then
+        NYC=$(( file_nyc + YLEN - rem ))
+    fi
+fi
+
+# --------------------------- checks ------------------------------
 if [[ ! -x "$EXECUTABLE" ]]; then
     echo "ERROR: Executable not found at $EXECUTABLE"
     echo "       Build first with:  ./build.sh --petsc"
@@ -58,7 +92,7 @@ if [[ ! -f "$INPUT_FILE" ]]; then
     exit 1
 fi
 
-# ─────────────────────────── helpers ────────────────────────────
+# --------------------------- helpers -----------------------------
 cleanup() { rm -rf "$TMPDIR_BASE"; }
 trap cleanup EXIT
 
@@ -110,14 +144,14 @@ run_sim() {
     inp=$(make_test_input "$rundir")
     local logfile="$rundir/output.log"
 
-    echo "──────────────────────────────────────────────────────────"
+    echo "------------------------------------------------------------"
     echo "  Running: $label"
     echo "  Solver:  $solver"
     if [[ ${#extra_args[@]} -gt 0 ]]; then
         echo "  PETSc flags: ${extra_args[*]}"
     fi
     echo "  Processes: $NP,  Cycles: $CYCLES"
-    echo "──────────────────────────────────────────────────────────"
+    echo "------------------------------------------------------------"
 
     local start_time
     start_time=$(date +%s.%N 2>/dev/null || python3 -c 'import time; print(time.time())')
@@ -212,9 +246,9 @@ extract_convergence() {
     fi
 }
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 #                          MAIN
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 echo ""
 GRID_INFO=""
 if [[ -n "$NXC" && -n "$NYC" ]]; then
@@ -222,26 +256,30 @@ if [[ -n "$NXC" && -n "$NYC" ]]; then
 else
     GRID_INFO="Grid: (from input file)"
 fi
-echo "╔═══════════════════════════════════════════════════════════════╗"
-echo "║          iPIC3D Solver Comparison: GMRES vs PETSc           ║"
-echo "╠═══════════════════════════════════════════════════════════════╣"
-printf "║  Input:  %-52s║\n" "$(basename "$INPUT_FILE")"
-printf "║  Procs:  %-4d   Cycles: %-4d   %-26s║\n" "$NP" "$CYCLES" "$GRID_INFO"
-echo "╚═══════════════════════════════════════════════════════════════╝"
+BOX_W=63
+box_border=$(printf -- '-%.0s' $(seq 1 $BOX_W))
+box_title="iPIC3D Solver Comparison: GMRES vs PETSc"
+box_pad=$(( (BOX_W - ${#box_title}) / 2 ))
+echo "+${box_border}+"
+printf "|%*s%-*s|\n" $box_pad "" $((BOX_W - box_pad)) "$box_title"
+echo "+${box_border}+"
+printf "|%-${BOX_W}s|\n" "  Input: $(basename "$INPUT_FILE")"
+printf "|%-${BOX_W}s|\n" "  Procs: $NP   Cycles: $CYCLES   $GRID_INFO"
+echo "+${box_border}+"
 echo ""
 
 # List of all run labels (used for results loop)
 ALL_RUNS=()
 
-# ── Run 1: Built-in GMRES ──
+# --Run 1: Built-in GMRES ──
 run_sim "GMRES" "GMRES"
 ALL_RUNS+=("GMRES")
 
-# ── Run 2: PETSc default (GMRES + no preconditioner) ──
+# --Run 2: PETSc default (GMRES + no preconditioner) ──
 run_sim "PETSc_gmres" "PETSc"
 ALL_RUNS+=("PETSc_gmres")
 
-# ── Run 3: PETSc FGMRES with larger restart ──
+# --Run 3: PETSc FGMRES with larger restart ──
 run_sim "PETSc_fgmres" "PETSc" \
     -ksp_type fgmres \
     -ksp_gmres_restart 50 \
@@ -249,53 +287,51 @@ run_sim "PETSc_fgmres" "PETSc" \
 
 ALL_RUNS+=("PETSc_fgmres")
 
-# ── Run 4: PETSc BiCGStab ──
+# --Run 4: PETSc BiCGStab ──
 run_sim "PETSc_bcgs" "PETSc" \
     -ksp_type bcgs \
     -ksp_max_it 1000
 
 ALL_RUNS+=("PETSc_bcgs")
 
-# ── Run 5: PETSc TFQMR ──
+# --Run 5: PETSc TFQMR ──
 run_sim "PETSc_tfqmr" "PETSc" \
     -ksp_type tfqmr \
     -ksp_max_it 1000
 
 ALL_RUNS+=("PETSc_tfqmr")
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 #                        RESULTS
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║                     RESULTS                             ║"
-echo "╚══════════════════════════════════════════════════════════╝"
+echo "========================= RESULTS ========================="
 echo ""
 
-# ── Convergence ──
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# --Convergence ──
+echo "--------------------------------------------------------"
 echo "  CONVERGENCE"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "--------------------------------------------------------"
 for label in "${ALL_RUNS[@]}"; do
     local_log="LOG_${label}"
     extract_convergence "${!local_log}" "$label"
     echo ""
 done
 
-# ── Timing ──
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# --Timing ──
+echo "--------------------------------------------------------"
 echo "  TIMING"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "--------------------------------------------------------"
 for label in "${ALL_RUNS[@]}"; do
     local_log="LOG_${label}"
     extract_timing "${!local_log}" "$label"
     echo ""
 done
 
-# ── Comparison table ──
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# --Comparison table ──
+echo "-------------------------------------------------------------------------------"
 echo "  COMPARISON SUMMARY"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "-------------------------------------------------------------------------------"
 
 # Header row
 printf "  %-20s" ""
@@ -303,9 +339,9 @@ for label in "${ALL_RUNS[@]}"; do
     printf " %14s" "$label"
 done
 echo ""
-printf "  %-20s" "────────────────────"
+printf "  %-20s" "--------------------"
 for label in "${ALL_RUNS[@]}"; do
-    printf " %14s" "──────────────"
+    printf " %14s" "--------------"
 done
 echo ""
 
@@ -334,7 +370,7 @@ done
 echo ""
 echo ""
 
-# ── Speedup vs GMRES ──
+# --Speedup vs GMRES ──
 echo "  Speedup vs built-in GMRES (field solver time):"
 {
     # Write label=field_time pairs to a temp file for Python
@@ -361,7 +397,7 @@ if base:
 }
 echo ""
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "--------------------------------------------------------"
 echo "  Logs saved in: $TMPDIR_BASE"
 echo "  (Will be cleaned up on exit)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "--------------------------------------------------------"
