@@ -1,11 +1,9 @@
-on: {}
 name: Build via EasyBuild on x86 and Arm
+
 on:
-  workflow_dispatch:  # Allows manual triggering
+  workflow_dispatch:
   push:
   pull_request:
-    branches:
-      - main
 # Declare default permissions as read only.
 permissions: read-all
 jobs:

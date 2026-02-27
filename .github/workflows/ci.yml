@@ -1,0 +1,92 @@
+name: CI Build
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches-ignore:
+      - main
+
+jobs:
+  build-default:
+    name: Default build (GMRES only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libopenmpi-dev libhdf5-openmpi-dev pkg-config
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=mpicc \
+            -DCMAKE_CXX_COMPILER=mpicxx
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Create CI input file
+        run: |
+          sed \
+            -e 's/^ncycles.*/ncycles = 3/' \
+            -e 's/^nxc.*/nxc = 20/' \
+            -e 's/^nyc.*/nyc = 20/' \
+            -e 's/^XLEN.*/XLEN = 2/' \
+            -e 's/^YLEN.*/YLEN = 2/' \
+            -e 's/^FieldOutputCycle.*/FieldOutputCycle = 0/' \
+            -e 's/^ParticlesOutputCycle.*/ParticlesOutputCycle = 0/' \
+            -e 's/^RestartOutputCycle.*/RestartOutputCycle = 0/' \
+            -e 's|^SaveDirName.*|SaveDirName = /tmp/ipic3d_ci|' \
+            -e 's|^RestartDirName.*|RestartDirName = /tmp/ipic3d_ci|' \
+            inputfiles/Double_Harris.inp > /tmp/ci_test.inp
+          mkdir -p /tmp/ipic3d_ci
+
+      - name: Smoke test (3 cycles)
+        run: mpirun --oversubscribe -np 4 build/iPIC3D /tmp/ci_test.inp
+
+  build-petsc:
+    name: PETSc build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libopenmpi-dev libhdf5-openmpi-dev pkg-config libpetsc-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=mpicc \
+            -DCMAKE_CXX_COMPILER=mpicxx \
+            -DUSE_PETSC=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Create CI input file
+        run: |
+          sed \
+            -e 's/^ncycles.*/ncycles = 3/' \
+            -e 's/^nxc.*/nxc = 20/' \
+            -e 's/^nyc.*/nyc = 20/' \
+            -e 's/^XLEN.*/XLEN = 2/' \
+            -e 's/^YLEN.*/YLEN = 2/' \
+            -e 's/^FieldOutputCycle.*/FieldOutputCycle = 0/' \
+            -e 's/^ParticlesOutputCycle.*/ParticlesOutputCycle = 0/' \
+            -e 's/^RestartOutputCycle.*/RestartOutputCycle = 0/' \
+            -e 's|^SaveDirName.*|SaveDirName = /tmp/ipic3d_ci|' \
+            -e 's|^RestartDirName.*|RestartDirName = /tmp/ipic3d_ci|' \
+            inputfiles/Double_Harris.inp > /tmp/ci_test.inp
+          mkdir -p /tmp/ipic3d_ci
+
+      - name: Smoke test — GMRES (3 cycles)
+        run: mpirun --oversubscribe -np 4 build/iPIC3D /tmp/ci_test.inp -solver GMRES
+
+      - name: Smoke test — PETSc (3 cycles)
+        run: mpirun --oversubscribe -np 4 build/iPIC3D /tmp/ci_test.inp -solver PETSc
