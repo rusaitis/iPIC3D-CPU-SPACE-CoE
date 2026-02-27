@@ -10,6 +10,10 @@ build.sh
 PLAN.md
 NOTES.md
 
+# Test artifacts
+tests/*.png
+tests/*.csv
+
 # Eclipse IDE
 .cproject
 .project
