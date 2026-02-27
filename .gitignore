@@ -5,8 +5,6 @@ Release*/
 data*/
 
 # Local build and notes
-build-script.sh
-build.sh
 PLAN.md
 NOTES.md
 
