@@ -3,7 +3,11 @@ name: Build via EasyBuild on x86 and Arm
 on:
   workflow_dispatch:
   push:
+    branches-ignore:
+      - main
   pull_request:
+    branches-ignore:
+      - main
 # Declare default permissions as read only.
 permissions: read-all
 jobs:
