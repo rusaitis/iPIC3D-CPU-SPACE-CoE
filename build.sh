@@ -141,6 +141,28 @@ pkg_config_prefix() {
   pkg-config --variable=prefix "$1" 2>/dev/null
 }
 
+# Print a cmake command array in copy-pasteable format
+print_cmake_cmd() {
+  printf "  cmake"
+  for arg in "$@"; do
+    case "$arg" in
+      -*)
+        if [[ "$arg" == *" "* || "$arg" == *";"* ]]; then
+          printf " \\\\\n    \"%s\"" "$arg"
+        else
+          printf " \\\\\n    %s" "$arg"
+        fi ;;
+      *)
+        if [[ "$arg" == *" "* || "$arg" == *";"* ]]; then
+          printf " \"%s\"" "$arg"
+        else
+          printf " %s" "$arg"
+        fi ;;
+    esac
+  done
+  echo ""
+}
+
 OS="$(uname -s)"
 
 # ─────────────────────────── resolve HDF5 ───────────────────────
@@ -201,17 +223,14 @@ if [[ "$MPI_EXPLICIT" -eq 1 ]]; then
   [[ -n "$CC" && -n "$CXX" ]] || { echo "Error: compilers not found on PATH" >&2; exit 1; }
 fi
 
-# ─────────────────────────── generator ──────────────────────────
-declare -a GENERATOR_ARGS=()
-if [[ "$USE_NINJA" -eq 1 ]]; then
-  command -v ninja >/dev/null 2>&1 || { echo "Error: --ninja requested but 'ninja' not found" >&2; exit 1; }
-  GENERATOR_ARGS=(-G Ninja)
-fi
-
 # ─────────────────────────── summary ────────────────────────────
 echo "Build dir: $BUILD_DIR"
 echo "Type:      $BUILD_TYPE"
-echo "Generator: ${GENERATOR_ARGS[*]:-default}"
+if [[ "$USE_NINJA" -eq 1 ]]; then
+  echo "Generator: Ninja"
+else
+  echo "Generator: default (Make)"
+fi
 echo "CC:        $CC"
 echo "CXX:       $CXX"
 
@@ -223,10 +242,13 @@ fi
 mkdir -p -- "$BUILD_DIR"
 
 # ─────────────────────────── CMake args ─────────────────────────
-declare -a CMAKE_ARGS=()
-if [[ ${#GENERATOR_ARGS[@]} -gt 0 ]]; then
-  CMAKE_ARGS+=("${GENERATOR_ARGS[@]}")
+CMAKE_ARGS=()
+
+if [[ "$USE_NINJA" -eq 1 ]]; then
+  command -v ninja >/dev/null 2>&1 || { echo "Error: --ninja requested but 'ninja' not found" >&2; exit 1; }
+  CMAKE_ARGS+=(-G Ninja)
 fi
+
 CMAKE_ARGS+=(
   -S . -B "$BUILD_DIR"
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
@@ -276,37 +298,14 @@ if [[ "$USE_PETSC" -eq 1 ]]; then
 fi
 
 # ─────────────────────────── build ──────────────────────────────
-
-# Print the full cmake command so users can copy/paste it later
 echo ""
-echo "CMake command:"
-printf "  cmake"
-for arg in "${CMAKE_ARGS[@]}"; do
-  case "$arg" in
-    -*)
-      # Quote args that contain spaces or semicolons
-      if [[ "$arg" == *" "* || "$arg" == *";"* ]]; then
-        printf " \\\\\n    \"%s\"" "$arg"
-      else
-        printf " \\\\\n    %s" "$arg"
-      fi ;;
-    *)
-      if [[ "$arg" == *" "* || "$arg" == *";"* ]]; then
-        printf " \"%s\"" "$arg"
-      else
-        printf " %s" "$arg"
-      fi ;;
-  esac
-done
+echo "Configure:"
+print_cmake_cmd "${CMAKE_ARGS[@]}"
 echo ""
-echo ""
-
 cmake "${CMAKE_ARGS[@]}"
 
-BUILD_CMD="cmake --build $BUILD_DIR --parallel"
 echo ""
-echo "Build command:"
-echo "  $BUILD_CMD"
+echo "Build:"
+echo "  cmake --build $BUILD_DIR --parallel"
 echo ""
-
-$BUILD_CMD
+cmake --build "$BUILD_DIR" --parallel
