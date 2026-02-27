@@ -10,8 +10,11 @@ on:
 
 jobs:
   build-default:
-    name: Default build (GMRES only)
-    runs-on: ubuntu-24.04
+    name: Default build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
 
@@ -49,8 +52,11 @@ jobs:
         run: mpirun --oversubscribe -np 4 build/iPIC3D /tmp/ci_test.inp
 
   build-petsc:
-    name: PETSc build
-    runs-on: ubuntu-24.04
+    name: PETSc build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
 
