@@ -1270,6 +1270,17 @@ Collective::Collective(int argc, char **argv)
                 if (flag == "-solver") solver_override = value;
                 i++; // skip the value
             }
+
+            // iPIC3D only recognises -solver; PETSc flags (-ksp_*, -pc_*, -mat_*,
+            // -vec_*, -snes_*, -log_*, -options_*) are passed through to PETSc
+            // via KSPSetFromOptions.  Warn about anything else.
+            if (flag != "-solver"
+                && flag.substr(0, 4) != "-ksp" && flag.substr(0, 3) != "-pc"
+                && flag.substr(0, 4) != "-mat" && flag.substr(0, 4) != "-vec"
+                && flag.substr(0, 5) != "-snes" && flag.substr(0, 4) != "-log"
+                && flag.substr(0, 8) != "-options") {
+                cout << "Warning: unrecognized flag '" << flag << "'" << endl;
+            }
             continue;
         }
         positional.push_back(argv[i]);
@@ -1291,9 +1302,17 @@ Collective::Collective(int argc, char **argv)
 
     ReadInput(inputfile);
 
-    // Command-line -solver flag overrides input file SolverType
+    // Command-line -solver flag overrides input file SolverType.
+    // Normalize case: accept "petsc", "PETSC", "Petsc", etc.
     if (!solver_override.empty()) {
-        SolverType = solver_override;
+        string lower;
+        for (char c : solver_override) lower += tolower(c);
+        if (lower == "petsc")
+            SolverType = "PETSc";
+        else if (lower == "gmres")
+            SolverType = "GMRES";
+        else
+            SolverType = solver_override; // let validation catch invalid values
     }
 
     init_derived_parameters();
