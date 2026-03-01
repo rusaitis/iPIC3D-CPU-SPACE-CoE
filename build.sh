@@ -6,42 +6,55 @@ set -euo pipefail
 # Usage:
 #   ./build.sh [build_dir] [build_type] [options...]
 #
+#   build_dir   Output directory for build files (default: build)
+#   build_type  CMake build type: Debug | Release | RelWithDebInfo | MinSizeRel
+#               (default: Release)
+#
 # Examples:
-#   ./build.sh                                          # defaults: build/ Release
-#   ./build.sh build Release --ninja
-#   ./build.sh build RelWithDebInfo --clean
+#   ./build.sh                                          # build/ Release
+#   ./build.sh build-debug Debug                        # custom dir and build type
+#   ./build.sh build RelWithDebInfo --clean             # clean rebuild for profiling
 #   ./build.sh --petsc                                  # enable PETSc solver
 #   ./build.sh --hdf5-prefix /opt/hdf5                  # explicit HDF5 path
 #
-# Build types:
-#   Debug | Release | RelWithDebInfo | MinSizeRel
+# Build types (standard CMake, controls compiler flags):
+#   Release        -O3, no debug info         — production runs
+#   Debug          -O0, full debug info (-g)  — debugging with gdb/lldb
+#   RelWithDebInfo -O2, full debug info (-g)  — profiling
+#   MinSizeRel     -Os, no debug info         — minimise binary size
 #
-# Options:
+# Common options:
 #   --petsc                Enable PETSc solver (USE_PETSC=ON)
 #   --clean                Delete build dir before configuring
-#   --ninja                Use Ninja generator (requires: ninja on PATH)
-#   --hdf5-prefix PATH     Explicit HDF5 prefix (skips auto-detection)
-#   --hdf5-formula NAME    Homebrew formula for HDF5 (default: hdf5-mpi)
-#   --omp-prefix PATH      Explicit libomp prefix (macOS only — AppleClang needs this
-#                            to find OpenMP; on Linux, GCC/Clang find it automatically)
-#   --no-openmp-hints      Do not pass OpenMP hint variables to CMake
-#   --petsc-prefix PATH    Explicit PETSc prefix (skips auto-detection)
-#   --mpi-explicit         Resolve CC/CXX to full paths via `command -v`
-#   --force-phdf5          Add -DHDF5_IS_PARALLEL=TRUE (compat for older CMakeLists)
-#   --cmp0074 {auto,off}   CMake CMP0074 policy (default: off). Controls whether *_ROOT
-#                            variables (e.g. HDF5_ROOT) are used by find_package(). CMake
-#                            3.13+ defaults to NEW (enabled), so this is rarely needed.
+#   --jobs N               Limit parallel build jobs (default: all cores; useful on
+#                            shared HPC login nodes where using all cores is discouraged)
+#   --hdf5-prefix PATH     Explicit HDF5 install prefix (skips auto-detection)
+#   --petsc-prefix PATH    Explicit PETSc install prefix (skips auto-detection)
 #   -h, --help             Show this help
 #
-# Environment overrides:
-#   HDF5_PREFIX, OMP_PREFIX, PETSC_PREFIX   Same as the --*-prefix flags
-#   CC, CXX                                Compilers (default: mpicc/mpicxx)
+# Advanced options (rarely needed):
+#   --llvm                 (macOS) Use Homebrew LLVM clang instead of AppleClang;
+#                            implies --no-openmp-hints (LLVM finds OpenMP natively).
+#                            Auto-detects OpenMPI vs MPICH.
+#   --ninja                Use Ninja generator instead of Make (requires ninja)
+#   --omp-prefix PATH      (macOS) Explicit libomp prefix — AppleClang needs this
+#                            to find OpenMP; on Linux, GCC/Clang find it automatically
+#   --no-openmp-hints      (macOS) Do not pass OpenMP hint variables to CMake
+#   --mpi-explicit         Resolve CC/CXX to absolute paths before passing to CMake;
+#                            use if CMake's FindMPI cannot identify the MPI installation
+#                            from the wrapper name alone (some HPC module environments)
+#   --configure-only       Run CMake configure step only; do not build
+#   --force-phdf5          Add -DHDF5_IS_PARALLEL=TRUE (for older CMakeLists.txt files)
+#
+# Environment overrides (alternative to --*-prefix flags):
+#   HDF5_PREFIX, OMP_PREFIX, PETSC_PREFIX
+#   CC, CXX   Compilers (default: mpicc/mpicxx)
 #
 # Dependency resolution order (HDF5, PETSc):
 #   1. Explicit --*-prefix flag or environment variable
 #   2. Homebrew (macOS)
 #   3. pkg-config
-#   4. Let CMake search system paths (Linux/HPC with modules)
+#   4. CMake system path search (Linux/HPC with environment modules)
 #
 # Manual CMake (without this script):
 #
@@ -54,7 +67,7 @@ set -euo pipefail
 #       -DUSE_PETSC=ON
 #     cmake --build build --parallel
 #
-#   macOS (Homebrew):
+#   macOS (Homebrew, without LLVM installed):
 #     cmake -S . -B build -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx \
 #       -DHDF5_ROOT=$(brew --prefix hdf5-mpi) \
 #       -DOpenMP_CXX_LIB_NAMES=omp \
@@ -63,7 +76,7 @@ set -euo pipefail
 #     cmake --build build --parallel
 # END_HELP
 
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 show_help() {
   sed -n '/^# build\.sh/,/^# END_HELP/{
     /^# END_HELP/q
@@ -71,34 +84,38 @@ show_help() {
   }' "$0"
 }
 
-# ─────────────────────────── defaults ───────────────────────────
+# --------------------------- defaults ---------------------------
 BUILD_DIR="build"
 BUILD_TYPE="Release"
 USE_NINJA=0
 MPI_EXPLICIT=0
 FORCE_PHDF5=0
 DO_CLEAN=0
-HDF5_FORMULA="hdf5-mpi"
 HDF5_PREFIX_FLAG=""
 OMP_PREFIX_FLAG=""
 PETSC_PREFIX_FLAG=""
 OPENMP_HINTS=1
-CMP0074_MODE="off"
+USE_LLVM=0
 USE_PETSC=0
+JOBS=""
+CONFIGURE_ONLY=0
 
-# ─────────────────────────── parse args ─────────────────────────
+# --------------------------- parse args -------------------------
 positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --petsc)           USE_PETSC=1; shift ;;
+    --llvm)            USE_LLVM=1; shift ;;
+    --configure-only)  CONFIGURE_ONLY=1; shift ;;
+    --jobs)
+      [[ $# -ge 2 ]] || { echo "Error: --jobs requires a number" >&2; exit 2; }
+      [[ "$2" =~ ^[0-9]+$ ]] || { echo "Error: --jobs requires a positive integer" >&2; exit 2; }
+      JOBS="$2"; shift 2 ;;
     --clean)           DO_CLEAN=1; shift ;;
     --ninja)           USE_NINJA=1; shift ;;
     --mpi-explicit)    MPI_EXPLICIT=1; shift ;;
     --force-phdf5)     FORCE_PHDF5=1; shift ;;
     --no-openmp-hints) OPENMP_HINTS=0; shift ;;
-    --hdf5-formula)
-      [[ $# -ge 2 ]] || { echo "Error: --hdf5-formula requires a value" >&2; exit 2; }
-      HDF5_FORMULA="$2"; shift 2 ;;
     --hdf5-prefix)
       [[ $# -ge 2 ]] || { echo "Error: --hdf5-prefix requires a path" >&2; exit 2; }
       HDF5_PREFIX_FLAG="$2"; shift 2 ;;
@@ -108,9 +125,6 @@ while [[ $# -gt 0 ]]; do
     --petsc-prefix)
       [[ $# -ge 2 ]] || { echo "Error: --petsc-prefix requires a path" >&2; exit 2; }
       PETSC_PREFIX_FLAG="$2"; shift 2 ;;
-    --cmp0074)
-      [[ $# -ge 2 ]] || { echo "Error: --cmp0074 requires 'auto' or 'off'" >&2; exit 2; }
-      CMP0074_MODE="$2"; shift 2 ;;
     -h|--help) show_help; exit 0 ;;
     --) shift; break ;;
     -*)
@@ -130,7 +144,12 @@ if [[ -z "$BUILD_DIR" || "$BUILD_DIR" == -* ]]; then
   exit 2
 fi
 
-# ─────────────────────────── helpers ────────────────────────────
+case "$BUILD_TYPE" in
+  Release|Debug|RelWithDebInfo|MinSizeRel) ;;
+  *) echo "Warning: unrecognised build type '$BUILD_TYPE' (expected Release|Debug|RelWithDebInfo|MinSizeRel)" >&2 ;;
+esac
+
+# --------------------------- helpers ----------------------------
 brew_prefix() {
   command -v brew >/dev/null 2>&1 || return 1
   brew --prefix "$1" 2>/dev/null
@@ -165,12 +184,15 @@ print_cmake_cmd() {
 
 OS="$(uname -s)"
 
-# ─────────────────────────── resolve HDF5 ───────────────────────
+# --------------------------- resolve HDF5 -----------------------
 # Priority: flag > env > Homebrew > let CMake find it
 HDF5_PREFIX="${HDF5_PREFIX_FLAG:-${HDF5_PREFIX:-}}"
 
 if [[ -z "$HDF5_PREFIX" ]]; then
-  HDF5_PREFIX="$(brew_prefix "$HDF5_FORMULA")" || HDF5_PREFIX=""
+  # Try parallel formula first, fall back to serial — only one can be installed at a time
+  HDF5_PREFIX="$(brew_prefix hdf5-mpi)" \
+    || HDF5_PREFIX="$(brew_prefix hdf5)" \
+    || HDF5_PREFIX=""
 fi
 
 # On Linux, HDF5 is often in system paths or loaded via modules.
@@ -181,12 +203,12 @@ else
   echo "HDF5:      (auto — letting CMake find it)"
 fi
 
-# ─────────────────────────── resolve OpenMP ─────────────────────
-# Only needed on macOS (AppleClang requires explicit libomp paths).
-# On Linux, GCC/Clang find OpenMP automatically with -fopenmp.
+# --------------------------- resolve OpenMP ---------------------
+# AppleClang on macOS requires explicit libomp paths; GCC/Clang on Linux
+# find OpenMP automatically via -fopenmp, so we only probe on macOS.
 OMP_PREFIX="${OMP_PREFIX_FLAG:-${OMP_PREFIX:-}}"
 
-if [[ -z "$OMP_PREFIX" ]]; then
+if [[ "$OS" == "Darwin" && -z "$OMP_PREFIX" ]]; then
   OMP_PREFIX="$(brew_prefix libomp)" || OMP_PREFIX=""
 fi
 
@@ -196,10 +218,32 @@ else
   echo "OpenMP:    (auto)"
 fi
 
-# ─────────────────────────── resolve PETSc ──────────────────────
+# --------------------------- LLVM (macOS) -----------------------
+if [[ "$USE_LLVM" -eq 1 ]]; then
+  [[ "$OS" == "Darwin" ]] || { echo "Error: --llvm is macOS-only (uses Homebrew LLVM)" >&2; exit 1; }
+  LLVM_PREFIX="$(brew_prefix llvm)" \
+    || { echo "Error: LLVM not found. Install with: brew install llvm" >&2; exit 1; }
+  # ompi_info ships with OpenMPI but not MPICH/MVAPICH2 — reliable detector
+  if command -v ompi_info >/dev/null 2>&1; then
+    export OMPI_CC="${LLVM_PREFIX}/bin/clang"
+    export OMPI_CXX="${LLVM_PREFIX}/bin/clang++"
+    echo "LLVM:      ${LLVM_PREFIX} (OpenMPI)"
+  else
+    export MPICH_CC="${LLVM_PREFIX}/bin/clang"
+    export MPICH_CXX="${LLVM_PREFIX}/bin/clang++"
+    echo "LLVM:      ${LLVM_PREFIX} (MPICH)"
+  fi
+  OPENMP_HINTS=0  # LLVM clang finds OpenMP natively; no -Xpreprocessor workaround needed
+fi
+
+# --------------------------- resolve PETSc ----------------------
 PETSC_PREFIX="${PETSC_PREFIX_FLAG:-${PETSC_PREFIX:-}}"
 
 if [[ "$USE_PETSC" -eq 1 ]]; then
+  grep -q "option(USE_PETSC" CMakeLists.txt 2>/dev/null \
+    || { echo "Error: --petsc requested but USE_PETSC is not defined in CMakeLists.txt" >&2
+         echo "       PETSc support may not be available in this version of the code." >&2
+         exit 1; }
   if [[ -z "$PETSC_PREFIX" ]]; then
     PETSC_PREFIX="$(brew_prefix petsc)" \
       || PETSC_PREFIX="$(pkg_config_prefix PETSc)" \
@@ -214,7 +258,7 @@ if [[ "$USE_PETSC" -eq 1 ]]; then
   fi
 fi
 
-# ─────────────────────────── compilers ──────────────────────────
+# --------------------------- compilers --------------------------
 CC="${CC:-mpicc}"
 CXX="${CXX:-mpicxx}"
 if [[ "$MPI_EXPLICIT" -eq 1 ]]; then
@@ -223,7 +267,7 @@ if [[ "$MPI_EXPLICIT" -eq 1 ]]; then
   [[ -n "$CC" && -n "$CXX" ]] || { echo "Error: compilers not found on PATH" >&2; exit 1; }
 fi
 
-# ─────────────────────────── summary ────────────────────────────
+# --------------------------- summary ----------------------------
 echo "Build dir: $BUILD_DIR"
 echo "Type:      $BUILD_TYPE"
 if [[ "$USE_NINJA" -eq 1 ]]; then
@@ -234,14 +278,14 @@ fi
 echo "CC:        $CC"
 echo "CXX:       $CXX"
 
-# ─────────────────────────── clean ──────────────────────────────
+# --------------------------- clean ------------------------------
 if [[ "$DO_CLEAN" -eq 1 ]]; then
   echo "Clean:     removing '$BUILD_DIR'"
   rm -rf -- "$BUILD_DIR"
 fi
 mkdir -p -- "$BUILD_DIR"
 
-# ─────────────────────────── CMake args ─────────────────────────
+# --------------------------- CMake args -------------------------
 CMAKE_ARGS=()
 
 if [[ "$USE_NINJA" -eq 1 ]]; then
@@ -252,8 +296,8 @@ fi
 CMAKE_ARGS+=(
   -S . -B "$BUILD_DIR"
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
-  -DCMAKE_C_COMPILER="${CC}"
-  -DCMAKE_CXX_COMPILER="${CXX}"
+  -DCMAKE_C_COMPILER="${CC}"     # explicit MPI wrappers; often auto-detected but avoids
+  -DCMAKE_CXX_COMPILER="${CXX}"  # ambiguity when multiple compilers are on PATH
   -DMPI_C_COMPILER="${CC}"
   -DMPI_CXX_COMPILER="${CXX}"
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
@@ -269,13 +313,6 @@ fi
 
 if [[ -n "$HDF5_PREFIX" ]]; then
   CMAKE_ARGS+=(-DHDF5_ROOT="${HDF5_PREFIX}")
-fi
-
-# CMP0074: make *_ROOT variables effective on older CMake policy settings
-if [[ "$CMP0074_MODE" == "auto" ]]; then
-  CMAKE_ARGS+=(-DCMAKE_POLICY_DEFAULT_CMP0074=NEW)
-elif [[ "$CMP0074_MODE" != "off" ]]; then
-  echo "Error: --cmp0074 must be 'auto' or 'off'" >&2; exit 2
 fi
 
 if [[ "$FORCE_PHDF5" -eq 1 ]]; then
@@ -297,15 +334,24 @@ if [[ "$USE_PETSC" -eq 1 ]]; then
   CMAKE_ARGS+=(-DUSE_PETSC=ON)
 fi
 
-# ─────────────────────────── build ──────────────────────────────
+# --------------------------- build ------------------------------
 echo ""
 echo "Configure:"
 print_cmake_cmd "${CMAKE_ARGS[@]}"
 echo ""
 cmake "${CMAKE_ARGS[@]}"
 
+if [[ "$CONFIGURE_ONLY" -eq 1 ]]; then
+  echo ""
+  echo "Configure-only: skipping build step."
+  exit 0
+fi
+
+BUILD_PARALLEL=(--parallel)
+[[ -n "$JOBS" ]] && BUILD_PARALLEL+=("$JOBS")
+
 echo ""
 echo "Build:"
-echo "  cmake --build $BUILD_DIR --parallel"
+echo "  cmake --build $BUILD_DIR ${BUILD_PARALLEL[*]}"
 echo ""
-cmake --build "$BUILD_DIR" --parallel
+cmake --build "$BUILD_DIR" "${BUILD_PARALLEL[@]}"
