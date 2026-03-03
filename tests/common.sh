@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# common.sh — shared helper functions for test_petsc.sh and test_petsc_scaling.sh
+#
+# Source this file after PROJECT_DIR is set:
+#   source "$SCRIPT_DIR/common.sh"
+#
+
+# Validate that $2 is a positive integer; print error and exit 2 otherwise.
+# Usage: validate_pos_int --flag-name value
+validate_pos_int() {
+    local flag="$1" val="$2"
+    [[ "$val" =~ ^[0-9]+$ && "$val" -gt 0 ]] \
+        || { echo "Error: $flag requires a positive integer" >&2; exit 2; }
+}
+
+# Validate that $2 is a non-negative integer; print error and exit 2 otherwise.
+# Usage: validate_nonneg_int --flag-name value
+validate_nonneg_int() {
+    local flag="$1" val="$2"
+    [[ "$val" =~ ^[0-9]+$ ]] \
+        || { echo "Error: $flag requires a non-negative integer" >&2; exit 2; }
+}
+
+# Compute the most-square XY factorization of NP.
+# Echoes "XLEN YLEN" (XLEN >= YLEN, i.e. XLEN is the larger factor).
+compute_topology() {
+    local np="$1"
+    local ylen xlen
+    ylen=$(python3 -c "
+import math
+n = $np
+best = (1, n)
+for i in range(1, int(math.isqrt(n)) + 1):
+    if n % i == 0:
+        best = (i, n // i)
+print(best[0])
+")
+    xlen=$(( np / ylen ))
+    echo "$xlen $ylen"
+}
+
+# Warn if NP exceeds available logical CPUs.
+# Usage: warn_oversubscription NP
+warn_oversubscription() {
+    local np="$1"
+    local avail
+    avail=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 0)
+    if [[ $avail -gt 0 && $np -gt $avail ]]; then
+        echo "WARNING: --np $np exceeds $avail logical CPUs on this machine."
+        echo "         mpirun will oversubscribe, which degrades performance and may fail."
+        echo "         Consider using --np N with N <= $avail."
+        echo ""
+    fi
+}

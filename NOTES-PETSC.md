@@ -79,10 +79,25 @@ mpirun -np 8 build/iPIC3D input.inp -solver PETSc -ksp_gmres_restart 40 -ksp_mon
 
 ## Performance Notes
 
-Tested on Double_Harris (200x200, 50 cycles, 8 MPI ranks, Apple M2 Pro):
-- PETSc GMRES: ~1.3x faster than built-in GMRES
-- PETSc BiCGStab (`-ksp_type bcgs`): ~2.7x faster (fewer iterations, but 2 mat-vec products each)
-- Scaling advantage increases with grid size
+2. PETSc GMRES and FGMRES are the clear winners, ~10–16% faster
+
+  ┌────────────────┬───────────────────────────────────┐
+  │     Solver     │ Typical speedup vs built-in GMRES │
+  ├────────────────┼───────────────────────────────────┤
+  │ PETSc (GMRES)  │ ~11%                              │
+  ├────────────────┼───────────────────────────────────┤
+  │ PETSc_fgmres   │ ~12%                              │
+  ├────────────────┼───────────────────────────────────┤
+  │ PETSc_bcgs     │ ~5%                               │
+  ├────────────────┼───────────────────────────────────┤
+  │ PETSc_tfqmr    │ ~3%                               │
+  ├────────────────┼───────────────────────────────────┤
+  │ Built-in GMRES │ baseline                          │
+  └────────────────┴───────────────────────────────────┘
+
+PETSc GMRES and FGMRES perform almost identically (without a preconditioner, flexible GMRES degenerates to standard GMRES). The speedup over the built-in GMRES is likely from PETSc's optimized BLAS dot-product and norm operations compared to iPIC3D's hand-rolled MPI_Allreduce per Krylov iteration?
+
+PETSc GMRES gives a real but modest ~10-15% speedup. Next step: preconditioning? (e.g., multigrid or ILU via PETSc -pc_type).
 
 ## Future Improvements
 

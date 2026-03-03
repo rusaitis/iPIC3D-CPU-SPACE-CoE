@@ -11,6 +11,15 @@ NOTES.md
 # Test artifacts
 tests/*.png
 tests/*.csv
+tests/test_petsc_*/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
 
 # Eclipse IDE
 .cproject
