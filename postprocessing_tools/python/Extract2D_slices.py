@@ -1,9 +1,10 @@
 """
-Created on Tue Feb 17 17:21 2026
+Created on Wed Feb 25 14:13 2026
 
 @author: Pranab JD, ChatGPT
 
-Description: Assemble & plot an arbitrary 2D slice of FIELDS from per-proc iPIC3D HDF tiles.
+Description: Assemble and SAVE an arbitrary 2D slice of FIELDS from per-proc iPIC3D HDF tiles. 
+             Writes one ASCII .txt per time step (rank 0 only).
 
 Usage:  # Directory where proc.hdf files are saved
         folder=/scratch/project_465002078/pranab/RMR/sigma_1/domain_128_256_128/Bz_0
@@ -13,58 +14,70 @@ Usage:  # Directory where proc.hdf files are saved
         quantity=By
         axis=y
         index=192
+        outdir="${folder}/slices_${quantity}_${axis}_CS1"
 
-        xmin=0; xmax=128; xticks=5
-        ymin=0; ymax=256; yticks=5
-        zmin=0; zmax=128; zticks=5
-
-        # ------------------------------------------------------------
-        # Run MPI Python script
-        # ------------------------------------------------------------
-
-        for t in $(seq 0 500 20000)
-        do
-            time_cycle=cycle_${t}
-
-            srun python3 ../postprocessing_tools/python/Plot2D_slice_field.py \
-                "$folder" \
-                "$time_cycle" \
-                "$xlen" "$ylen" "$zlen" \
-                --quantity "$quantity" \
-                --axis "$axis" \
-                --index "$index" \
-                --xmin "$xmin" --xmax "$xmax" --xticks "$xticks" \
-                --ymin "$ymin" --ymax "$ymax" --yticks "$yticks" \
-                --zmin "$zmin" --zmax "$zmax" --zticks "$zticks"
-
+        time_cycle=cycle_500
+        
+        srun python3 ../postprocessing_tools/python/Extract2D_slices.py \
+            "$folder" \
+            "$time_cycle" \
+            "$xlen" "$ylen" "$zlen" \
+            "$quantity" "$axis" "$index" \
+            "${outdir}"
 """
 
-import h5py
-import numpy as np
-from mpi4py import MPI
 import os, glob, argparse
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
-from mpl_toolkits.axes_grid1 import make_axes_locatable
+import numpy as np
+import h5py
+from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-###! ----------------------------- Helpers -----------------------------
+# ----------------------------- Helpers -----------------------------
 def proc_id_from_filename(fp: str) -> int:
     base = os.path.basename(fp)
     return int(base.replace("proc", "").replace(".hdf", ""))
 
-def dset_path(quantity: str, cycle: str) -> str:
-    # DO NOT change this (as requested): fields/<quantity>/<cycle>
-    return f"fields/{quantity}/{cycle}"
+def dset_path(quantity: str, cycle: str, species: int | None = None) -> str:
+    if kind == "fields":
+        return f"fields/{quantity}/{cycle}"
+    else:
+        if species is None:
+            raise ValueError("species required for moments")
+        return f"moments/species_{species}/{quantity}/{cycle}"
+
+def read_slab_2d(f: h5py.File, quantity: str, cycle: str, axis: str,
+                loc_i: int | None = None, loc_j: int | None = None, loc_k: int | None = None,
+                species_sel=None) -> np.ndarray:
+    """
+    Return a 2D slab (float64) for either fields or moments (summed over species_sel).
+    axis selects which index is fixed.
+    """
+    if kind == "fields":
+        d = f[dset_path(quantity, cycle)]
+        if axis == "z":
+            return np.array(d[:, :, loc_k], dtype=np.float64)
+        elif axis == "y":
+            return np.array(d[:, loc_j, :], dtype=np.float64)
+        else:  # axis == "x"
+            return np.array(d[loc_i, :, :], dtype=np.float64)
+
+    else:  # moments
+        slab_sum = None
+        for s in species_sel:
+            d = f[dset_path(quantity, cycle, species=s)]
+            if axis == "z":
+                arr = np.array(d[:, :, loc_k], dtype=np.float64)
+            elif axis == "y":
+                arr = np.array(d[:, loc_j, :], dtype=np.float64)
+            else:
+                arr = np.array(d[loc_i, :, :], dtype=np.float64)
+            slab_sum = arr if slab_sum is None else slab_sum + arr
+        return slab_sum
 
 def mapping_candidates(XLEN, YLEN, ZLEN):
-    """
-    Common proc_id -> (i,j,k) orderings.
-    The correct one depends on how iPIC3D numbers ranks in procNNN.hdf.
-    """
     def A(pid):  # id = (i*YLEN + j)*ZLEN + k
         k = pid % ZLEN
         t = pid // ZLEN
@@ -116,59 +129,51 @@ def score_occupancy(Occ: np.ndarray):
     score = gaps * 10 + overlaps * 2 + max(0, maxv - 1) * 1000
     return score, gaps, overlaps, maxv
 
-def cycle_to_number(cycle: str) -> str:
-    # "cycle_19500" -> "19500"
-    try:
-        return cycle.split("_")[-1]
-    except Exception:
-        return cycle
+# ----------------------------- Args -----------------------------
+parser = argparse.ArgumentParser(description="Save 2D slice of iPIC3D fields from proc*.hdf as .txt")
 
-###! ----------------------------- Args -----------------------------
-parser = argparse.ArgumentParser(description="Plot 2D slice of iPIC3D fields from proc*.hdf")
+FIELD_Q = {"Ex","Ey","Ez","Bx","By","Bz"}
+MOMENT_Q = {"rho","Jx","Jy","Jz"}
 
 parser.add_argument("dir_data",   type=str, help="Directory containing proc*.hdf")
 parser.add_argument("time_cycle", type=str, help="Cycle group name, e.g. cycle_19500")
+
 parser.add_argument("xlen", type=int, help="Simulation XLEN")
 parser.add_argument("ylen", type=int, help="Simulation YLEN")
 parser.add_argument("zlen", type=int, help="Simulation ZLEN")
 
-parser.add_argument("--quantity", type=str, required=True,
-                    help="Field quantity under /fields/<quantity>/<cycle>, e.g. Ex, Ey, Ez, Bx, By, Bz")
+parser.add_argument("quantity", type=str, help="Field quantity, e.g. Ex, Ey, Ez, Bx, By, Bz")
+parser.add_argument("--species", default="all", help="For moments only: 'all' or comma list like '0,1,3'")
+parser.add_argument("axis", type=str, choices=["x","y","z"], help="Slice axis")
+parser.add_argument("index", type=int, help="Global nodal index along axis")
 
-parser.add_argument("--axis", type=str, default="z", choices=["x","y","z"], help="Slice axis")
-parser.add_argument("--index", type=int, default=0, help="Global nodal index along axis")
+parser.add_argument("out_dir", type=str, help="Output directory for .txt files")
 
-parser.add_argument("--xmin", type=float, required=True)
-parser.add_argument("--xmax", type=float, required=True)
-parser.add_argument("--xticks", type=int, required=True)
-
-parser.add_argument("--ymin", type=float, required=True)
-parser.add_argument("--ymax", type=float, required=True)
-parser.add_argument("--yticks", type=int, required=True)
-
-parser.add_argument("--zmin", type=float, default=None)
-parser.add_argument("--zmax", type=float, default=None)
-parser.add_argument("--zticks", type=int, default=None)
-
-parser.add_argument("--cmap", type=str, default="seismic")
-parser.add_argument("--out", type=str, default="", help="Output PNG (default auto)")
-parser.add_argument("--cb_decimals", type=int, default=2, help="Colorbar decimals")
+parser.add_argument("--floatfmt", type=str, default="%.8e", help="np.savetxt float format")
+parser.add_argument("--transpose", action="store_true",
+                    help="Write transposed array (matches your imshow(out_plane.T) convention).")
 
 args = parser.parse_args()
+
+quantity = args.quantity
+
+if quantity in FIELD_Q:
+    kind = "fields"
+elif quantity in MOMENT_Q:
+    kind = "moments"
+else:
+    raise ValueError(
+        f"Unknown quantity '{quantity}'. "
+        f"Fields: {sorted(FIELD_Q)} | Moments: {sorted(MOMENT_Q)}")
 
 dir_data   = args.dir_data
 time_cycle = args.time_cycle
 XLEN, YLEN, ZLEN = args.xlen, args.ylen, args.zlen
-
 axis    = args.axis.lower()
 slice_g = args.index
 quantity = args.quantity
 
-xmin, xmax, nxt = args.xmin, args.xmax, args.xticks
-ymin, ymax, nyt = args.ymin, args.ymax, args.yticks
-zmin, zmax, nzt = args.zmin, args.zmax, args.zticks
-
-###! ----------------------------- Discover files -----------------------------
+# ----------------------------- Discover files -----------------------------
 if rank == 0:
     all_files = sorted(glob.glob(os.path.join(dir_data, "proc*.hdf")))
     if not all_files:
@@ -179,13 +184,42 @@ else:
 all_files = comm.bcast(all_files, root=0)
 local_files = all_files[rank::size]
 
-###! ----------------------------- Probe tile shape -----------------------------
+# ----------------------------- Probe tile shape -----------------------------
 tile_shape = None
 if local_files:
     with h5py.File(local_files[0], "r") as f:
-        if dset_path(quantity, time_cycle) not in f:
-            raise RuntimeError(f"Dataset not found: /{dset_path(quantity, time_cycle)}")
-        tile_shape = tuple(f[dset_path(quantity, time_cycle)].shape)
+
+        if kind == "fields":
+            path = dset_path(quantity, time_cycle)
+            if path not in f:
+                raise RuntimeError(f"Dataset not found: /{path}")
+            tile_shape = tuple(f[path].shape)
+            species_sel = None
+
+        else:  # moments
+            # discover available species
+            species_avail = []
+            for k in f["moments"].keys():
+                if k.startswith("species_"):
+                    species_avail.append(int(k.split("_")[1]))
+            species_avail = sorted(species_avail)
+
+            if not species_avail:
+                raise RuntimeError("No species found under /moments")
+
+            if args.species.strip().lower() == "all":
+                species_sel = species_avail
+            else:
+                species_sel = [int(x) for x in args.species.split(",") if x.strip() != ""]
+                missing = sorted(set(species_sel) - set(species_avail))
+                if missing:
+                    raise RuntimeError(f"Requested species not present: {missing}. Available: {species_avail}")
+
+            s0 = species_sel[0]
+            path = dset_path(quantity, time_cycle, species=s0)
+            if path not in f:
+                raise RuntimeError(f"Dataset not found: /{path}")
+            tile_shape = tuple(f[path].shape)
 
 tile_shape_all = comm.gather(tile_shape, root=0)
 
@@ -195,9 +229,10 @@ else:
     tile_shape = None
 
 tile_shape = comm.bcast(tile_shape, root=0)
+species_sel = comm.bcast(species_sel if rank == 0 else None, root=0)
 nx_tile, ny_tile, nz_tile = tile_shape
 
-###! ----------------------------- Global sizing (nodal-like shared boundaries) -----------------------------
+# ----------------------------- Global sizing -----------------------------
 nx_cell = nx_tile - 1
 ny_cell = ny_tile - 1
 nz_cell = nz_tile - 1
@@ -217,7 +252,7 @@ elif axis == "y":
 else:
     plane_shape = (ny_global, nz_global)
 
-###! ----------------------------- Infer proc->(i,j,k) mapping -----------------------------
+# ----------------------------- Infer proc->(i,j,k) mapping -----------------------------
 best_name = None
 if rank == 0:
     proc_ids = [proc_id_from_filename(fp) for fp in all_files]
@@ -277,7 +312,7 @@ best_name = comm.bcast(best_name, root=0)
 maps = {n: fn for n, fn in mapping_candidates(XLEN, YLEN, ZLEN)}
 pid_to_ijk = maps[best_name]
 
-###! ----------------------------- Assemble requested plane -----------------------------
+# ----------------------------- Assemble requested plane -----------------------------
 local_plane = np.zeros(plane_shape, dtype=np.float64)
 local_occ   = np.zeros(plane_shape, dtype=np.int32)
 
@@ -307,8 +342,8 @@ for fp in local_files:
         loc_k_orig = (slice_g - gz0) + zs
 
         with h5py.File(fp, "r") as f:
-            d = f[dset_path(quantity, time_cycle)]
-            slab = np.array(d[:, :, loc_k_orig], dtype=np.float64)
+            slab = read_slab_2d(f, quantity, time_cycle, axis="z",
+                                loc_k=loc_k_orig, species_sel=species_sel)
 
         slab = slab[xs:, ys:]  # -> (nx_use, ny_use)
         local_plane[gx0:gx0+nx_use, gy0:gy0+ny_use] += slab
@@ -320,8 +355,8 @@ for fp in local_files:
         loc_j_orig = (slice_g - gy0) + ys
 
         with h5py.File(fp, "r") as f:
-            d = f[dset_path(quantity, time_cycle)]
-            slab = np.array(d[:, loc_j_orig, :], dtype=np.float64)
+            slab = read_slab_2d(f, quantity, time_cycle, axis="y",
+                                loc_j=loc_j_orig, species_sel=species_sel)
 
         slab = slab[xs:, zs:]  # -> (nx_use, nz_use)
         local_plane[gx0:gx0+nx_use, gz0:gz0+nz_use] += slab
@@ -333,14 +368,14 @@ for fp in local_files:
         loc_i_orig = (slice_g - gx0) + xs
 
         with h5py.File(fp, "r") as f:
-            d = f[dset_path(quantity, time_cycle)]
-            slab = np.array(d[loc_i_orig, :, :], dtype=np.float64)
+            slab = read_slab_2d(f, quantity, time_cycle, axis="x",
+                                loc_i=loc_i_orig, species_sel=species_sel)
 
         slab = slab[ys:, zs:]  # -> (ny_use, nz_use)
         local_plane[gy0:gy0+ny_use, gz0:gz0+nz_use] += slab
         local_occ[gy0:gy0+ny_use, gz0:gz0+nz_use]   += 1
 
-###! ----------------------------- Reduce to root -----------------------------
+# ----------------------------- Reduce to root -----------------------------
 plane = None
 occ = None
 if rank == 0:
@@ -350,7 +385,7 @@ if rank == 0:
 comm.Reduce(local_plane, plane, op=MPI.SUM, root=0)
 comm.Reduce(local_occ,   occ,   op=MPI.SUM, root=0)
 
-###! ----------------------------- Plot on root -----------------------------
+# ----------------------------- Save on root -----------------------------
 if rank == 0:
     omin, omax = int(occ.min()), int(occ.max())
     if omin == 0:
@@ -358,86 +393,23 @@ if rank == 0:
     if omax > 1:
         print("WARNING: overlaps (occ>1). Might indicate >1 ghost layer or different centering.")
 
-    out_plane = plane.copy()
+    out_plane = np.zeros_like(plane)
     mask = (occ > 0)
     out_plane[mask] = plane[mask] / occ[mask]
 
-    vmax = max(float(np.max(np.abs(out_plane[mask]))), 1e-12)
-    vmin = -vmax
+    os.makedirs(args.out_dir, exist_ok=True)
+    out_txt = os.path.join(args.out_dir, f"{quantity}_slice_{axis}{slice_g}_{time_cycle}.txt")
 
-    nx, ny = out_plane.shape
+    A = out_plane.T if args.transpose else out_plane
 
-    def require(v, name):
-        if v is None:
-            raise ValueError(f"Missing required argument --{name} for selected plane/axis.")
-        return v
+    header = (
+        f"{quantity} 2D slice from iPIC3D per-proc tiles\n"
+        f"dir={dir_data}\n"
+        f"time_cycle={time_cycle}\n"
+        f"axis={axis} index={slice_g}\n"
+        f"shape_written={A.shape} (transpose={args.transpose})\n"
+        f"occ_min={omin} occ_max={omax}\n"
+    )
 
-    if axis == "z":
-        xmin_ = require(xmin, "xmin"); xmax_ = require(xmax, "xmax"); nxt_ = require(nxt, "xticks")
-        ymin_ = require(ymin, "ymin"); ymax_ = require(ymax, "ymax"); nyt_ = require(nyt, "yticks")
-
-        x_pos = np.linspace(0, nx-1, nxt_)
-        y_pos = np.linspace(0, ny-1, nyt_)
-        x_lab = np.linspace(xmin_, xmax_, nxt_)
-        y_lab = np.linspace(ymin_, ymax_, nyt_)
-        xlabel, ylabel = "X", "Y"
-
-    elif axis == "y":
-        xmin_ = require(xmin, "xmin"); xmax_ = require(xmax, "xmax"); nxt_ = require(nxt, "xticks")
-        zmin_ = require(zmin, "zmin"); zmax_ = require(zmax, "zmax"); nzt_ = require(nzt, "zticks")
-
-        x_pos = np.linspace(0, nx-1, nxt_)
-        y_pos = np.linspace(0, ny-1, nzt_)
-        x_lab = np.linspace(xmin_, xmax_, nxt_)
-        y_lab = np.linspace(zmin_, zmax_, nzt_)
-        xlabel, ylabel = "X", "Z"
-
-    else:  # axis == "x"
-        ymin_ = require(ymin, "ymin"); ymax_ = require(ymax, "ymax"); nyt_ = require(nyt, "yticks")
-        zmin_ = require(zmin, "zmin"); zmax_ = require(zmax, "zmax"); nzt_ = require(nzt, "zticks")
-
-        x_pos = np.linspace(0, nx-1, nyt_)
-        y_pos = np.linspace(0, ny-1, nzt_)
-        x_lab = np.linspace(ymin_, ymax_, nyt_)
-        y_lab = np.linspace(zmin_, zmax_, nzt_)
-        xlabel, ylabel = "Y", "Z"
-
-    cyc = cycle_to_number(time_cycle)
-    cycle_number = int(int(cyc) / 10)
-
-    fig, ax = plt.subplots(figsize=(8.0, 8.0), dpi=250)
-
-    im = ax.imshow(out_plane.T, origin="lower", aspect="auto",
-                   cmap=args.cmap, vmin=vmin, vmax=vmax)
-
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels([f"{v:.0f}" for v in x_lab])
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels([f"{v:.0f}" for v in y_lab])
-
-    ax.set_xlabel(xlabel, fontsize=16)
-    ax.set_ylabel(ylabel, fontsize=16)
-
-    ax.tick_params(axis='x', which='major', labelsize=14, length=8)
-    ax.tick_params(axis='y', which='major', labelsize=14, length=8)
-
-    ax.set_title(f"{cycle_number} $\\omega^{{-1}}$", fontsize=18)
-
-    # Colorbar matched to image height
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.10)
-    cbar = fig.colorbar(im, cax=cax)
-    cbar.set_label(f"{quantity}  ({axis}={slice_g})", fontsize=18)
-    cbar.ax.tick_params(labelsize=14)
-    cbar.ax.yaxis.set_major_formatter(mticker.FormatStrFormatter(f"%.{args.cb_decimals}f"))
-
-    plt.tight_layout()
-
-    if args.out.strip():
-        out_png = args.out
-    else:
-        out_png = os.path.join(f"{quantity}_slice_{axis}{slice_g}_{time_cycle}.png")
-
-    plt.savefig(out_png)
-    plt.close()
-    print("Completed ", out_png)
+    np.savetxt(out_txt, A, fmt=args.floatfmt, header=header)
+    print("Wrote", out_txt)
