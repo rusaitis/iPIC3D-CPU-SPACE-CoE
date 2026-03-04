@@ -51,6 +51,7 @@ FIELD_OUTPUT=""
 PARTICLE_OUTPUT=""
 OUTPUT_DIR=""
 WRITE_METHOD="phdf5"
+MAKE_MOVIE=false
 CLEAN_OUTPUT=false
 TMPDIR_BASE=$(mktemp -d "${TMPDIR:-/tmp}/ipic3d_test_petsc.XXXXXX")
 
@@ -106,6 +107,7 @@ while [[ $# -gt 0 ]]; do
         --all-solvers)  ALL_SOLVERS=true;   shift ;;
         --randomize)    RANDOMIZE=true;     shift ;;
         --clean)        CLEAN_OUTPUT=true;  shift ;;
+        --movie)        MAKE_MOVIE=true;    shift ;;
         --dry-run)      DRY_RUN=true;       shift ;;
         --input)        INPUT_FILE="$2";    shift 2 ;;
         --name)
@@ -149,8 +151,9 @@ Options:
   --randomize          Shuffle solver run order
   --input FILE         Input file path (default: inputfiles/Double_Harris.inp)
   --name TAG           Output dir suffix: test_petsc_output_TAG/
-  --field-output N     Save field data every N cycles (0 = off)
+  --field-output N     Save field data every N cycles (default: CYCLES in single-grid, off in scaling)
   --particle-output N  Save particle data every N cycles (0 = off)
+  --movie              Generate mp4 movie of field comparison across cycles (requires ffmpeg)
   --output-dir DIR     Override output directory (default: tests/test_petsc_output/)
   --write-method M     HDF5 write method: phdf5, shdf5, pvtk (default: phdf5)
   --clean              Remove output directory before running (start fresh)
@@ -196,6 +199,11 @@ if [[ -z "$CYCLES" ]]; then
     else
         CYCLES=10
     fi
+fi
+
+# In single-grid mode, default field output to every CYCLES so visual comparison always works
+if [[ "$SCALING_MODE" != true && -z "$FIELD_OUTPUT" ]]; then
+    FIELD_OUTPUT="$CYCLES"
 fi
 
 # ZLEN defaults to 1 (2D)
@@ -780,6 +788,7 @@ done
 [[ $AVG -gt 1 ]] && box_lines+=("  Runs: $AVG   Cooldown: ${COOLDOWN}s between runs")
 [[ -n "$NAME_TAG" ]] && box_lines+=("  Name tag: $NAME_TAG")
 [[ -n "$FIELD_OUTPUT" || -n "$PARTICLE_OUTPUT" ]] && box_lines+=("  Field output: ${FIELD_OUTPUT:-off}   Particle output: ${PARTICLE_OUTPUT:-off}")
+[[ "$MAKE_MOVIE" == true ]] && box_lines+=("  Movie: yes (generate mp4 comparison movie)")
 [[ "$RANDOMIZE" == true ]] && box_lines+=("  Randomize: yes (solver order shuffled)")
 [[ "$DRY_RUN" == true ]] && box_lines+=("  *** DRY-RUN MODE — no simulations will be executed ***")
 
@@ -1347,24 +1356,40 @@ export BD_MOVER_LIST="${BD_MOVER_arr[*]}"
 
 python3 "$SCRIPT_DIR/plot_petsc_test_results.py" "$CSV_FILE" || echo "  WARNING: Plot generation failed (see above)."
 
-# ---- Visual comparison (when field output was saved) ----
+# ---- Visual comparison & movie (when field output was saved) ----
+# Build directory paths for GMRES and PETSc runs (used by both comparison and movie)
+read -r v_nxc v_nyc v_nzc <<< "${CONFIGS[0]}"
+v_config_tag="${v_nxc}x${v_nyc}x${v_nzc}"
+gmres_dir="$PERSISTENT_OUTPUT_DIR/GMRES_${v_config_tag}"
+petsc_args=()
+for ((si=1; si<NUM_SOLVERS; si++)); do
+    petsc_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
+    if [[ -d "$petsc_dir" ]]; then
+        petsc_args+=(--petsc "$petsc_dir")
+    fi
+done
+
 if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; then
     if [[ -f "$SCRIPT_DIR/plot_petsc_visual_comparison.py" ]]; then
-        read -r v_nxc v_nyc v_nzc <<< "${CONFIGS[0]}"
-        v_config_tag="${v_nxc}x${v_nyc}x${v_nzc}"
-        gmres_dir="$PERSISTENT_OUTPUT_DIR/GMRES_${v_config_tag}"
-        petsc_args=()
-        for ((si=1; si<NUM_SOLVERS; si++)); do
-            petsc_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
-            if [[ -d "$petsc_dir" ]]; then
-                petsc_args+=(--petsc "$petsc_dir")
-            fi
-        done
         if [[ -d "$gmres_dir" && ${#petsc_args[@]} -gt 0 ]]; then
             echo "  Running visual comparison..."
             python3 "$SCRIPT_DIR/plot_petsc_visual_comparison.py" \
                 --gmres "$gmres_dir" "${petsc_args[@]}" || \
                 echo "  WARNING: Visual comparison failed."
+        fi
+    fi
+
+    # ---- Movie generation (when --movie flag was passed) ----
+    if [[ "$MAKE_MOVIE" == true ]]; then
+        if command -v ffmpeg &>/dev/null; then
+            if [[ -d "$gmres_dir" && ${#petsc_args[@]} -gt 0 ]]; then
+                echo "  Generating comparison movie..."
+                bash "$SCRIPT_DIR/make_petsc_movie.sh" \
+                    --gmres "$gmres_dir" "${petsc_args[@]}" || \
+                    echo "  WARNING: Movie generation failed."
+            fi
+        else
+            echo "  WARNING: ffmpeg not found, skipping movie generation."
         fi
     fi
 fi
