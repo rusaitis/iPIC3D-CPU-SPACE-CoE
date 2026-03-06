@@ -1,0 +1,19 @@
+[project]
+name = "ipic3d-scripts"
+version = "0.1.0"
+description = "Python postprocessing scripts for iPIC3D simulations"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "h5py",
+    "mpi4py",
+]
+
+[project.optional-dependencies]
+vtk = ["scipy", "tables", "pyevtk"]
+dev = ["ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

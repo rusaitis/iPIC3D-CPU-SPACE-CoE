@@ -36,6 +36,21 @@ For all available options and manual CMake instructions:
 ./build.sh --help
 ```
 
+### Quick start with pixi
+
+[Pixi](https://pixi.sh) manages all C++ and Python dependencies automatically via conda-forge — no manual setup needed:
+
+```shell
+pixi run build                     # configure + build (Release)
+pixi run test-smoke                # run a short GEM2D simulation
+pixi run -e petsc build            # build with PETSc support
+pixi run -e petsc test-petsc       # compare GMRES vs PETSc solvers
+```
+
+Available environments: `default` (build + Python), `petsc` (+ PETSc), `build-only` (no Python), `py` (Python only).
+
+Use `pixi shell` to enter the environment interactively (e.g., for Debug builds or custom CMake flags).
+
 3. Run a simulation:
 ```shell
 # np = XLEN x YLEN x ZLEN (set in the input file)
@@ -78,6 +93,18 @@ Two test scripts compare the built-in GMRES and PETSc solvers (requires a `--pet
 ```
 
 Results are saved to `tests/scaling_results.csv` and `tests/scaling_plot.png`.
+
+## Python postprocessing
+
+Postprocessing scripts in `postprocessing_tools/python/` require numpy, matplotlib, h5py, and mpi4py.
+
+**With pixi** (recommended): dependencies are already included in the default environment.
+
+**Without pixi** (e.g., on HPC with system Python):
+```shell
+pip install -e .                   # core deps (numpy, matplotlib, h5py, mpi4py)
+pip install -e ".[vtk]"            # + scipy, tables, pyevtk for VTK export
+```
 
 ## OpenMP
 

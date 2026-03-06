@@ -7,6 +7,10 @@ data*/
 # Local build and notes
 PLAN.md
 NOTES.md
+plan-*.md
+
+# Pixi
+.pixi/
 
 # Test artifacts
 tests/*.png

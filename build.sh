@@ -100,6 +100,15 @@ USE_PETSC=0
 JOBS=""
 CONFIGURE_ONLY=0
 
+# --------------------------- pixi/conda env warning ----------------------
+if [[ -n "${CONDA_PREFIX:-}" || -n "${PIXI_PROJECT_MANIFEST:-}" ]]; then
+    echo ""
+    echo "NOTE: conda/pixi environment detected (${CONDA_PREFIX:+CONDA_PREFIX=$CONDA_PREFIX}${PIXI_PROJECT_MANIFEST:+PIXI_PROJECT_MANIFEST=$PIXI_PROJECT_MANIFEST})."
+    echo "  Consider 'pixi run build' instead, which auto-configures all deps."
+    echo "  Continuing with build.sh..."
+    echo ""
+fi
+
 # --------------------------- parse args -------------------------
 positional=()
 while [[ $# -gt 0 ]]; do

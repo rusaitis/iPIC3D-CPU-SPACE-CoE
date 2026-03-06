@@ -31,7 +31,7 @@ compute_topology() {
 import math
 n = $np
 best = (1, n)
-for i in range(1, int(math.isqrt(n)) + 1):
+for i in range(1, int(math.sqrt(n)) + 1):
     if n % i == 0:
         best = (i, n // i)
 print(best[0])

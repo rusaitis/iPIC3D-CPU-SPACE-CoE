@@ -18,8 +18,24 @@
 # Requirements:
 #   - Build with PETSc:  ./build.sh --petsc
 #   - MPI available (mpirun)
+#   - python3 (for statistics, plotting, convergence parsing)
+#   - Bash 4.0+ (brew install bash on macOS)
+
+# ---- Shell guard (POSIX-compatible — must run before set -euo pipefail) ----
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "ERROR: This script requires bash. Run with: bash $0" >&2
+    echo "       (current shell: $(ps -p $$ -o comm= 2>/dev/null || echo unknown))" >&2
+    exit 1
+fi
 
 set -euo pipefail
+
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "ERROR: Bash 4.0+ required (found ${BASH_VERSION})." >&2
+    echo "       macOS: brew install bash" >&2
+    echo "       Linux: sudo apt install bash  (or equivalent)" >&2
+    exit 1
+fi
 
 # ========================= Section 1: Setup ================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +69,33 @@ OUTPUT_DIR=""
 WRITE_METHOD="phdf5"
 MAKE_MOVIE=false
 CLEAN_OUTPUT=false
+TIMEOUT=""
+SOLVER_FILTER=""
+VERBOSE=true
+WARMUP=0
+NO_PLOT=false
+NO_COLOR_FLAG=false
+PETSC_OPTIONS=""
 TMPDIR_BASE=$(mktemp -d "${TMPDIR:-/tmp}/ipic3d_test_petsc.XXXXXX")
+
+# ========================= Solver Configuration ============================
+#
+# Each solver is defined by four parallel arrays:
+#   SOLVER_LABELS  — short unique label used in filenames and tables
+#   SOLVER_TYPES   — runtime solver type passed to -solver flag ("GMRES" or "PETSc")
+#   SOLVER_EXTRA   — extra CLI args appended after -solver (PETSc KSP options, etc.)
+#   SOLVER_DESC    — human-readable description shown in --help / summary
+#
+# To add a new solver variant:
+#   1. Append to all four arrays below (keep them in sync)
+#   2. Guard behind ALL_SOLVERS or a new flag if experimental
+#
+# Default solvers (always included):
+SOLVER_LABELS=("GMRES"      "PETSc_gmres")
+SOLVER_TYPES=( "GMRES"      "PETSc")
+SOLVER_EXTRA=( ""           "")
+SOLVER_DESC=(  "Built-in restarted GMRES (m=20)" \
+               "PETSc GMRES (default KSP settings)")
 
 # ========================= Section 3: Argument parsing =====================
 while [[ $# -gt 0 ]]; do
@@ -105,10 +147,28 @@ while [[ $# -gt 0 ]]; do
             validate_pos_int "--grid-step" "$2"
             GRID_STEP="$2"; shift 2 ;;
         --all-solvers)  ALL_SOLVERS=true;   shift ;;
+        --solvers)
+            [[ $# -ge 2 ]] || { echo "Error: --solvers requires a comma-separated list" >&2; exit 2; }
+            SOLVER_FILTER="$2"; shift 2 ;;
         --randomize)    RANDOMIZE=true;     shift ;;
         --clean)        CLEAN_OUTPUT=true;  shift ;;
         --movie)        MAKE_MOVIE=true;    shift ;;
         --dry-run)      DRY_RUN=true;       shift ;;
+        --timeout)
+            [[ $# -ge 2 ]] || { echo "Error: --timeout requires a positive integer (seconds)" >&2; exit 2; }
+            validate_pos_int "--timeout" "$2"
+            TIMEOUT="$2"; shift 2 ;;
+        --verbose)      VERBOSE=true;       shift ;;
+        --quiet)        VERBOSE=false;      shift ;;
+        --warmup)
+            [[ $# -ge 2 ]] || { echo "Error: --warmup requires a non-negative integer" >&2; exit 2; }
+            validate_nonneg_int "--warmup" "$2"
+            WARMUP="$2"; shift 2 ;;
+        --no-plot)      NO_PLOT=true;       shift ;;
+        --no-color)     NO_COLOR_FLAG=true; shift ;;
+        --petsc-options)
+            [[ $# -ge 2 ]] || { echo "Error: --petsc-options requires a quoted string" >&2; exit 2; }
+            PETSC_OPTIONS="$2"; shift 2 ;;
         --input)        INPUT_FILE="$2";    shift 2 ;;
         --name)
             [[ $# -ge 2 ]] || { echo "Error: --name requires a tag string" >&2; exit 2; }
@@ -148,7 +208,15 @@ Options:
   --grid-max N         Largest XY grid size (triggers scaling mode)
   --grid-step N        Grid size increment (default: 50)
   --all-solvers        Add PETSc fgmres, bcgs, tfqmr
+  --solvers LIST       Comma-separated solver labels to run (e.g. GMRES,PETSc_bcgs)
   --randomize          Shuffle solver run order
+  --timeout N          Kill simulation after N seconds (requires timeout/gtimeout)
+  --verbose            Show full output (default)
+  --quiet              Suppress per-run progress lines
+  --warmup N           Run N warm-up cycles before timed runs (default: 0)
+  --no-plot            Skip matplotlib plotting
+  --no-color           Disable colored output (auto-detected when piped)
+  --petsc-options STR  Extra PETSc KSP options for all PETSc runs (quoted string)
   --input FILE         Input file path (default: inputfiles/Double_Harris.inp)
   --name TAG           Output dir suffix: test_petsc_output_TAG/
   --field-output N     Save field data every N cycles (default: CYCLES in single-grid, off in scaling)
@@ -184,6 +252,22 @@ HELPEOF
     esac
 done
 
+# ========================= Color Setup ======================================
+# Auto-detect: disable color when piped, when --no-color given, or when
+# the NO_COLOR env var is set (https://no-color.org/).
+if [[ "$NO_COLOR_FLAG" == true ]] || [[ "${NO_COLOR+set}" == "set" ]] || ! [[ -t 1 ]]; then
+    _color=false
+else
+    _color=true
+fi
+
+if [[ "$_color" == true ]]; then
+    RED=$'\033[31m'  GREEN=$'\033[32m'  YELLOW=$'\033[33m'  BLUE=$'\033[34m'
+    BOLD=$'\033[1m'  DIM=$'\033[2m'     RESET=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' RESET=''
+fi
+
 # ========================= Section 4: Mode detection =======================
 SCALING_MODE=false
 if [[ -n "$GRID_MIN" || -n "$GRID_MAX" ]]; then
@@ -215,40 +299,33 @@ if [[ -z "$XLEN" || -z "$YLEN" ]]; then
     read -r XLEN YLEN <<< "$(compute_topology "$NP_XY")"
 fi
 
+# Parse grid values from input file once (single awk pass)
+read -r file_nxc file_nyc file_nzc <<< "$(awk -F= '
+    /^nxc/ && !nxc {gsub(/[^0-9]/,"",$2); nxc=$2}
+    /^nyc/ && !nyc {gsub(/[^0-9]/,"",$2); nyc=$2}
+    /^nzc/ && !nzc {gsub(/[^0-9]/,"",$2); nzc=$2}
+    END {print (nxc?nxc:100), (nyc?nyc:100), (nzc?nzc:1)}
+' "$INPUT_FILE")"
+
 # Ensure the grid is divisible by the MPI topology in each dimension.
-# Read values from the input file and round up to the nearest multiple if needed.
+# Round up to the nearest multiple if needed.
 if [[ -z "$NXC" ]]; then
-    file_nxc=$(grep -m1 '^nxc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')
-    file_nxc=${file_nxc:-100}
     rem=$((file_nxc % XLEN))
-    if [[ $rem -ne 0 ]]; then
-        NXC=$(( file_nxc + XLEN - rem ))
-    fi
+    [[ $rem -ne 0 ]] && NXC=$(( file_nxc + XLEN - rem ))
 fi
 if [[ -z "$NYC" ]]; then
-    file_nyc=$(grep -m1 '^nyc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')
-    file_nyc=${file_nyc:-100}
     rem=$((file_nyc % YLEN))
-    if [[ $rem -ne 0 ]]; then
-        NYC=$(( file_nyc + YLEN - rem ))
-    fi
+    [[ $rem -ne 0 ]] && NYC=$(( file_nyc + YLEN - rem ))
 fi
 if [[ -z "$NZC" && "$ZLEN" -gt 1 ]]; then
-    file_nzc=$(grep -m1 '^nzc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')
-    file_nzc=${file_nzc:-1}
     rem=$((file_nzc % ZLEN))
-    if [[ $rem -ne 0 ]]; then
-        NZC=$(( file_nzc + ZLEN - rem ))
-    fi
+    [[ $rem -ne 0 ]] && NZC=$(( file_nzc + ZLEN - rem ))
 fi
 
 # Effective grid values for config generation
-eff_nxc="${NXC:-$(grep -m1 '^nxc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')}"
-eff_nyc="${NYC:-$(grep -m1 '^nyc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')}"
-eff_nzc="${NZC:-$(grep -m1 '^nzc' "$INPUT_FILE" | awk -F= '{print $2}' | awk '{print $1}')}"
-eff_nxc="${eff_nxc:-100}"
-eff_nyc="${eff_nyc:-100}"
-eff_nzc="${eff_nzc:-1}"
+eff_nxc="${NXC:-$file_nxc}"
+eff_nyc="${NYC:-$file_nyc}"
+eff_nzc="${NZC:-$file_nzc}"
 
 # Validate scaling range
 if [[ "$SCALING_MODE" == true ]]; then
@@ -265,6 +342,26 @@ else
     PERSISTENT_OUTPUT_DIR="$SCRIPT_DIR/test_petsc_output"
 fi
 if [[ "$CLEAN_OUTPUT" == true && "$DRY_RUN" != true && -d "$PERSISTENT_OUTPUT_DIR" ]]; then
+    # Safety: reject system directories
+    _clean_dir_real=$(cd "$PERSISTENT_OUTPUT_DIR" && pwd -P)
+    case "$_clean_dir_real" in
+        /|/usr|/usr/*|/var|/var/*|/etc|/etc/*|/bin|/bin/*|/sbin|/sbin/*|"$HOME")
+            echo "ERROR: --clean refuses to delete system directory: $PERSISTENT_OUTPUT_DIR" >&2
+            exit 1 ;;
+    esac
+    # Safety: verify directory contains only expected output files
+    _bad_files=$(find "$PERSISTENT_OUTPUT_DIR" -maxdepth 2 -type f \
+        ! -name '*.h5' ! -name '*.hdf' ! -name '*.hdf5' ! -name '*.csv' ! -name '*.png' \
+        ! -name '*.jpg' ! -name '*.mp4' ! -name '*.txt' ! -name '*.md' \
+        ! -name '*.log' ! -name '*.inp' ! -name '.DS_Store' ! -name 'Thumbs.db' \
+        2>/dev/null | head -5)
+    if [[ -n "$_bad_files" ]]; then
+        echo "ERROR: --clean found unexpected files in $PERSISTENT_OUTPUT_DIR:" >&2
+        echo "$_bad_files" >&2
+        echo "       Only .h5/.hdf/.hdf5/.csv/.png/.jpg/.mp4/.txt/.md/.log/.inp files (and OS metadata) are expected." >&2
+        echo "       Remove manually if intended." >&2
+        exit 1
+    fi
     rm -rf "$PERSISTENT_OUTPUT_DIR"
 fi
 mkdir -p "$PERSISTENT_OUTPUT_DIR"
@@ -272,20 +369,61 @@ mkdir -p "$PERSISTENT_OUTPUT_DIR"
 CSV_FILE="$PERSISTENT_OUTPUT_DIR/results.csv"
 PLOT_FILE="$PERSISTENT_OUTPUT_DIR/results.png"
 
-# ========================= Section 5: Solver configuration =================
-SOLVER_LABELS=("GMRES"      "PETSc_gmres")
-SOLVER_TYPES=( "GMRES"      "PETSc")
-SOLVER_EXTRA=( ""           "")
-
+# ========================= Section 5: Finalize solver list ==================
+# Extra solvers added with --all-solvers
 if [[ "$ALL_SOLVERS" == true ]]; then
-    SOLVER_LABELS+=("PETSc_fgmres"                                          "PETSc_bcgs"                      "PETSc_tfqmr")
-    SOLVER_TYPES+=( "PETSc"                                                  "PETSc"                           "PETSc")
-    SOLVER_EXTRA+=( "-ksp_type fgmres -ksp_gmres_restart 50 -ksp_max_it 1000" "-ksp_type bcgs -ksp_max_it 1000" "-ksp_type tfqmr -ksp_max_it 1000")
+    SOLVER_LABELS+=("PETSc_fgmres"  "PETSc_bcgs"  "PETSc_tfqmr")
+    SOLVER_TYPES+=( "PETSc"         "PETSc"       "PETSc")
+    SOLVER_EXTRA+=( "-ksp_type fgmres -ksp_gmres_restart 50 -ksp_max_it 1000" \
+                    "-ksp_type bcgs -ksp_max_it 1000" \
+                    "-ksp_type tfqmr -ksp_max_it 1000")
+    SOLVER_DESC+=(  "PETSc FGMRES (restart=50, flexible)" \
+                    "PETSc BiCGStab" \
+                    "PETSc TFQMR (transpose-free QMR)")
+fi
+
+# Append --petsc-options to all PETSc solver extra args
+if [[ -n "$PETSC_OPTIONS" ]]; then
+    for ((si=0; si<${#SOLVER_LABELS[@]}; si++)); do
+        if [[ "${SOLVER_TYPES[$si]}" == "PETSc" ]]; then
+            SOLVER_EXTRA[$si]="${SOLVER_EXTRA[$si]:+${SOLVER_EXTRA[$si]} }${PETSC_OPTIONS}"
+        fi
+    done
+fi
+
+# Filter solvers if --solvers was given
+if [[ -n "$SOLVER_FILTER" ]]; then
+    IFS=',' read -ra _wanted <<< "$SOLVER_FILTER"
+    _new_labels=() _new_types=() _new_extra=() _new_desc=()
+    for ((si=0; si<${#SOLVER_LABELS[@]}; si++)); do
+        for _w in "${_wanted[@]}"; do
+            if [[ "${SOLVER_LABELS[$si]}" == "$_w" ]]; then
+                _new_labels+=("${SOLVER_LABELS[$si]}")
+                _new_types+=("${SOLVER_TYPES[$si]}")
+                _new_extra+=("${SOLVER_EXTRA[$si]}")
+                _new_desc+=("${SOLVER_DESC[$si]}")
+                break
+            fi
+        done
+    done
+    if [[ ${#_new_labels[@]} -eq 0 ]]; then
+        echo "ERROR: --solvers matched no known solver labels." >&2
+        echo "       Available: ${SOLVER_LABELS[*]}" >&2
+        exit 2
+    fi
+    SOLVER_LABELS=("${_new_labels[@]}")
+    SOLVER_TYPES=("${_new_types[@]}")
+    SOLVER_EXTRA=("${_new_extra[@]}")
+    SOLVER_DESC=("${_new_desc[@]}")
 fi
 
 NUM_SOLVERS=${#SOLVER_LABELS[@]}
 
 # ========================= Section 6: Prerequisite checks ==================
+if ! command -v python3 &>/dev/null; then
+    echo "ERROR: python3 not found. It is required for parsing, plotting, and statistics." >&2
+    exit 1
+fi
 if [[ "$DRY_RUN" != true ]]; then
     if [[ ! -x "$EXECUTABLE" ]]; then
         echo "ERROR: Executable not found at $EXECUTABLE"
@@ -302,7 +440,42 @@ warn_oversubscription "$NP"
 
 # ========================= Section 7: Helper functions =====================
 cleanup() { rm -rf "$TMPDIR_BASE"; }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
+
+# High-resolution timestamp. Uses $EPOCHREALTIME (Bash 5.0+, zero overhead)
+# when available, falls back to python3.
+if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    timestamp() { printf '%s' "$EPOCHREALTIME"; }
+else
+    timestamp() { python3 -c 'import time; print(f"{time.time():.6f}")'; }
+fi
+
+# Elapsed time: elapsed <start> <end>  →  stdout "X.XXX"
+elapsed() { awk "BEGIN{printf \"%.3f\", $2 - $1}"; }
+
+# Compute mean and stdev for six space-separated value strings.
+# Args: field_str wall_str moments_str mover_str iters_str resid_str
+# Stdout: "avg_field std_field avg_moments avg_mover avg_iters avg_resid avg_wall"
+compute_stats() {
+    python3 -c "
+import statistics
+def mean_str(arr):
+    vals = [float(x) for x in arr if x not in ('NA','')]
+    return f'{statistics.mean(vals):.3f}' if vals else 'NA'
+def std_str(arr):
+    vals = [float(x) for x in arr if x not in ('NA','')]
+    return f'{statistics.stdev(vals):.3f}' if len(vals) > 1 else 'NA'
+
+field   = '$1'.split()
+wall    = '$2'.split()
+moments = '$3'.split()
+mover   = '$4'.split()
+iters   = '$5'.split()
+resid   = '$6'.split()
+
+print(f'{mean_str(field)} {std_str(field)} {mean_str(moments)} {mean_str(mover)} {mean_str(iters)} {mean_str(resid)} {mean_str(wall)}')
+"
+}
 
 # Create a test input file with reduced cycles and controlled output.
 # Args: outdir nxc nyc nzc [solver_label]
@@ -402,7 +575,8 @@ with open(logfile) as f:
         m = re.search(r'GMRES converged at restart (\d+); iteration (\d+) with error:\s*([\d.eE+\-]+)', line)
         if m:
             restart, iteration = int(m.group(1)), int(m.group(2))
-            total_iters = restart * 20 + iteration  # m=20 from EMfields3D.cpp
+            # GMRES restart size m=20 from EMfields3D.cpp:calculateE() (GMRES call: m=20)
+            total_iters = restart * 20 + iteration
             iters_list.append(total_iters)
             residuals.append(float(m.group(3)))
             continue
@@ -445,6 +619,32 @@ else:
 PYCONV
 }
 
+# Run a short warm-up simulation (WARMUP cycles) to prime caches/JIT.
+# Args: nxc nyc nzc label solver_type [extra_args...]
+run_warmup() {
+    local nxc="$1" nyc="$2" nzc="$3" label="$4" solver_type="$5"
+    shift 5
+    local extra_args=("$@")
+
+    if [[ "$WARMUP" -le 0 || "$DRY_RUN" == true ]]; then return 0; fi
+
+    local warmup_dir="$TMPDIR_BASE/warmup_${label}_${nxc}x${nyc}x${nzc}"
+    mkdir -p "$warmup_dir"
+
+    # Create a short input file with WARMUP cycles and no output
+    local save_cycles="$CYCLES" save_field="$FIELD_OUTPUT" save_particle="$PARTICLE_OUTPUT"
+    CYCLES="$WARMUP"; FIELD_OUTPUT=0; PARTICLE_OUTPUT=0
+    local inp
+    inp=$(make_input "$warmup_dir" "$nxc" "$nyc" "$nzc" "$label")
+    CYCLES="$save_cycles"; FIELD_OUTPUT="$save_field"; PARTICLE_OUTPUT="$save_particle"
+
+    local cmd=(mpirun -np "$NP" "$EXECUTABLE" "$inp" -solver "$solver_type")
+    [[ ${#extra_args[@]} -gt 0 ]] && cmd+=("${extra_args[@]}")
+
+    [[ "$VERBOSE" == true ]] && echo "    Warm-up ($WARMUP cycles)..." >&2
+    "${cmd[@]}" > "$warmup_dir/warmup.log" 2>&1 || true
+}
+
 # Run a single simulation attempt.
 # Stdout: "field_t moments_t mover_t iters converged residual"
 # Args: nxc nyc nzc label solver_type run_id [extra_args...]
@@ -472,16 +672,42 @@ run_solver() {
         return 0
     fi
 
-    if ! "${cmd[@]}" > "$logfile" 2>&1; then
-        echo "FAILED"
+    # Optionally wrap with timeout
+    local run_cmd=("${cmd[@]}")
+    if [[ -n "$TIMEOUT" ]]; then
+        local timeout_bin=""
+        if command -v timeout &>/dev/null; then
+            timeout_bin="timeout"
+        elif command -v gtimeout &>/dev/null; then
+            timeout_bin="gtimeout"
+        fi
+        if [[ -n "$timeout_bin" ]]; then
+            run_cmd=("$timeout_bin" "$TIMEOUT" "${cmd[@]}")
+        fi
+    fi
+
+    if ! "${run_cmd[@]}" > "$logfile" 2>&1; then
+        echo "${RED}FAILED${RESET}"
+        # Show last 20 lines for diagnostics
+        if [[ -f "$logfile" ]]; then
+            echo "--- Last 20 lines of $logfile ---" >&2
+            tail -20 "$logfile" >&2
+            echo "--- End of log snippet ---" >&2
+        fi
+        # Hint about conda/mamba MPI conflicts
+        if [[ -n "${CONDA_DEFAULT_ENV:-}" ]]; then
+            echo "${YELLOW}WARNING:${RESET} conda/mamba environment '${CONDA_DEFAULT_ENV}' is active." >&2
+            echo "         Its MPI may conflict with the MPI used to build iPIC3D." >&2
+            echo "         Try: conda deactivate && rerun this script." >&2
+        fi
         return 1
     fi
 
     # Extract timings
     local field_t moments_t mover_t
-    field_t=$(grep "Field solver" "$logfile" | tail -1 | awk '{print $(NF-1)}') || field_t="NA"
-    moments_t=$(grep "Moment gatherer" "$logfile" | tail -1 | awk '{print $(NF-1)}') || moments_t="NA"
-    mover_t=$(grep "Particle mover" "$logfile" | tail -1 | awk '{print $(NF-1)}') || mover_t="NA"
+    field_t=$(awk '/Field solver/{v=$(NF-1)} END{print v}' "$logfile") || field_t="NA"
+    moments_t=$(awk '/Moment gatherer/{v=$(NF-1)} END{print v}' "$logfile") || moments_t="NA"
+    mover_t=$(awk '/Particle mover/{v=$(NF-1)} END{print v}' "$logfile") || mover_t="NA"
     [[ -z "$field_t" ]] && field_t="NA"
     [[ -z "$moments_t" ]] && moments_t="NA"
     [[ -z "$mover_t" ]] && mover_t="NA"
@@ -513,13 +739,16 @@ run_averaged() {
 
     local runs_info=""
     [[ $AVG -gt 1 ]] && runs_info=",  Runs: $AVG"
-    echo "${I}--- $label ($solver_type) — ${nxc}x${nyc}x${nzc},  ${NP} procs,  ${CYCLES} cyc${runs_info}" >&2
+    [[ "$VERBOSE" == true ]] && echo "${I}--- ${BOLD}$label${RESET} ($solver_type) — ${nxc}x${nyc}x${nzc},  ${NP} procs,  ${CYCLES} cyc${runs_info}" >&2
 
     local field_arr=() wall_arr=() moments_arr=() mover_arr=()
     local iters_arr=() residual_arr=()
     local all_converged=true
     local last_logfile=""
     local failed=0
+
+    # Optional warm-up run
+    run_warmup "$nxc" "$nyc" "$nzc" "$label" "$solver_type" "${extra_args[@]+"${extra_args[@]}"}"
 
     for ((r=1; r<=AVG; r++)); do
         if [[ $r -gt 1 && $COOLDOWN -gt 0 ]]; then
@@ -528,13 +757,13 @@ run_averaged() {
         fi
 
         local start_time
-        start_time=$(python3 -c 'import time; print(time.time())')
+        start_time=$(timestamp)
 
         local result
         result=$(run_solver "$nxc" "$nyc" "$nzc" "$label" "$solver_type" "$r" "${extra_args[@]+"${extra_args[@]}"}")
 
         local end_time
-        end_time=$(python3 -c 'import time; print(time.time())')
+        end_time=$(timestamp)
 
         if [[ "$result" == "FAILED" || -z "$result" ]]; then
             failed=1; break
@@ -544,7 +773,7 @@ run_averaged() {
         read -r ft mt pt it cv rs <<< "$result"
 
         local wall_t
-        wall_t=$(python3 -c "print(f'{$end_time - $start_time:.3f}')")
+        wall_t=$(elapsed "$start_time" "$end_time")
         wall_arr+=("$wall_t")
 
         [[ "$ft" != "NA" && -n "$ft" ]] && field_arr+=("$ft")
@@ -556,15 +785,17 @@ run_averaged() {
 
         last_logfile="$TMPDIR_BASE/${label}_${nxc}x${nyc}x${nzc}_r${r}/output.log"
 
-        if [[ $AVG -gt 1 ]]; then
-            printf "${I}  Run %d/%d — wall: %s s,  field: %s s\n" "$r" "$AVG" "$wall_t" "$ft" >&2
-        else
-            echo "${I}  Wall: ${wall_t} s,  Field: ${ft} s" >&2
+        if [[ "$VERBOSE" == true ]]; then
+            if [[ $AVG -gt 1 ]]; then
+                printf "${I}  Run %d/%d — wall: %s s,  field: %s s\n" "$r" "$AVG" "$wall_t" "$ft" >&2
+            else
+                echo "${I}  Wall: ${wall_t} s,  Field: ${ft} s" >&2
+            fi
         fi
     done
 
     if [[ $failed -eq 1 || ${#field_arr[@]} -eq 0 ]]; then
-        echo "${I}  FAILED" >&2
+        echo "${I}  ${RED}FAILED${RESET}" >&2
         echo "NA NA NA NA NA no NA NA none"
         return 1
     fi
@@ -579,32 +810,7 @@ run_averaged() {
     resid_str="${residual_arr[*]+"${residual_arr[*]}"}"
 
     local stats
-    stats=$(python3 -c "
-import statistics
-def mean_str(arr):
-    vals = [float(x) for x in arr if x not in ('NA','')]
-    return f'{statistics.mean(vals):.3f}' if vals else 'NA'
-def std_str(arr):
-    vals = [float(x) for x in arr if x not in ('NA','')]
-    return f'{statistics.stdev(vals):.3f}' if len(vals) > 1 else 'NA'
-
-field   = '$field_str'.split()
-wall    = '$wall_str'.split()
-moments = '$moments_str'.split()
-mover   = '$mover_str'.split()
-iters   = '$iters_str'.split()
-resid   = '$resid_str'.split()
-
-avg_field   = mean_str(field)
-std_field   = std_str(field)
-avg_moments = mean_str(moments)
-avg_mover   = mean_str(mover)
-avg_iters   = mean_str(iters)
-avg_resid   = mean_str(resid)
-avg_wall    = mean_str(wall)
-
-print(f'{avg_field} {std_field} {avg_moments} {avg_mover} {avg_iters} {avg_resid} {avg_wall}')
-")
+    stats=$(compute_stats "$field_str" "$wall_str" "$moments_str" "$mover_str" "$iters_str" "$resid_str")
 
     local avg_field std_field avg_moments avg_mover avg_iters avg_residual avg_wall
     read -r avg_field std_field avg_moments avg_mover avg_iters avg_residual avg_wall <<< "$stats"
@@ -629,10 +835,10 @@ extract_timing() {
     echo "  [$label] Module timings (cumulative over $CYCLES cycles)${suffix}:"
 
     local init_t moment_t mover_t write_t
-    init_t=$(grep "Time needed for initialisation:" "$logfile" | tail -1 | awk '{print $(NF-1)}') || init_t="N/A"
-    mover_t=$(grep "Particle mover" "$logfile" | tail -1 | awk '{print $(NF-1)}') || mover_t="N/A"
-    moment_t=$(grep "Moment gatherer" "$logfile" | tail -1 | awk '{print $(NF-1)}') || moment_t="N/A"
-    write_t=$(grep "Write data" "$logfile" | tail -1 | awk '{print $(NF-1)}') || write_t="N/A"
+    init_t=$(awk '/Time needed for initialisation:/{v=$(NF-1)} END{print v}' "$logfile") || init_t="N/A"
+    mover_t=$(awk '/Particle mover/{v=$(NF-1)} END{print v}' "$logfile") || mover_t="N/A"
+    moment_t=$(awk '/Moment gatherer/{v=$(NF-1)} END{print v}' "$logfile") || moment_t="N/A"
+    write_t=$(awk '/Write data/{v=$(NF-1)} END{print v}' "$logfile") || write_t="N/A"
 
     printf "    %-22s %10s s\n" "Initialisation:" "$init_t"
     printf "    %-22s %10s s\n" "Field solver:" "$field_t"
@@ -676,9 +882,13 @@ extract_convergence() {
 # Uses globals: CONFIGS, NUM_SOLVERS, t_sweep_start, SCALING_MODE
 show_eta() {
     local t1="$1" g0="$2"
+    export _C_BOLD="$BOLD" _C_RESET="$RESET"
     python3 - <<PYETA || true
-import time
+import os, time
 from datetime import datetime, timedelta
+
+_bold  = os.environ.get('_C_BOLD', '')
+_reset = os.environ.get('_C_RESET', '')
 
 t1        = $t1
 g0        = $g0
@@ -711,7 +921,7 @@ title = 'ESTIMATED TOTAL RUN TIME'
 msg = f'~{fmt(total_est)} total  |  ~{fmt(remaining_est)} remaining  |  ETA {eta:%H:%M}'
 pad = max(len(title), len(msg)) + 4
 print(f'  +{"-" * pad}+')
-print(f'  |  {title:^{pad-4}}  |')
+print(f'  |  {_bold}{title:^{pad-4}}{_reset}  |')
 print(f'  +{"-" * pad}+')
 print(f'  |  {msg:^{pad-4}}  |')
 print(f'  +{"-" * pad}+')
@@ -722,7 +932,11 @@ PYETA
 CONFIGS=()
 if [[ "$SCALING_MODE" == true ]]; then
     # Compute LCM of XLEN and YLEN for grid divisibility
-    lcm=$(python3 -c "import math; print(math.lcm($XLEN, $YLEN))")
+    lcm=$(python3 -c "
+from math import gcd
+a, b = $XLEN, $YLEN
+print(a * b // gcd(a, b))
+")
 
     prev_grids=()
     for (( g=GRID_MIN; g<=GRID_MAX; g+=GRID_STEP )); do
@@ -790,21 +1004,32 @@ done
 [[ -n "$FIELD_OUTPUT" || -n "$PARTICLE_OUTPUT" ]] && box_lines+=("  Field output: ${FIELD_OUTPUT:-off}   Particle output: ${PARTICLE_OUTPUT:-off}")
 [[ "$MAKE_MOVIE" == true ]] && box_lines+=("  Movie: yes (generate mp4 comparison movie)")
 [[ "$RANDOMIZE" == true ]] && box_lines+=("  Randomize: yes (solver order shuffled)")
-[[ "$DRY_RUN" == true ]] && box_lines+=("  *** DRY-RUN MODE — no simulations will be executed ***")
+[[ -n "$TIMEOUT" ]] && box_lines+=("  Timeout: ${TIMEOUT}s per simulation")
+[[ "$WARMUP" -gt 0 ]] && box_lines+=("  Warm-up: $WARMUP cycles before timed runs")
+[[ -n "$PETSC_OPTIONS" ]] && box_lines+=("  PETSc options: $PETSC_OPTIONS")
+[[ "$NO_PLOT" == true ]] && box_lines+=("  Plotting: disabled (--no-plot)")
+[[ "$VERBOSE" == false ]] && box_lines+=("  Output: quiet mode")
+[[ "$DRY_RUN" == true ]] && box_lines+=("  ${YELLOW}*** DRY-RUN MODE — no simulations will be executed ***${RESET}")
+
+# Strip ANSI escape codes (works for our codes: 0m-34m, i.e. 1- and 2-digit)
+_strip_ansi() { local s="$1"; s="${s//$'\033['[0-9][0-9]m/}"; s="${s//$'\033['[0-9]m/}"; printf '%s' "$s"; }
 
 # Compute box width: max of title and all content lines, plus 2 for padding
 BOX_W=$(( ${#box_title} + 4 ))  # title + margins
 for line in "${box_lines[@]}"; do
-    (( ${#line} + 2 > BOX_W )) && BOX_W=$(( ${#line} + 2 ))
+    local_plain=$(_strip_ansi "$line")
+    (( ${#local_plain} + 2 > BOX_W )) && BOX_W=$(( ${#local_plain} + 2 ))
 done
 
-box_border=$(printf -- '-%.0s' $(seq 1 $BOX_W))
+printf -v box_border '%*s' "$BOX_W" ''; box_border=${box_border// /-}
 box_pad=$(( (BOX_W - ${#box_title}) / 2 ))
 echo "+${box_border}+"
-printf "|%*s%-*s|\n" $box_pad "" $((BOX_W - box_pad)) "$box_title"
+printf "|%*s${BOLD}%-*s${RESET}|\n" $box_pad "" $((BOX_W - box_pad)) "$box_title"
 echo "+${box_border}+"
 for line in "${box_lines[@]}"; do
-    printf "|%-${BOX_W}s|\n" "$line"
+    local_plain=$(_strip_ansi "$line")
+    local_pad=$(( BOX_W - ${#local_plain} ))
+    printf "|%s%*s|\n" "$line" "$local_pad" ""
 done
 echo "+${box_border}+"
 echo ""
@@ -823,7 +1048,7 @@ ALL_WALL=()
 ALL_LOGS=()
 ALL_CONFIG_TAGS=()    # "nxc nyc nzc" for each result
 
-t_sweep_start=$(python3 -c 'import time; print(time.time())')
+t_sweep_start=$(timestamp)
 first_run_t=""
 
 config_count=0
@@ -835,9 +1060,9 @@ for cfg in "${CONFIGS[@]}"; do
     config_tag="${cnxc}x${cnyc}x${cnzc}"
 
     if [[ "$SCALING_MODE" == true ]]; then
-        echo "--------------------------------------------------------"
-        echo "  [$config_count/$total_configs]  Grid: ${config_tag}  (${CYCLES} cycles, ${NP} procs)"
-        echo "--------------------------------------------------------"
+        echo "${DIM}--------------------------------------------------------${RESET}"
+        echo "  ${BOLD}[$config_count/$total_configs]${RESET}  Grid: ${config_tag}  (${CYCLES} cycles, ${NP} procs)"
+        echo "${DIM}--------------------------------------------------------${RESET}"
     fi
 
     if [[ "$RANDOMIZE" == true ]]; then
@@ -849,18 +1074,30 @@ for cfg in "${CONFIGS[@]}"; do
         RI="  "
         [[ "$SCALING_MODE" == true ]] && RI="    "
 
-        # Per-solver accumulators (indexed by solver position)
+        # Per-solver accumulators using temp files (one file per metric per solver)
+        declare -A acc_converged acc_lastlog acc_failed
+        local _acc_dir="$TMPDIR_BASE/_acc_${config_tag}"
+        mkdir -p "$_acc_dir"
         for ((si=0; si<NUM_SOLVERS; si++)); do
-            eval "acc_field_$si=()"
-            eval "acc_wall_$si=()"
-            eval "acc_moments_$si=()"
-            eval "acc_mover_$si=()"
-            eval "acc_iters_$si=()"
-            eval "acc_resid_$si=()"
-            eval "acc_converged_$si=true"
-            eval "acc_lastlog_$si='none'"
-            eval "acc_failed_$si=0"
+            : > "$_acc_dir/field_$si"
+            : > "$_acc_dir/wall_$si"
+            : > "$_acc_dir/moments_$si"
+            : > "$_acc_dir/mover_$si"
+            : > "$_acc_dir/iters_$si"
+            : > "$_acc_dir/resid_$si"
+            acc_converged[$si]=true
+            acc_lastlog[$si]="none"
+            acc_failed[$si]=0
         done
+
+        # Optional warm-up for each solver
+        if [[ "$WARMUP" -gt 0 && "$DRY_RUN" != true ]]; then
+            for ((si=0; si<NUM_SOLVERS; si++)); do
+                local _wu_extra=()
+                [[ -n "${SOLVER_EXTRA[$si]}" ]] && read -ra _wu_extra <<< "${SOLVER_EXTRA[$si]}"
+                run_warmup "$cnxc" "$cnyc" "$cnzc" "${SOLVER_LABELS[$si]}" "${SOLVER_TYPES[$si]}" "${_wu_extra[@]+"${_wu_extra[@]}"}"
+            done
+        fi
 
         for ((r=1; r<=AVG; r++)); do
             if [[ $r -gt 1 && $COOLDOWN -gt 0 ]]; then
@@ -886,43 +1123,42 @@ for cfg in "${CONFIGS[@]}"; do
                     read -ra extra_args <<< "${SOLVER_EXTRA[$si]}"
                 fi
 
-                printf "${RI}  %-18s ... " "$label"
+                printf "${RI}  ${BOLD}%-18s${RESET} ... " "$label"
 
-                [[ -z "$first_run_t" ]] && t_r_before=$(python3 -c 'import time; print(time.time())')
+                [[ -z "$first_run_t" ]] && t_r_before=$(timestamp)
 
-                start_time=$(python3 -c 'import time; print(time.time())')
+                start_time=$(timestamp)
                 result=$(run_solver "$cnxc" "$cnyc" "$cnzc" "$label" "$solver_type" "${r}" "${extra_args[@]+"${extra_args[@]}"}")
-                end_time=$(python3 -c 'import time; print(time.time())')
+                end_time=$(timestamp)
 
                 if [[ "$result" == "FAILED" || -z "$result" ]]; then
-                    echo "FAILED"
-                    eval "acc_failed_$si=1"
+                    echo "${RED}FAILED${RESET}"
+                    acc_failed[$si]=1
                     continue
                 fi
 
                 read -r ft mt pt it cv rs <<< "$result"
 
-                wall_t=$(python3 -c "print(f'{$end_time - $start_time:.3f}')")
+                wall_t=$(elapsed "$start_time" "$end_time")
 
                 echo "${ft} s  (wall: ${wall_t} s)"
 
                 # ETA after first completed run_solver
                 if [[ -z "$first_run_t" && "$ft" != "NA" && "$DRY_RUN" != true ]]; then
-                    t_r_after=$(python3 -c 'import time; print(time.time())')
+                    t_r_after=$(timestamp)
                     # Scale one run_solver to one full config: ×AVG×NUM_SOLVERS
-                    first_run_t=$(python3 -c "print(($t_r_after - $t_r_before) * $AVG * $NUM_SOLVERS)")
+                    first_run_t=$(awk "BEGIN{printf \"%.3f\", ($t_r_after - $t_r_before) * $AVG * $NUM_SOLVERS}")
                     show_eta "$first_run_t" "$cnxc"
                 fi
 
-                eval "acc_field_$si+=('$ft')"
-                eval "acc_wall_$si+=('$wall_t')"
-                [[ "$ft" != "NA" && -n "$ft" ]] || true
-                [[ "$mt" != "NA" && -n "$mt" ]] && eval "acc_moments_$si+=('$mt')"
-                [[ "$pt" != "NA" && -n "$pt" ]] && eval "acc_mover_$si+=('$pt')"
-                [[ "$it" != "NA" && -n "$it" ]] && eval "acc_iters_$si+=('$it')"
-                [[ "$rs" != "NA" && -n "$rs" ]] && eval "acc_resid_$si+=('$rs')"
-                [[ "$cv" == "no" ]] && eval "acc_converged_$si=false"
-                eval "acc_lastlog_$si='$TMPDIR_BASE/${label}_${cnxc}x${cnyc}x${cnzc}_r${r}/output.log'"
+                echo "$wall_t" >> "$_acc_dir/wall_$si"
+                [[ "$ft" != "NA" && -n "$ft" ]] && echo "$ft" >> "$_acc_dir/field_$si"
+                [[ "$mt" != "NA" && -n "$mt" ]] && echo "$mt" >> "$_acc_dir/moments_$si"
+                [[ "$pt" != "NA" && -n "$pt" ]] && echo "$pt" >> "$_acc_dir/mover_$si"
+                [[ "$it" != "NA" && -n "$it" ]] && echo "$it" >> "$_acc_dir/iters_$si"
+                [[ "$rs" != "NA" && -n "$rs" ]] && echo "$rs" >> "$_acc_dir/resid_$si"
+                [[ "$cv" == "no" ]] && acc_converged[$si]=false
+                acc_lastlog[$si]="$TMPDIR_BASE/${label}_${cnxc}x${cnyc}x${cnzc}_r${r}/output.log"
             done
         done
 
@@ -932,17 +1168,18 @@ for cfg in "${CONFIGS[@]}"; do
         fi
         for ((si=0; si<NUM_SOLVERS; si++)); do
             label="${SOLVER_LABELS[$si]}"
-            eval "local_failed=\$acc_failed_$si"
-            eval "field_vals=(\"\${acc_field_$si[@]+\"\${acc_field_$si[@]}\"}\")"
-            eval "wall_vals=(\"\${acc_wall_$si[@]+\"\${acc_wall_$si[@]}\"}\")"
-            eval "moments_vals=(\"\${acc_moments_$si[@]+\"\${acc_moments_$si[@]}\"}\")"
-            eval "mover_vals=(\"\${acc_mover_$si[@]+\"\${acc_mover_$si[@]}\"}\")"
-            eval "iters_vals=(\"\${acc_iters_$si[@]+\"\${acc_iters_$si[@]}\"}\")"
-            eval "resid_vals=(\"\${acc_resid_$si[@]+\"\${acc_resid_$si[@]}\"}\")"
-            eval "all_conv=\$acc_converged_$si"
-            eval "last_log=\$acc_lastlog_$si"
+            local_failed="${acc_failed[$si]}"
+            # Read temp files into space-separated strings
+            field_str=$(tr '\n' ' ' < "$_acc_dir/field_$si")
+            wall_str=$(tr '\n' ' ' < "$_acc_dir/wall_$si")
+            moments_str=$(tr '\n' ' ' < "$_acc_dir/moments_$si")
+            mover_str=$(tr '\n' ' ' < "$_acc_dir/mover_$si")
+            iters_str=$(tr '\n' ' ' < "$_acc_dir/iters_$si")
+            resid_str=$(tr '\n' ' ' < "$_acc_dir/resid_$si")
+            all_conv="${acc_converged[$si]}"
+            last_log="${acc_lastlog[$si]}"
 
-            if [[ "$local_failed" -eq 1 || ${#field_vals[@]} -eq 0 ]]; then
+            if [[ "$local_failed" -eq 1 || -z "${field_str// /}" ]]; then
                 ALL_LABELS+=("$label")
                 ALL_FIELD+=("NA"); ALL_STD+=("NA"); ALL_MOMENTS+=("NA"); ALL_MOVER+=("NA")
                 ALL_ITERS+=("NA"); ALL_CONVERGED+=("no"); ALL_RESIDUAL+=("NA")
@@ -950,32 +1187,7 @@ for cfg in "${CONFIGS[@]}"; do
                 continue
             fi
 
-            # Safe strings for python
-            field_str="${field_vals[*]+"${field_vals[*]}"}"
-            wall_str="${wall_vals[*]+"${wall_vals[*]}"}"
-            moments_str="${moments_vals[*]+"${moments_vals[*]}"}"
-            mover_str="${mover_vals[*]+"${mover_vals[*]}"}"
-            iters_str="${iters_vals[*]+"${iters_vals[*]}"}"
-            resid_str="${resid_vals[*]+"${resid_vals[*]}"}"
-
-            stats=$(python3 -c "
-import statistics
-def mean_str(arr):
-    vals = [float(x) for x in arr if x not in ('NA','')]
-    return f'{statistics.mean(vals):.3f}' if vals else 'NA'
-def std_str(arr):
-    vals = [float(x) for x in arr if x not in ('NA','')]
-    return f'{statistics.stdev(vals):.3f}' if len(vals) > 1 else 'NA'
-
-field   = '$field_str'.split()
-wall    = '$wall_str'.split()
-moments = '$moments_str'.split()
-mover   = '$mover_str'.split()
-iters   = '$iters_str'.split()
-resid   = '$resid_str'.split()
-
-print(f'{mean_str(field)} {std_str(field)} {mean_str(moments)} {mean_str(mover)} {mean_str(iters)} {mean_str(resid)} {mean_str(wall)}')
-")
+            stats=$(compute_stats "$field_str" "$wall_str" "$moments_str" "$mover_str" "$iters_str" "$resid_str")
             read -r r_field r_std r_moments r_mover r_iters r_residual r_wall <<< "$stats"
             r_converged="yes"
             [[ "$all_conv" == false ]] && r_converged="no"
@@ -1002,13 +1214,13 @@ print(f'{mean_str(field)} {std_str(field)} {mean_str(moments)} {mean_str(mover)}
                 read -ra extra_args <<< "${SOLVER_EXTRA[$i]}"
             fi
 
-            [[ -z "$first_run_t" ]] && t_r_before=$(python3 -c 'import time; print(time.time())')
+            [[ -z "$first_run_t" ]] && t_r_before=$(timestamp)
 
             local_result=$(run_averaged "$cnxc" "$cnyc" "$cnzc" "$label" "$solver_type" "${extra_args[@]+"${extra_args[@]}"}")
 
             if [[ -z "$first_run_t" && "$DRY_RUN" != true ]]; then
-                t_r_after=$(python3 -c 'import time; print(time.time())')
-                first_run_t=$(python3 -c "print($t_r_after - $t_r_before)")
+                t_r_after=$(timestamp)
+                first_run_t=$(elapsed "$t_r_before" "$t_r_after")
                 show_eta "$first_run_t" "$cnxc"
             fi
 
@@ -1038,7 +1250,7 @@ print(f'{mean_str(field)} {std_str(field)} {mean_str(moments)} {mean_str(mover)}
                 idx=$(( base_idx + si ))
                 other_t="${ALL_FIELD[$idx]}"
                 if [[ "$other_t" != "NA" ]]; then
-                    speedup=$(python3 -c "g=float('$gmres_t'); p=float('$other_t'); print(f'{g/p:.2f}' if p > 0 else 'N/A')")
+                    speedup=$(awk "BEGIN{p=$other_t; if(p>0) printf \"%.2f\", $gmres_t/p; else print \"N/A\"}")
                     echo "    ${SOLVER_LABELS[$si]} speedup: ${speedup}x"
                 fi
             done
@@ -1049,15 +1261,18 @@ done
 
 # ========================= Section 11: Results =============================
 echo ""
-echo "========================= RESULTS ========================="
+echo "${BOLD}========================= RESULTS =========================${RESET}"
 echo ""
+
+# Export color codes for embedded Python blocks
+export _C_GREEN="$GREEN" _C_RED="$RED" _C_RESET="$RESET" _C_BOLD="$BOLD"
 
 if [[ "$SCALING_MODE" != true ]]; then
     # ---- Single-grid mode: detailed output ----
     # Convergence
-    echo "--------------------------------------------------------"
-    echo "  CONVERGENCE"
-    echo "--------------------------------------------------------"
+    echo "${DIM}--------------------------------------------------------${RESET}"
+    echo "  ${BOLD}CONVERGENCE${RESET}"
+    echo "${DIM}--------------------------------------------------------${RESET}"
     for ((i=0; i<NUM_SOLVERS; i++)); do
         if [[ "$DRY_RUN" == true ]]; then
             echo "  [${ALL_LABELS[$i]}] Convergence: (dry-run, no log)"
@@ -1070,9 +1285,9 @@ if [[ "$SCALING_MODE" != true ]]; then
     done
 
     # Timing
-    echo "--------------------------------------------------------"
-    echo "  TIMING"
-    echo "--------------------------------------------------------"
+    echo "${DIM}--------------------------------------------------------${RESET}"
+    echo "  ${BOLD}TIMING${RESET}"
+    echo "${DIM}--------------------------------------------------------${RESET}"
     for ((i=0; i<NUM_SOLVERS; i++)); do
         if [[ "$DRY_RUN" == true ]]; then
             echo "  [${ALL_LABELS[$i]}] Timing: (dry-run, no log)"
@@ -1085,14 +1300,14 @@ if [[ "$SCALING_MODE" != true ]]; then
     done
 
     # Comparison table
-    echo "-------------------------------------------------------------------------------"
-    echo "  COMPARISON SUMMARY"
-    echo "-------------------------------------------------------------------------------"
+    echo "${DIM}-------------------------------------------------------------------------------${RESET}"
+    echo "  ${BOLD}COMPARISON SUMMARY${RESET}"
+    echo "${DIM}-------------------------------------------------------------------------------${RESET}"
 
     # Header
-    printf "  %-20s" ""
+    printf "  ${BOLD}%-20s${RESET}" ""
     for ((i=0; i<NUM_SOLVERS; i++)); do
-        printf " %14s" "${ALL_LABELS[$i]}"
+        printf " ${BOLD}%14s${RESET}" "${ALL_LABELS[$i]}"
     done
     echo ""
     printf "  %-20s" "--------------------"
@@ -1125,7 +1340,12 @@ if [[ "$SCALING_MODE" != true ]]; then
     # Converged row
     printf "  %-20s" "All converged?"
     for ((i=0; i<NUM_SOLVERS; i++)); do
-        printf " %14s" "${ALL_CONVERGED[$i]}"
+        val="${ALL_CONVERGED[$i]}"
+        case "$val" in
+            yes) printf " ${GREEN}%14s${RESET}" "yes" ;;
+            no)  printf " ${RED}%14s${RESET}" "no" ;;
+            *)   printf " %14s" "$val" ;;
+        esac
     done
     echo ""
 
@@ -1142,7 +1362,7 @@ if [[ "$SCALING_MODE" != true ]]; then
         if [[ "$DRY_RUN" == true || "${ALL_LOGS[$i]}" == "none" ]]; then
             printf " %12s s" "N/A"
         elif [[ -f "${ALL_LOGS[$i]}" ]]; then
-            init_t=$(grep "Time needed for initialisation:" "${ALL_LOGS[$i]}" | tail -1 | awk '{print $(NF-1)}') || init_t="N/A"
+            init_t=$(awk '/Time needed for initialisation:/{v=$(NF-1)} END{print v}' "${ALL_LOGS[$i]}") || init_t="N/A"
             printf " %12s s" "${init_t:-N/A}"
         else
             printf " %12s s" "N/A"
@@ -1159,6 +1379,11 @@ if [[ "$SCALING_MODE" != true ]]; then
     done
 
     python3 - <<EOF 2>/dev/null || echo "  (Could not compute speedup ratios)"
+import os
+_green = os.environ.get('_C_GREEN', '')
+_red   = os.environ.get('_C_RED', '')
+_reset = os.environ.get('_C_RESET', '')
+
 data = {}
 for line in """$field_data""".strip().splitlines():
     parts = line.split()
@@ -1171,22 +1396,24 @@ base = data.get('GMRES')
 if base:
     for label, val in data.items():
         if label != 'GMRES' and val > 0:
-            print(f'    {label:20s}  {base/val:.2f}x  ({val:.3f}s vs {base:.3f}s)')
+            sp = base / val
+            c = _green if sp >= 1.0 else _red
+            print(f'    {label:20s}  {c}{sp:.2f}x{_reset}  ({val:.3f}s vs {base:.3f}s)')
 EOF
     echo ""
 
 else
     # ---- Scaling mode: summary table ----
-    echo "--------------------------------------------------------"
-    echo "  SUMMARY"
-    echo "--------------------------------------------------------"
+    echo "${DIM}--------------------------------------------------------${RESET}"
+    echo "  ${BOLD}SUMMARY${RESET}"
+    echo "${DIM}--------------------------------------------------------${RESET}"
 
     # Header
-    printf "  %-14s" "Grid"
+    printf "  ${BOLD}%-14s${RESET}" "Grid"
     for label in "${SOLVER_LABELS[@]}"; do
-        printf " %14s" "$label"
+        printf " ${BOLD}%14s${RESET}" "$label"
     done
-    printf " %10s\n" "Best"
+    printf " ${BOLD}%10s${RESET}\n" "Best"
 
     printf "  %-14s" "--------------"
     for label in "${SOLVER_LABELS[@]}"; do
@@ -1207,7 +1434,7 @@ else
             t="${ALL_FIELD[$idx]}"
             printf " %12s s" "$t"
             if [[ "$t" != "NA" ]]; then
-                is_better=$(python3 -c "print('yes' if float('$t') < float('$best_time') else 'no')")
+                is_better=$(awk "BEGIN{print ($t < $best_time) ? \"yes\" : \"no\"}")
                 if [[ "$is_better" == "yes" ]]; then
                     best_time="$t"
                     best_label="${ALL_LABELS[$idx]}"
@@ -1235,6 +1462,11 @@ else
     done
 
     python3 - <<PYSPEEDUP 2>/dev/null || echo "  (Could not compute average speedup)"
+import os
+_green = os.environ.get('_C_GREEN', '')
+_red   = os.environ.get('_C_RED', '')
+_reset = os.environ.get('_C_RESET', '')
+
 results = []
 for line in """$speedup_input""".strip().splitlines():
     parts = line.split()
@@ -1259,11 +1491,12 @@ results.sort(key=lambda x: x[1], reverse=True)
 
 for label, avg, sps in results:
     lo, hi = min(sps), max(sps)
+    c = _green if avg >= 1.0 else _red
     if avg >= 1.0:
-        print(f'    {label:20s}  {avg:.2f}x avg  (range: {lo:.2f}x .. {hi:.2f}x)')
+        print(f'    {label:20s}  {c}{avg:.2f}x{_reset} avg  (range: {lo:.2f}x .. {hi:.2f}x)')
     else:
         pct = (1 - avg) * 100
-        print(f'    {label:20s}  {avg:.2f}x avg  ({pct:.0f}% slower, range: {lo:.2f}x .. {hi:.2f}x)')
+        print(f'    {label:20s}  {c}{avg:.2f}x{_reset} avg  ({pct:.0f}% slower, range: {lo:.2f}x .. {hi:.2f}x)')
 PYSPEEDUP
     echo ""
 fi
@@ -1333,28 +1566,32 @@ else:
 echo "  CSV saved to:  $CSV_FILE"
 
 # ---- Generate plot ----
-echo "  Generating plot..."
-export CSV_FILE PLOT_FILE NP CYCLES
-export PROFILE_DIR="$PERSISTENT_OUTPUT_DIR"
-export SOLVER_LABEL_LIST="${SOLVER_LABELS[*]}"
+if [[ "$NO_PLOT" != true ]]; then
+    echo "  Generating plot..."
+    export CSV_FILE PLOT_FILE NP CYCLES
+    export PROFILE_DIR="$PERSISTENT_OUTPUT_DIR"
+    export SOLVER_LABEL_LIST="${SOLVER_LABELS[*]}"
 
-# Build breakdown data for env export
-BD_GRIDS_arr=() BD_FIELD_arr=() BD_MOMENTS_arr=() BD_MOVER_arr=()
-for ((ci=0; ci<total_configs; ci++)); do
-    base=$(( ci * NUM_SOLVERS ))
-    read -r cnxc cnyc cnzc <<< "${ALL_CONFIG_TAGS[$base]}"
-    BD_GRIDS_arr+=("$cnxc")
-    BD_FIELD_arr+=("${ALL_FIELD[$base]}")
-    BD_MOMENTS_arr+=("${ALL_MOMENTS[$base]}")
-    BD_MOVER_arr+=("${ALL_MOVER[$base]}")
-done
-export NZC="$eff_nzc"
-export BD_GRIDS_LIST="${BD_GRIDS_arr[*]}"
-export BD_FIELD_LIST="${BD_FIELD_arr[*]}"
-export BD_MOMENTS_LIST="${BD_MOMENTS_arr[*]}"
-export BD_MOVER_LIST="${BD_MOVER_arr[*]}"
+    # Build breakdown data for env export
+    BD_GRIDS_arr=() BD_FIELD_arr=() BD_MOMENTS_arr=() BD_MOVER_arr=()
+    for ((ci=0; ci<total_configs; ci++)); do
+        base=$(( ci * NUM_SOLVERS ))
+        read -r cnxc cnyc cnzc <<< "${ALL_CONFIG_TAGS[$base]}"
+        BD_GRIDS_arr+=("$cnxc")
+        BD_FIELD_arr+=("${ALL_FIELD[$base]}")
+        BD_MOMENTS_arr+=("${ALL_MOMENTS[$base]}")
+        BD_MOVER_arr+=("${ALL_MOVER[$base]}")
+    done
+    export NZC="$eff_nzc"
+    export BD_GRIDS_LIST="${BD_GRIDS_arr[*]}"
+    export BD_FIELD_LIST="${BD_FIELD_arr[*]}"
+    export BD_MOMENTS_LIST="${BD_MOMENTS_arr[*]}"
+    export BD_MOVER_LIST="${BD_MOVER_arr[*]}"
 
-python3 "$SCRIPT_DIR/plot_petsc_test_results.py" "$CSV_FILE" || echo "  WARNING: Plot generation failed (see above)."
+    python3 "$SCRIPT_DIR/plot_petsc_test_results.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Plot generation failed (see above)."
+else
+    echo "  Plotting skipped (--no-plot)."
+fi
 
 # ---- Visual comparison & movie (when field output was saved) ----
 # Build directory paths for GMRES and PETSc runs (used by both comparison and movie)
@@ -1375,7 +1612,7 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
             echo "  Running visual comparison..."
             python3 "$SCRIPT_DIR/plot_petsc_visual_comparison.py" \
                 --gmres "$gmres_dir" "${petsc_args[@]}" || \
-                echo "  WARNING: Visual comparison failed."
+                echo "  ${YELLOW}WARNING:${RESET} Visual comparison failed."
         fi
     fi
 
@@ -1386,13 +1623,13 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
                 echo "  Generating comparison movie..."
                 bash "$SCRIPT_DIR/make_petsc_movie.sh" \
                     --gmres "$gmres_dir" "${petsc_args[@]}" || \
-                    echo "  WARNING: Movie generation failed."
+                    echo "  ${YELLOW}WARNING:${RESET} Movie generation failed."
             fi
         else
-            echo "  WARNING: ffmpeg not found, skipping movie generation."
+            echo "  ${YELLOW}WARNING:${RESET} ffmpeg not found, skipping movie generation."
         fi
     fi
 fi
 
 echo ""
-echo "--------------------------------------------------------"
+echo "${DIM}--------------------------------------------------------${RESET}"
