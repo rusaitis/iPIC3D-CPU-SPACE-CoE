@@ -41,15 +41,38 @@ For all available options and manual CMake instructions:
 [Pixi](https://pixi.sh) manages all C++ and Python dependencies automatically via conda-forge — no manual setup needed:
 
 ```shell
-pixi run build                     # configure + build (Release)
+pixi run build                     # configure + build (Release, GMRES only)
+pixi run build-petsc               # build with PETSc support
 pixi run test-smoke                # run a short GEM2D simulation
-pixi run -e petsc build            # build with PETSc support
-pixi run -e petsc test-petsc       # compare GMRES vs PETSc solvers
+pixi run test-petsc                # compare GMRES vs PETSc (script defaults)
+```
+
+Tasks that exist in only one environment (`build-petsc`, `test-petsc`) are resolved automatically by pixi — no `-e petsc` flag needed.
+
+**Passing custom arguments** — extra arguments after `--` are forwarded to the underlying command:
+
+```shell
+pixi run test-petsc -- --np 8 --cycles 20
+pixi run test-petsc -- --np 4 --cycles 50 --grid 200 200
+pixi run test-petsc -- --grid-min 50 --grid-max 400   # scaling mode
+```
+
+**Running arbitrary commands** in the pixi environment (still needs `-e`):
+
+```shell
+pixi run -e petsc -- mpirun -np 4 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc
+```
+
+**Tip:** To avoid typing `-e petsc` for arbitrary commands, add a shell alias:
+
+```shell
+alias pxp='pixi run -e petsc'      # in ~/.zshrc
+pxp -- mpirun -np 4 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc
 ```
 
 Available environments: `default` (build + Python), `petsc` (+ PETSc), `build-only` (no Python), `py` (Python only).
 
-Use `pixi shell` to enter the environment interactively (e.g., for Debug builds or custom CMake flags).
+Use `pixi shell -e petsc` to drop into an interactive shell with all dependencies available (useful for Debug builds or custom CMake flags).
 
 3. Run a simulation:
 ```shell

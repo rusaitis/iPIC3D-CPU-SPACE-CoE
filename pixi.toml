@@ -1,4 +1,4 @@
-[project]
+[workspace]
 name = "ipic3d"
 version = "0.1.0"
 description = "iPIC3D — implicit particle-in-cell code for 3D plasma simulations"
@@ -19,6 +19,11 @@ llvm-openmp = ">=18"
 [feature.petsc.dependencies]
 petsc = { version = ">=3.21", build = "real*" }                # real arithmetic, openmpi
 
+# When the petsc environment is active, inject the PETSc CMake flag
+# into the shared configure task via this env var (referenced in $IPIC3D_CMAKE_EXTRA).
+[feature.petsc.activation.env]
+IPIC3D_CMAKE_EXTRA = "-DUSE_PETSC=ON"
+
 # ── Python core ─────────────────────────────────────────────────────
 [feature.py.dependencies]
 python     = ">=3.12"
@@ -26,12 +31,6 @@ numpy      = "*"
 matplotlib = "*"
 h5py       = "*"
 mpi4py     = "*"
-
-# ── Python extras (heavy, only for VTK export / proc2vtr scripts) ──
-[feature.py-extra.dependencies]
-scipy    = "*"
-pytables = "*"
-pyevtk   = "*"
 
 # ── Environments ────────────────────────────────────────────────────
 [environments]
@@ -42,13 +41,7 @@ py         = { features = ["py"], no-default-feature = true }
 
 # ── Tasks ───────────────────────────────────────────────────────────
 [tasks]
-configure = { cmd = [
-  "cmake", "-S", ".", "-B", "build",
-  "-DCMAKE_BUILD_TYPE=Release",
-  "-DCMAKE_C_COMPILER=mpicc",
-  "-DCMAKE_CXX_COMPILER=mpicxx",
-  "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-] }
+configure = { cmd = "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA" }
 build = { cmd = ["cmake", "--build", "build", "--parallel"], depends-on = ["configure"] }
 clean = "rm -rf build"
 
@@ -58,16 +51,12 @@ test-smoke = { cmd = [
 ], depends-on = ["build"] }
 
 [feature.petsc.tasks]
-# Override configure to enable PETSc when in the petsc environment
-configure = { cmd = [
-  "cmake", "-S", ".", "-B", "build",
-  "-DCMAKE_BUILD_TYPE=Release",
-  "-DCMAKE_C_COMPILER=mpicc",
-  "-DCMAKE_CXX_COMPILER=mpicxx",
-  "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-  "-DUSE_PETSC=ON",
+build = { cmd = ["cmake", "--build", "build", "--parallel"], depends-on = [
+  { task = "configure", environment = "petsc" },
 ] }
-
-test-petsc = { cmd = [
-  "bash", "tests/test_petsc.sh", "--np", "4", "--cycles", "5",
-], depends-on = ["build"] }
+build-petsc = { depends-on = [
+  { task = "build", environment = "petsc" },
+] }
+test-petsc = { cmd = "bash tests/test_petsc.sh", depends-on = [
+  { task = "build", environment = "petsc" },
+] }
