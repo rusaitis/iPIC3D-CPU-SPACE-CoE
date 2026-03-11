@@ -32,10 +32,11 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Prepare smoke test output dir
+        run: mkdir -p /tmp/ipic3d_ci
+
       - name: Smoke test (3 cycles)
-        run: |
-          mkdir -p /tmp/ipic3d_ci
-          mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp
+        run: mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp
 
   build-petsc:
     name: PETSc build (${{ matrix.os }})
@@ -61,12 +62,11 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Prepare smoke test output dir
+        run: mkdir -p /tmp/ipic3d_ci
+
       - name: Smoke test — GMRES (3 cycles)
-        run: |
-          mkdir -p /tmp/ipic3d_ci
-          mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp -solver GMRES
+        run: mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp -solver GMRES
 
       - name: Smoke test — PETSc (3 cycles)
-        run: |
-          mkdir -p /tmp/ipic3d_ci
-          mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp -solver PETSc
+        run: mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp -solver PETSc

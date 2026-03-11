@@ -24,17 +24,17 @@ OUTPUT_DIR=""
 # ── Argument parsing ─────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gmres)    GMRES_DIR="$2";         shift 2 ;;
-        --petsc)    PETSC_DIRS+=("$2");      shift 2 ;;
+        --gmres|--ref) GMRES_DIR="$2";       shift 2 ;;
+        --petsc|--test) PETSC_DIRS+=("$2"); shift 2 ;;
         --fps)      FPS="$2";               shift 2 ;;
         --output-dir) OUTPUT_DIR="$2";      shift 2 ;;
         --help|-h)
-            echo "Usage: $0 [--gmres DIR] [--petsc DIR ...] [--fps N] [--output-dir DIR]"
+            echo "Usage: $0 [--gmres|--ref DIR] [--petsc|--test DIR ...] [--fps N] [--output-dir DIR]"
             echo ""
-            echo "  --gmres DIR       GMRES run directory (auto-discovered if omitted)"
-            echo "  --petsc DIR       PETSc run directory (repeatable; auto-discovered if omitted)"
-            echo "  --fps N           Frames per second (default: 5)"
-            echo "  --output-dir DIR  Directory for output mp4 (default: same as GMRES parent dir)"
+            echo "  --gmres, --ref DIR   Reference run directory (auto-discovered if omitted)"
+            echo "  --petsc, --test DIR  Test run directory (repeatable; auto-discovered if omitted)"
+            echo "  --fps N              Frames per second (default: 5)"
+            echo "  --output-dir DIR     Directory for output mp4 (default: same as ref parent dir)"
             exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac

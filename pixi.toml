@@ -48,7 +48,8 @@ py         = { features = ["py"], no-default-feature = true }
 [tasks]
 configure  = { cmd = "cmake -S . -B $IPIC3D_BUILD_DIR -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA", description = "Configure CMake build" }
 build      = { cmd = "cmake --build $IPIC3D_BUILD_DIR --parallel", depends-on = ["configure"], description = "Build iPIC3D" }
-clean      = { cmd = "rm -rf build build-petsc", description = "Remove all build directories" }
+clean      = { cmd = "rm -rf $IPIC3D_BUILD_DIR", description = "Remove build directory for current environment" }
+clean-all  = { cmd = "rm -rf build build-petsc", description = "Remove all build directories" }
 test-smoke = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp", depends-on = ["build"], description = "3-cycle GEM2D smoke test (4 procs)" }
 
 [feature.petsc.tasks]

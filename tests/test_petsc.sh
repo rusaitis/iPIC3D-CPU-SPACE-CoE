@@ -75,6 +75,8 @@ VERBOSE=true
 WARMUP=0
 NO_PLOT=false
 NO_COLOR_FLAG=false
+BASELINE=false
+BASELINE_TOPO=""
 PETSC_OPTIONS=""
 TMPDIR_BASE=$(mktemp -d "${TMPDIR:-/tmp}/ipic3d_test_petsc.XXXXXX")
 
@@ -96,6 +98,7 @@ SOLVER_TYPES=( "GMRES"      "PETSc")
 SOLVER_EXTRA=( ""           "")
 SOLVER_DESC=(  "Built-in restarted GMRES (m=20)" \
                "PETSc GMRES (default KSP settings)")
+SOLVER_TOPO=(  ""  "")
 
 # ========================= Section 3: Argument parsing =====================
 while [[ $# -gt 0 ]]; do
@@ -166,6 +169,11 @@ while [[ $# -gt 0 ]]; do
             WARMUP="$2"; shift 2 ;;
         --no-plot)      NO_PLOT=true;       shift ;;
         --no-color)     NO_COLOR_FLAG=true; shift ;;
+        --baseline)     BASELINE=true;     shift ;;
+        --baseline-topo)
+            [[ $# -ge 3 && "$2" =~ ^[0-9]+$ && "$2" -gt 0 && "$3" =~ ^[0-9]+$ && "$3" -gt 0 ]] \
+                || { echo "Error: --baseline-topo requires two positive integers: X Y" >&2; exit 2; }
+            BASELINE_TOPO="$2 $3"; shift 3 ;;
         --petsc-options)
             [[ $# -ge 2 ]] || { echo "Error: --petsc-options requires a quoted string" >&2; exit 2; }
             PETSC_OPTIONS="$2"; shift 2 ;;
@@ -226,6 +234,8 @@ Options:
   --field-output N     Save field data every N cycles (default: CYCLES in single-grid, off in scaling)
   --particle-output N  Save particle data every N cycles (0 = off)
   --movie              Generate mp4 movie of field comparison across cycles (requires ffmpeg)
+  --baseline           Add a second GMRES run (baseline for floating-point comparison)
+  --baseline-topo X Y  MPI topology for baseline run (e.g. 4 2 for different reduction order)
   --output-dir DIR     Override output directory (default: tests/test_petsc_output/)
   --write-method M     HDF5 write method: phdf5, shdf5, pvtk (default: phdf5)
   --clean              Remove output directory before running (start fresh)
@@ -384,6 +394,16 @@ if [[ "$ALL_SOLVERS" == true ]]; then
     SOLVER_DESC+=(  "PETSc FGMRES (restart=50, flexible)" \
                     "PETSc BiCGStab" \
                     "PETSc TFQMR (transpose-free QMR)")
+    SOLVER_TOPO+=("" "" "")
+fi
+
+# Baseline GMRES run for floating-point comparison
+if [[ "$BASELINE" == true ]]; then
+    SOLVER_LABELS+=("GMRES_2")
+    SOLVER_TYPES+=( "GMRES")
+    SOLVER_EXTRA+=( "")
+    SOLVER_DESC+=(  "Built-in GMRES (baseline run for solver comparison)")
+    SOLVER_TOPO+=("$BASELINE_TOPO")
 fi
 
 # Append --petsc-options to all PETSc solver extra args
@@ -398,7 +418,7 @@ fi
 # Filter solvers if --solvers was given
 if [[ -n "$SOLVER_FILTER" ]]; then
     IFS=',' read -ra _wanted <<< "$SOLVER_FILTER"
-    _new_labels=() _new_types=() _new_extra=() _new_desc=()
+    _new_labels=() _new_types=() _new_extra=() _new_desc=() _new_topo=()
     for ((si=0; si<${#SOLVER_LABELS[@]}; si++)); do
         for _w in "${_wanted[@]}"; do
             if [[ "${SOLVER_LABELS[$si]}" == "$_w" ]]; then
@@ -406,6 +426,7 @@ if [[ -n "$SOLVER_FILTER" ]]; then
                 _new_types+=("${SOLVER_TYPES[$si]}")
                 _new_extra+=("${SOLVER_EXTRA[$si]}")
                 _new_desc+=("${SOLVER_DESC[$si]}")
+                _new_topo+=("${SOLVER_TOPO[$si]}")
                 break
             fi
         done
@@ -419,6 +440,7 @@ if [[ -n "$SOLVER_FILTER" ]]; then
     SOLVER_TYPES=("${_new_types[@]}")
     SOLVER_EXTRA=("${_new_extra[@]}")
     SOLVER_DESC=("${_new_desc[@]}")
+    SOLVER_TOPO=("${_new_topo[@]}")
 fi
 
 NUM_SOLVERS=${#SOLVER_LABELS[@]}
@@ -625,6 +647,26 @@ PYCONV
 
 # Run a short warm-up simulation (WARMUP cycles) to prime caches/JIT.
 # Args: nxc nyc nzc label solver_type [extra_args...]
+# Apply per-solver topology override (saves globals for restore).
+# Args: solver_index
+apply_solver_topo() {
+    local si="$1"
+    _TOPO_SAVE_XLEN="$XLEN"
+    _TOPO_SAVE_YLEN="$YLEN"
+    _TOPO_SAVE_NP="$NP"
+    if [[ -n "${SOLVER_TOPO[$si]}" ]]; then
+        read -r XLEN YLEN <<< "${SOLVER_TOPO[$si]}"
+        NP=$(( XLEN * YLEN * ZLEN ))
+    fi
+}
+
+# Restore topology globals saved by apply_solver_topo.
+restore_solver_topo() {
+    XLEN="$_TOPO_SAVE_XLEN"
+    YLEN="$_TOPO_SAVE_YLEN"
+    NP="$_TOPO_SAVE_NP"
+}
+
 run_warmup() {
     local nxc="$1" nyc="$2" nzc="$3" label="$4" solver_type="$5"
     shift 5
@@ -1007,6 +1049,13 @@ done
 [[ -n "$NAME_TAG" ]] && box_lines+=("  Name tag: $NAME_TAG")
 [[ -n "$FIELD_OUTPUT" || -n "$PARTICLE_OUTPUT" ]] && box_lines+=("  Field output: ${FIELD_OUTPUT:-off}   Particle output: ${PARTICLE_OUTPUT:-off}")
 [[ "$MAKE_MOVIE" == true ]] && box_lines+=("  Movie: yes (generate mp4 comparison movie)")
+if [[ "$BASELINE" == true ]]; then
+    if [[ -n "$BASELINE_TOPO" ]]; then
+        box_lines+=("  Baseline: GMRES_2 with topo ${BASELINE_TOPO// /x}x${ZLEN}")
+    else
+        box_lines+=("  Baseline: GMRES_2 (same topology)")
+    fi
+fi
 [[ "$RANDOMIZE" == true ]] && box_lines+=("  Randomize: yes (solver order shuffled)")
 [[ -n "$TIMEOUT" ]] && box_lines+=("  Timeout: ${TIMEOUT}s per simulation")
 [[ "$WARMUP" -gt 0 ]] && box_lines+=("  Warm-up: $WARMUP cycles before timed runs")
@@ -1097,9 +1146,11 @@ for cfg in "${CONFIGS[@]}"; do
         # Optional warm-up for each solver
         if [[ "$WARMUP" -gt 0 && "$DRY_RUN" != true ]]; then
             for ((si=0; si<NUM_SOLVERS; si++)); do
+                apply_solver_topo "$si"
                 local _wu_extra=()
                 [[ -n "${SOLVER_EXTRA[$si]}" ]] && read -ra _wu_extra <<< "${SOLVER_EXTRA[$si]}"
                 run_warmup "$cnxc" "$cnyc" "$cnzc" "${SOLVER_LABELS[$si]}" "${SOLVER_TYPES[$si]}" "${_wu_extra[@]+"${_wu_extra[@]}"}"
+                restore_solver_topo
             done
         fi
 
@@ -1120,6 +1171,7 @@ for cfg in "${CONFIGS[@]}"; do
             fi
 
             for si in "${solver_order[@]}"; do
+                apply_solver_topo "$si"
                 label="${SOLVER_LABELS[$si]}"
                 solver_type="${SOLVER_TYPES[$si]}"
                 extra_args=()
@@ -1134,6 +1186,7 @@ for cfg in "${CONFIGS[@]}"; do
                 start_time=$(timestamp)
                 result=$(run_solver "$cnxc" "$cnyc" "$cnzc" "$label" "$solver_type" "${r}" "${extra_args[@]+"${extra_args[@]}"}")
                 end_time=$(timestamp)
+                restore_solver_topo
 
                 if [[ "$result" == "FAILED" || -z "$result" ]]; then
                     echo "${RED}FAILED${RESET}"
@@ -1211,6 +1264,7 @@ for cfg in "${CONFIGS[@]}"; do
     else
         # ── Sequential mode: run all AVG reps of each solver together ──
         for ((i=0; i<NUM_SOLVERS; i++)); do
+            apply_solver_topo "$i"
             label="${SOLVER_LABELS[$i]}"
             solver_type="${SOLVER_TYPES[$i]}"
             extra_args=()
@@ -1221,6 +1275,7 @@ for cfg in "${CONFIGS[@]}"; do
             [[ -z "$first_run_t" ]] && t_r_before=$(timestamp)
 
             local_result=$(run_averaged "$cnxc" "$cnyc" "$cnzc" "$label" "$solver_type" "${extra_args[@]+"${extra_args[@]}"}")
+            restore_solver_topo
 
             if [[ -z "$first_run_t" && "$DRY_RUN" != true ]]; then
                 t_r_after=$(timestamp)
@@ -1631,6 +1686,21 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
             fi
         else
             echo "  ${YELLOW}WARNING:${RESET} ffmpeg not found, skipping movie generation."
+        fi
+    fi
+
+    # ---- L2 time-series plot ----
+    if [[ -f "$SCRIPT_DIR/plot_l2_timeseries.py" ]]; then
+        l2_test_args=()
+        for ((si=1; si<NUM_SOLVERS; si++)); do
+            test_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
+            [[ -d "$test_dir" ]] && l2_test_args+=(--test "$test_dir")
+        done
+        if [[ -d "$gmres_dir" && ${#l2_test_args[@]} -gt 0 ]]; then
+            echo "  Generating L2 time-series plot..."
+            python3 "$SCRIPT_DIR/plot_l2_timeseries.py" \
+                --ref "$gmres_dir" "${l2_test_args[@]}" --csv || \
+                echo "  ${YELLOW}WARNING:${RESET} L2 time-series plot failed."
         fi
     fi
 fi

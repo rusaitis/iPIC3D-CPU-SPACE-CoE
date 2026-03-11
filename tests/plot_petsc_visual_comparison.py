@@ -54,6 +54,10 @@ parser.add_argument('--gmres', default=None,
                     help='Path to GMRES field output directory (auto-discovered if omitted)')
 parser.add_argument('--petsc', action='append', default=None,
                     help='Path to PETSc field output directory (repeatable; auto-discovered if omitted)')
+parser.add_argument('--ref', default=None,
+                    help='Reference run directory (solver-agnostic alias for --gmres)')
+parser.add_argument('--test', action='append', default=None,
+                    help='Test run directory (solver-agnostic alias for --petsc; repeatable)')
 parser.add_argument('--cycle', type=int, default=-1,
                     help='Cycle to compare (-1 = last available)')
 parser.add_argument('--vmax-Bx', type=float, default=None,
@@ -67,6 +71,17 @@ parser.add_argument('--vmax-Ez-diff', type=float, default=None,
 parser.add_argument('--print-bounds', action='store_true',
                     help='Print vmax bounds for all fields and exit (no plot)')
 args = parser.parse_args()
+
+# ── Merge solver-agnostic aliases ────────────────────────────────────────
+if args.gmres is None and args.ref is not None:
+    args.gmres = args.ref
+elif args.gmres is not None and args.ref is not None:
+    parser.error("Cannot specify both --gmres and --ref")
+
+if args.petsc is None and args.test is not None:
+    args.petsc = args.test
+elif args.petsc is not None and args.test is not None:
+    args.petsc.extend(args.test)
 
 # ── Fixed bounds lookup ──────────────────────────────────────────────────
 fixed_vmax = {}
