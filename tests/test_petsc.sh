@@ -82,14 +82,15 @@ TMPDIR_BASE=$(mktemp -d "${TMPDIR:-/tmp}/ipic3d_test_petsc.XXXXXX")
 
 # ========================= Solver Configuration ============================
 #
-# Each solver is defined by four parallel arrays:
+# Each solver is defined by five parallel arrays:
 #   SOLVER_LABELS  — short unique label used in filenames and tables
 #   SOLVER_TYPES   — runtime solver type passed to -solver flag ("GMRES" or "PETSc")
 #   SOLVER_EXTRA   — extra CLI args appended after -solver (PETSc KSP options, etc.)
 #   SOLVER_DESC    — human-readable description shown in --help / summary
+#   SOLVER_TOPO    — per-solver MPI topology override ("X Y" or "" for default)
 #
 # To add a new solver variant:
-#   1. Append to all four arrays below (keep them in sync)
+#   1. Append to all five arrays below (keep them in sync)
 #   2. Guard behind ALL_SOLVERS or a new flag if experimental
 #
 # Default solvers (always included):

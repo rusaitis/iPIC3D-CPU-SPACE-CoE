@@ -203,8 +203,11 @@ ref_label = solver_label(args.ref)
 # ── Compute N_dof and round-off floor ────────────────────────────────────
 sample_ftype, sample_comp = fields[0][0], fields[0][1]
 try:
-    sample = load_field_3d(args.ref, common_cycles[0], sample_ftype, sample_comp)
-    n_dof = sample.size
+    cycle_str = f"{common_cycles[0]:05d}"
+    h5_path = os.path.join(args.ref, f"Fields_{cycle_str}",
+                           f"{sample_ftype}_{cycle_str}.h5")
+    with h5py.File(h5_path, "r") as f:
+        n_dof = int(np.prod(f[f"/Fields/{sample_ftype}{sample_comp}"].shape))
 except Exception:
     n_dof = 10000  # fallback
 
@@ -212,26 +215,33 @@ eps_machine = np.finfo(np.float64).eps
 roundoff_floor = np.sqrt(n_dof) * eps_machine
 
 # ── Compute L2 errors (one cycle at a time to limit memory) ──────────────
+# Load ref data once per (field, cycle), then compare against each test dir.
 # results[test_dir][(field_type, comp)] = {
 #     'cycles': [...], 'l2_rel': [...], 'max_abs': [...], 'ref_norm': [...]
 # }
-results = {}
+results = {t: {} for t in args.test}
 
-for test_dir in args.test:
-    test_lab = solver_label(test_dir)
-    results[test_dir] = {}
-    for ftype, comp, flabel in fields:
-        l2_vals = []
-        max_abs_vals = []
-        ref_norm_vals = []
-        valid_cycles = []
+for ftype, comp, flabel in fields:
+    for test_dir in args.test:
+        results[test_dir][(ftype, comp)] = {
+            'cycles': [], 'l2_rel': [], 'max_abs': [], 'ref_norm': [],
+        }
 
-        for cycle in common_cycles:
+    for cycle in common_cycles:
+        try:
+            ref_data = load_field_3d(args.ref, cycle, ftype, comp)
+        except (OSError, KeyError) as e:
+            print(f"  WARNING: Could not load ref {ftype}{comp} cycle {cycle}: {e}")
+            continue
+
+        ref_norm = np.linalg.norm(ref_data)
+
+        for test_dir in args.test:
             try:
-                ref_data = load_field_3d(args.ref, cycle, ftype, comp)
                 test_data = load_field_3d(test_dir, cycle, ftype, comp)
             except (OSError, KeyError) as e:
-                print(f"  WARNING: Could not load {ftype}{comp} cycle {cycle}: {e}")
+                print(f"  WARNING: Could not load {ftype}{comp} cycle {cycle} "
+                      f"from {solver_label(test_dir)}: {e}")
                 continue
 
             if ref_data.shape != test_data.shape:
@@ -240,23 +250,17 @@ for test_dir in args.test:
                 continue
 
             diff = test_data - ref_data
-            ref_norm = np.linalg.norm(ref_data)
             l2_rel = np.linalg.norm(diff) / ref_norm if ref_norm > 0 else 0.0
             max_abs = float(np.max(np.abs(diff)))
 
-            valid_cycles.append(cycle)
-            l2_vals.append(l2_rel)
-            max_abs_vals.append(max_abs)
-            ref_norm_vals.append(ref_norm)
+            r = results[test_dir][(ftype, comp)]
+            r['cycles'].append(cycle)
+            r['l2_rel'].append(l2_rel)
+            r['max_abs'].append(max_abs)
+            r['ref_norm'].append(ref_norm)
 
-        results[test_dir][(ftype, comp)] = {
-            'cycles': valid_cycles,
-            'l2_rel': l2_vals,
-            'max_abs': max_abs_vals,
-            'ref_norm': ref_norm_vals,
-        }
-
-    print(f"  Processed: {test_lab}")
+for test_dir in args.test:
+    print(f"  Processed: {solver_label(test_dir)}")
 
 # ── Plot ──────────────────────────────────────────────────────────────────
 try:
@@ -287,6 +291,9 @@ axes = axes[0]
 
 fig.suptitle(f"L2 Error Accumulation  (ref: {ref_label})",
              fontsize=13, fontweight='bold', y=0.98)
+
+# Cache fit results: fit_cache[(test_dir, ftype, comp)] = fit_growth result
+fit_cache = {}
 
 for fi, (ftype, comp, flabel) in enumerate(fields):
     ax = axes[fi]
@@ -321,6 +328,7 @@ for fi, (ftype, comp, flabel) in enumerate(fields):
 
         # Exponential fit overlay
         fit = fit_growth(cycles_arr, l2_arr)
+        fit_cache[(test_dir, ftype, comp)] = fit
         if fit is not None:
             gamma, r_sq, intercept = fit
             fit_y = np.exp(intercept + gamma * np.array(cycles_arr))
@@ -424,7 +432,7 @@ for test_dir in args.test:
                   f"{'N/A':>10s}  {'N/A':>5s}")
             continue
 
-        fit = fit_growth(data['cycles'], data['l2_rel'])
+        fit = fit_cache.get((test_dir, ftype, comp))
         if fit is not None:
             gamma, r_sq, _ = fit
             gamma_str = f"{gamma:.4f}"
