@@ -15,14 +15,19 @@ openmpi     = ">=5"
 hdf5        = { version = ">=1.14", build = "mpi_openmpi*" }  # parallel HDF5
 llvm-openmp = ">=18"
 
+[feature.build.activation.env]
+IPIC3D_BUILD_DIR   = "build"
+IPIC3D_CMAKE_EXTRA = ""
+
 # ── PETSc (optional) ────────────────────────────────────────────────
 [feature.petsc.dependencies]
 petsc = { version = ">=3.21", build = "real*" }                # real arithmetic, openmpi
 
 # When the petsc environment is active, inject the PETSc CMake flag
-# into the shared configure task via this env var (referenced in $IPIC3D_CMAKE_EXTRA).
+# and use a separate build directory so both builds can coexist.
 [feature.petsc.activation.env]
 IPIC3D_CMAKE_EXTRA = "-DUSE_PETSC=ON"
+IPIC3D_BUILD_DIR   = "build-petsc"
 
 # ── Python core ─────────────────────────────────────────────────────
 [feature.py.dependencies]
@@ -41,22 +46,11 @@ py         = { features = ["py"], no-default-feature = true }
 
 # ── Tasks ───────────────────────────────────────────────────────────
 [tasks]
-configure = { cmd = "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA" }
-build = { cmd = ["cmake", "--build", "build", "--parallel"], depends-on = ["configure"] }
-clean = "rm -rf build"
-
-test-smoke = { cmd = [
-  "mpirun", "--oversubscribe", "-np", "4",
-  "build/iPIC3D", "inputfiles/testGEM2Dsmall.inp",
-], depends-on = ["build"] }
+configure  = { cmd = "cmake -S . -B $IPIC3D_BUILD_DIR -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA", description = "Configure CMake build" }
+build      = { cmd = "cmake --build $IPIC3D_BUILD_DIR --parallel", depends-on = ["configure"], description = "Build iPIC3D" }
+clean      = { cmd = "rm -rf build build-petsc", description = "Remove all build directories" }
+test-smoke = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp", depends-on = ["build"], description = "3-cycle GEM2D smoke test (4 procs)" }
 
 [feature.petsc.tasks]
-build = { cmd = ["cmake", "--build", "build", "--parallel"], depends-on = [
-  { task = "configure", environment = "petsc" },
-] }
-build-petsc = { depends-on = [
-  { task = "build", environment = "petsc" },
-] }
-test-petsc = { cmd = "bash tests/test_petsc.sh", depends-on = [
-  { task = "build", environment = "petsc" },
-] }
+test-petsc       = { cmd = "bash tests/test_petsc.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], description = "Full PETSc regression suite (GMRES vs PETSc)" }
+test-petsc-smoke = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp -solver PETSc", depends-on = ["build"], description = "3-cycle PETSc smoke test (4 procs)" }

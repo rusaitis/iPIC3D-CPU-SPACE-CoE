@@ -1,4 +1,5 @@
 set(iPIC_resources
+  ci_smoke.inp
   DebyeScaleTurbulence.inp
   DebyeScaleTurbulenceRestart.inp
   Magnetosphere2D.inp

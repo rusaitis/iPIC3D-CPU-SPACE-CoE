@@ -32,24 +32,10 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Create CI input file
-        run: |
-          sed \
-            -e 's/^ncycles.*/ncycles = 3/' \
-            -e 's/^nxc.*/nxc = 20/' \
-            -e 's/^nyc.*/nyc = 20/' \
-            -e 's/^XLEN.*/XLEN = 2/' \
-            -e 's/^YLEN.*/YLEN = 2/' \
-            -e 's/^FieldOutputCycle.*/FieldOutputCycle = 0/' \
-            -e 's/^ParticlesOutputCycle.*/ParticlesOutputCycle = 0/' \
-            -e 's/^RestartOutputCycle.*/RestartOutputCycle = 0/' \
-            -e 's|^SaveDirName.*|SaveDirName = /tmp/ipic3d_ci|' \
-            -e 's|^RestartDirName.*|RestartDirName = /tmp/ipic3d_ci|' \
-            inputfiles/Double_Harris.inp > /tmp/ci_test.inp
-          mkdir -p /tmp/ipic3d_ci
-
       - name: Smoke test (3 cycles)
-        run: mpirun --oversubscribe -np 4 build/iPIC3D /tmp/ci_test.inp
+        run: |
+          mkdir -p /tmp/ipic3d_ci
+          mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp
 
   build-petsc:
     name: PETSc build (${{ matrix.os }})
@@ -75,24 +61,12 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Create CI input file
-        run: |
-          sed \
-            -e 's/^ncycles.*/ncycles = 3/' \
-            -e 's/^nxc.*/nxc = 20/' \
-            -e 's/^nyc.*/nyc = 20/' \
-            -e 's/^XLEN.*/XLEN = 2/' \
-            -e 's/^YLEN.*/YLEN = 2/' \
-            -e 's/^FieldOutputCycle.*/FieldOutputCycle = 0/' \
-            -e 's/^ParticlesOutputCycle.*/ParticlesOutputCycle = 0/' \
-            -e 's/^RestartOutputCycle.*/RestartOutputCycle = 0/' \
-            -e 's|^SaveDirName.*|SaveDirName = /tmp/ipic3d_ci|' \
-            -e 's|^RestartDirName.*|RestartDirName = /tmp/ipic3d_ci|' \
-            inputfiles/Double_Harris.inp > /tmp/ci_test.inp
-          mkdir -p /tmp/ipic3d_ci
-
       - name: Smoke test — GMRES (3 cycles)
-        run: mpirun --oversubscribe -np 4 build/iPIC3D /tmp/ci_test.inp -solver GMRES
+        run: |
+          mkdir -p /tmp/ipic3d_ci
+          mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp -solver GMRES
 
       - name: Smoke test — PETSc (3 cycles)
-        run: mpirun --oversubscribe -np 4 build/iPIC3D /tmp/ci_test.inp -solver PETSc
+        run: |
+          mkdir -p /tmp/ipic3d_ci
+          mpirun --oversubscribe -np 4 build/iPIC3D inputfiles/ci_smoke.inp -solver PETSc

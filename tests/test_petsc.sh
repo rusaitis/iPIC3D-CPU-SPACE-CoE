@@ -169,6 +169,9 @@ while [[ $# -gt 0 ]]; do
         --petsc-options)
             [[ $# -ge 2 ]] || { echo "Error: --petsc-options requires a quoted string" >&2; exit 2; }
             PETSC_OPTIONS="$2"; shift 2 ;;
+        --exe)
+            [[ $# -ge 2 ]] || { echo "Error: --exe requires a path" >&2; exit 2; }
+            EXECUTABLE="$2"; shift 2 ;;
         --input)        INPUT_FILE="$2";    shift 2 ;;
         --name)
             [[ $# -ge 2 ]] || { echo "Error: --name requires a tag string" >&2; exit 2; }
@@ -217,6 +220,7 @@ Options:
   --no-plot            Skip matplotlib plotting
   --no-color           Disable colored output (auto-detected when piped)
   --petsc-options STR  Extra PETSc KSP options for all PETSc runs (quoted string)
+  --exe PATH           Path to iPIC3D executable (default: build/iPIC3D)
   --input FILE         Input file path (default: inputfiles/Double_Harris.inp)
   --name TAG           Output dir suffix: test_petsc_output_TAG/
   --field-output N     Save field data every N cycles (default: CYCLES in single-grid, off in scaling)
