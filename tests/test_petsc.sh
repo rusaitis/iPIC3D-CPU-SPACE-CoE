@@ -255,6 +255,7 @@ Examples:
   $0 --grid-min 100 --grid-max 400 --name overnight
 HELPEOF
             exit 0 ;;
+        --)  shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -466,7 +467,7 @@ else
 fi
 
 # Elapsed time: elapsed <start> <end>  →  stdout "X.XXX"
-elapsed() { awk "BEGIN{printf \"%.3f\", $2 - $1}"; }
+elapsed() { awk "BEGIN{printf \"%.2f\", $2 - $1}"; }
 
 # Compute mean and stdev for six space-separated value strings.
 # Args: field_str wall_str moments_str mover_str iters_str resid_str
@@ -476,10 +477,10 @@ compute_stats() {
 import statistics
 def mean_str(arr):
     vals = [float(x) for x in arr if x not in ('NA','')]
-    return f'{statistics.mean(vals):.3f}' if vals else 'NA'
+    return f'{statistics.mean(vals):.2f}' if vals else 'NA'
 def std_str(arr):
     vals = [float(x) for x in arr if x not in ('NA','')]
-    return f'{statistics.stdev(vals):.3f}' if len(vals) > 1 else 'NA'
+    return f'{statistics.stdev(vals):.2f}' if len(vals) > 1 else 'NA'
 
 field   = '$1'.split()
 wall    = '$2'.split()
@@ -774,7 +775,7 @@ run_averaged() {
 
     local runs_info=""
     [[ $AVG -gt 1 ]] && runs_info=",  Runs: $AVG"
-    [[ "$VERBOSE" == true ]] && echo "${I}--- ${BOLD}$label${RESET} ($solver_type) — ${nxc}x${nyc}x${nzc},  ${NP} procs,  ${CYCLES} cyc${runs_info}" >&2
+    [[ "$VERBOSE" == true ]] && echo "${I}--- ${BOLD}$label${RESET} ($solver_type) — ${nxc}x${nyc}x${nzc},  ${NP} procs,  ${CYCLES} cycles${runs_info}" >&2
 
     local field_arr=() wall_arr=() moments_arr=() mover_arr=()
     local iters_arr=() residual_arr=()
@@ -1183,7 +1184,7 @@ for cfg in "${CONFIGS[@]}"; do
                 if [[ -z "$first_run_t" && "$ft" != "NA" && "$DRY_RUN" != true ]]; then
                     t_r_after=$(timestamp)
                     # Scale one run_solver to one full config: ×AVG×NUM_SOLVERS
-                    first_run_t=$(awk "BEGIN{printf \"%.3f\", ($t_r_after - $t_r_before) * $AVG * $NUM_SOLVERS}")
+                    first_run_t=$(awk "BEGIN{printf \"%.2f\", ($t_r_after - $t_r_before) * $AVG * $NUM_SOLVERS}")
                     show_eta "$first_run_t" "$cnxc"
                 fi
 
@@ -1434,7 +1435,7 @@ if base:
         if label != 'GMRES' and val > 0:
             sp = base / val
             c = _green if sp >= 1.0 else _red
-            print(f'    {label:20s}  {c}{sp:.2f}x{_reset}  ({val:.3f}s vs {base:.3f}s)')
+            print(f'    {label:20s}  {c}{sp:.2f}x{_reset}  ({val:.2f}s vs {base:.2f}s)')
 EOF
     echo ""
 
@@ -1630,57 +1631,57 @@ else
     echo "  Plotting skipped (--no-plot)."
 fi
 
-# ---- Visual comparison & movie (when field output was saved) ----
-# Build directory paths for GMRES and PETSc runs (used by both comparison and movie)
-read -r v_nxc v_nyc v_nzc <<< "${CONFIGS[0]}"
-v_config_tag="${v_nxc}x${v_nyc}x${v_nzc}"
-gmres_dir="$PERSISTENT_OUTPUT_DIR/GMRES_${v_config_tag}"
-petsc_args=()
-for ((si=1; si<NUM_SOLVERS; si++)); do
-    petsc_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
-    if [[ -d "$petsc_dir" ]]; then
-        petsc_args+=(--petsc "$petsc_dir")
-    fi
-done
-
+# ---- Visual comparison, movie & L2 (when field output was saved) ----
+# Loop over all grid configs so each gets its own comparison plots.
 if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; then
-    if [[ -f "$SCRIPT_DIR/plot_field_comparison.py" ]]; then
-        if [[ -d "$gmres_dir" && ${#petsc_args[@]} -gt 0 ]]; then
-            echo "  Running visual comparison..."
+    for v_cfg in "${CONFIGS[@]}"; do
+        read -r v_nxc v_nyc v_nzc <<< "$v_cfg"
+        v_config_tag="${v_nxc}x${v_nyc}x${v_nzc}"
+        gmres_dir="$PERSISTENT_OUTPUT_DIR/GMRES_${v_config_tag}"
+        petsc_args=()
+        for ((si=1; si<NUM_SOLVERS; si++)); do
+            petsc_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
+            if [[ -d "$petsc_dir" ]]; then
+                petsc_args+=(--petsc "$petsc_dir")
+            fi
+        done
+
+        [[ -d "$gmres_dir" && ${#petsc_args[@]} -gt 0 ]] || continue
+
+        if [[ -f "$SCRIPT_DIR/plot_field_comparison.py" ]]; then
+            echo "  Running visual comparison (${v_config_tag})..."
             python3 "$SCRIPT_DIR/plot_field_comparison.py" \
                 --gmres "$gmres_dir" "${petsc_args[@]}" || \
-                echo "  ${YELLOW}WARNING:${RESET} Visual comparison failed."
+                echo "  ${YELLOW}WARNING:${RESET} Visual comparison failed for ${v_config_tag}."
         fi
-    fi
 
-    # ---- Movie generation (when --movie flag was passed) ----
-    if [[ "$MAKE_MOVIE" == true ]]; then
-        if command -v ffmpeg &>/dev/null; then
-            if [[ -d "$gmres_dir" && ${#petsc_args[@]} -gt 0 ]]; then
-                echo "  Generating comparison movie..."
+        # ---- Movie generation (when --movie flag was passed) ----
+        if [[ "$MAKE_MOVIE" == true ]]; then
+            if command -v ffmpeg &>/dev/null; then
+                echo "  Generating comparison movie (${v_config_tag})..."
                 bash "$SCRIPT_DIR/make_petsc_movie.sh" \
                     --gmres "$gmres_dir" "${petsc_args[@]}" || \
-                    echo "  ${YELLOW}WARNING:${RESET} Movie generation failed."
+                    echo "  ${YELLOW}WARNING:${RESET} Movie generation failed for ${v_config_tag}."
+            else
+                echo "  ${YELLOW}WARNING:${RESET} ffmpeg not found, skipping movie generation."
             fi
-        else
-            echo "  ${YELLOW}WARNING:${RESET} ffmpeg not found, skipping movie generation."
         fi
-    fi
 
-    # ---- L2 time-series plot ----
-    if [[ -f "$SCRIPT_DIR/plot_l2_timeseries.py" ]]; then
-        l2_test_args=()
-        for ((si=1; si<NUM_SOLVERS; si++)); do
-            test_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
-            [[ -d "$test_dir" ]] && l2_test_args+=(--test "$test_dir")
-        done
-        if [[ -d "$gmres_dir" && ${#l2_test_args[@]} -gt 0 ]]; then
-            echo "  Generating L2 time-series plot..."
-            python3 "$SCRIPT_DIR/plot_l2_timeseries.py" \
-                --ref "$gmres_dir" "${l2_test_args[@]}" || \
-                echo "  ${YELLOW}WARNING:${RESET} L2 time-series plot failed."
+        # ---- L2 time-series plot ----
+        if [[ -f "$SCRIPT_DIR/plot_l2_timeseries.py" ]]; then
+            l2_test_args=()
+            for ((si=1; si<NUM_SOLVERS; si++)); do
+                test_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
+                [[ -d "$test_dir" ]] && l2_test_args+=(--test "$test_dir")
+            done
+            if [[ ${#l2_test_args[@]} -gt 0 ]]; then
+                echo "  Generating L2 time-series plot (${v_config_tag})..."
+                python3 "$SCRIPT_DIR/plot_l2_timeseries.py" \
+                    --ref "$gmres_dir" "${l2_test_args[@]}" || \
+                    echo "  ${YELLOW}WARNING:${RESET} L2 time-series plot failed for ${v_config_tag}."
+            fi
         fi
-    fi
+    done
 fi
 
 echo ""

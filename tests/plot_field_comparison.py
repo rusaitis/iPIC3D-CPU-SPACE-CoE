@@ -85,7 +85,7 @@ def _render_field_row(fig, axes_row, ref_2d, test_2d, field_label,
         vmax_diff = fixed_vmax.get((ftype, comp, "pct_diff")) \
             or max(max_pct_diff, 1e-30)
         diff_title = f"{field_label} {diff_label_suffix}"
-        pct_fmt = f"{max_pct_diff:.1f}" if max_pct_diff >= 1 else f"{max_pct_diff:.3f}"
+        pct_fmt = f"{max_pct_diff:.2f}" if max_pct_diff >= 1 else f"{max_pct_diff:.4f}"
         annotation = (f"|max diff| = {max_abs_diff:.2e}\n"
                       f"max |%diff| = {pct_fmt}%\n"
                       f"L2 rel err = {l2_rel_err:.2e}")

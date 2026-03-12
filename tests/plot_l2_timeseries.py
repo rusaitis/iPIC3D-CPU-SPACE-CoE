@@ -156,7 +156,7 @@ def _format_l2_with_pct(val):
     if val > 1e-6:
         pct = val * 100
         if pct >= 0.01:
-            s += f" ({pct:.2f}%)"
+            s += f" ({pct:.3f}%)"
         else:
             s += f" ({pct:.1e}%)"
     return s
@@ -555,10 +555,9 @@ def main(argv=None):
           "per-step floors are lower bounds, not targets.")
     print()
 
-    header = (f"  {'Test':<26s} {'Field':>5s}  {'L2@last':>18s}  "
-              f"{'\u03b1':>6s}  {'R\u00b2':>5s}  {'Amplif.':>8s}  {'Knee':>5s}")
+    header = f"  {'Test':<26s} {'Field':>5s}  {'L2@last':>18s}"
     print(header)
-    print("  " + "\u2500" * 90)
+    print("  " + "\u2500" * 51)
 
     for test_dir in args.test:
         test_lab = solver_label(test_dir)
@@ -567,41 +566,17 @@ def main(argv=None):
             field_name = f"{ftype}{comp}"
 
             if not data.cycles:
-                print(f"  {test_lab:<26s} {field_name:>5s}  "
-                      f"{'N/A':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
-                      f"{'N/A':>8s}  {'N/A':>5s}")
+                print(f"  {test_lab:<26s} {field_name:>5s}  {'N/A':>18s}")
                 continue
 
             l2_last = data.l2_relative[-1]
 
             if all(v == 0 for v in data.l2_relative):
-                print(f"  {test_lab:<26s} {field_name:>5s}  "
-                      f"{'0 (bit-identical)':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
-                      f"{'N/A':>8s}  {'\u2014':>5s}")
+                print(f"  {test_lab:<26s} {field_name:>5s}  {'0 (bit-identical)':>18s}")
                 continue
 
             l2_str = _format_l2_with_pct(l2_last)
-            amplif_str = f"{_amplification(data.l2_relative):.1f}x"
-
-            fit = fit_cache.get((test_dir, ftype, comp))
-            if fit is not None:
-                alpha_str = f"{fit.alpha:.2f}"
-                r_sq_str = f"{fit.r_squared:.2f}"
-                if fit.knee_cycle is not None:
-                    knee_str = f"{fit.knee_cycle:.0f}"
-                    alpha_str = (f"{fit.alpha_early:.1f}/"
-                                 f"{fit.alpha_late:.1f}")
-                    r_sq_str = f"{fit.r_squared_piecewise:.2f}"
-                else:
-                    knee_str = "\u2014"
-            else:
-                alpha_str = "N/A"
-                r_sq_str = "N/A"
-                knee_str = "\u2014"
-
-            print(f"  {test_lab:<26s} {field_name:>5s}  "
-                  f"{l2_str:>18s}  {alpha_str:>6s}  {r_sq_str:>5s}  "
-                  f"{amplif_str:>8s}  {knee_str:>5s}")
+            print(f"  {test_lab:<26s} {field_name:>5s}  {l2_str:>18s}")
 
 
 if __name__ == "__main__":

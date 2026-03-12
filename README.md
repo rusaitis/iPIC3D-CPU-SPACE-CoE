@@ -17,26 +17,17 @@ iPIC3D is an implicit particle-in-cell (PIC) code for 3D plasma simulations. Thi
 
 ## Installation
 
-1. Clone the repository and checkout the `with-petsc` branch:
+### 1. Clone the repository
+
 ```shell
 git clone https://github.com/rusaitis/iPIC3D-CPU-SPACE-CoE.git
 cd iPIC3D-CPU-SPACE-CoE
 git checkout with-petsc
 ```
 
-2. Build with the provided script:
-```shell
-./build.sh                # default build (GMRES only)
-./build.sh --petsc        # build with PETSc support
-./build.sh --clean --petsc  # clean rebuild with PETSc
-```
+### 2. Build
 
-For all available options and manual CMake instructions:
-```shell
-./build.sh --help
-```
-
-### Quick start with pixi
+#### Option A: pixi (recommended — manages all dependencies)
 
 [Pixi](https://pixi.sh) manages all C++ and Python dependencies automatically via conda-forge — no manual setup needed:
 
@@ -74,7 +65,21 @@ Available environments: `default` (build + Python), `petsc` (+ PETSc), `build-on
 
 Use `pixi shell -e petsc` to drop into an interactive shell with all dependencies available (useful for Debug builds or custom CMake flags).
 
-3. Run a simulation:
+#### Option B: build.sh (HPC / Homebrew / manual)
+
+```shell
+./build.sh                # default build (GMRES only)
+./build.sh --petsc        # build with PETSc support
+./build.sh --clean --petsc  # clean rebuild with PETSc
+```
+
+For all available options and manual CMake instructions:
+```shell
+./build.sh --help
+```
+
+### 3. Run a simulation
+
 ```shell
 # np = XLEN x YLEN x ZLEN (set in the input file)
 mpirun -np 8 build/iPIC3D inputfiles/Double_Harris.inp
@@ -100,19 +105,23 @@ PETSc runtime flags are passed through to PETSc automatically. Some useful ones:
 
 ## Testing the PETSc solver
 
-Two test scripts compare the built-in GMRES and PETSc solvers (requires a `--petsc` build):
+Requires a PETSc build (`pixi run build-petsc` or `./build.sh --petsc`).
 
 **Multi-solver comparison** — runs GMRES and several PETSc Krylov methods, reports convergence and timing:
 ```shell
+pixi run test-petsc                                              # defaults: 8 procs, 10 cycles
+pixi run test-petsc -- --np 4 --cycles 20                        # custom
+pixi run test-petsc -- --np 8 --cycles 50 --grid 200 200 --topo 4 2
+
+# or manually:
 ./tests/test_petsc.sh                       # defaults: 8 procs, 10 cycles
 ./tests/test_petsc.sh --np 4 --cycles 20    # custom
-./tests/test_petsc.sh --np 8 --cycles 50 --grid 200 200 --topo 4 2
 ```
 
 **Scaling study** — use `--grid-min` / `--grid-max` to sweep grid sizes:
 ```shell
-./tests/test_petsc.sh --grid-min 50 --grid-max 400              # defaults: 8 procs, 20 cycles
-./tests/test_petsc.sh --grid-min 50 --grid-max 400 --cycles 10  # faster run
+pixi run test-petsc -- --grid-min 50 --grid-max 400              # defaults: 8 procs, 20 cycles
+pixi run test-petsc -- --grid-min 50 --grid-max 400 --cycles 10  # faster run
 ```
 
 Results are saved to `tests/test_petsc_output/` (CSV, HDF5 fields, plots).
@@ -123,18 +132,24 @@ Three common test scenarios:
 
 **1. Simple GMRES vs PETSc comparison** — single grid, two solvers:
 ```shell
-./tests/test_petsc.sh --grid 100 100 --cycles 100 --solvers GMRES,PETSc_gmres
+pixi run test-petsc -- --grid 100 100 --cycles 100 --solvers GMRES,PETSc_gmres
+# or: ./tests/test_petsc.sh --grid 100 100 --cycles 100 --solvers GMRES,PETSc_gmres
 ```
 
-**2. Multi-solver grid sweep** — all PETSc Krylov methods across grid sizes:
+**2. Multi-solver grid sweep** — all PETSc Krylov methods across grid sizes, 3 averages:
 ```shell
-./tests/test_petsc.sh --all-solvers --grid-min 50 --grid-max 150 --grid-step 50 --cycles 100
+pixi run test-petsc -- --all-solvers --grid-min 50 --grid-max 150 --grid-step 50 \
+  --cycles 100 --field-output 10 --avg 3
+# or: ./tests/test_petsc.sh --all-solvers --grid-min 50 --grid-max 150 --grid-step 50 \
+#       --cycles 100 --field-output 10 --avg 3
 ```
 
 **3. Extended run with field output** — longer simulation for convergence analysis:
 ```shell
-./tests/test_petsc.sh --grid 150 150 --cycles 1000 --solvers GMRES,PETSc_bcgs \
+pixi run test-petsc -- --grid 150 150 --cycles 1000 --solvers GMRES,PETSc_bcgs \
   --field-output 10 --name long-run
+# or: ./tests/test_petsc.sh --grid 150 150 --cycles 1000 --solvers GMRES,PETSc_bcgs \
+#       --field-output 10 --name long-run
 ```
 
 `DiagnosticsOutputCycle` is hardcoded to 1 — `ConservedQuantities.txt` is always written every cycle (cheap). Use `--field-output N` to control the expensive HDF5 field snapshots.
