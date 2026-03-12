@@ -305,14 +305,30 @@ def main(argv=None):
         sys.exit(1)
 
     # ── Auto-discovery ────────────────────────────────────────────────────
-    output_dir = os.path.join(script_dir, "test_petsc_output")
+    output_dir = os.path.join(script_dir, "test_output")
 
     if args.ref is None:
-        candidates = sorted(glob.glob(os.path.join(output_dir, "GMRES_*")))
-        candidates = [c for c in candidates if os.path.isdir(c)
-                      and not os.path.basename(c).startswith("GMRES_2")]
+        # Read ref_solver.txt if present, otherwise look for first solver dir
+        ref_prefix = None
+        ref_solver_file = os.path.join(output_dir, "ref_solver.txt")
+        if os.path.isfile(ref_solver_file):
+            with open(ref_solver_file) as f:
+                ref_prefix = f.read().strip()
+
+        if ref_prefix:
+            candidates = sorted(glob.glob(
+                os.path.join(output_dir, f"{ref_prefix}_*")))
+        else:
+            candidates = sorted(glob.glob(os.path.join(output_dir, "GMRES_*")))
+        candidates = [c for c in candidates if os.path.isdir(c)]
         if not candidates:
-            print("  ERROR: No GMRES reference directory found in test_petsc_output/.")
+            # Fallback: pick the first solver directory alphabetically
+            all_dirs_fb = sorted(glob.glob(os.path.join(output_dir, "*")))
+            candidates = [d for d in all_dirs_fb
+                          if os.path.isdir(d)
+                          and re.search(r'_\d+x\d+', os.path.basename(d))]
+        if not candidates:
+            print("  ERROR: No reference directory found in test_output/.")
             print("         Use --ref to specify.")
             sys.exit(1)
         args.ref = candidates[0]
@@ -322,13 +338,13 @@ def main(argv=None):
         all_dirs = sorted(glob.glob(os.path.join(output_dir, "*")))
         args.test = [d for d in all_dirs
                      if os.path.isdir(d) and d != args.ref
-                     and re.search(r'_\d+x\d+x\d+$', os.path.basename(d))]
+                     and re.search(r'_\d+x\d+', os.path.basename(d))]
         if not args.test:
-            print("  ERROR: No test directories found in test_petsc_output/.")
+            print("  ERROR: No test directories found in test_output/.")
             print("         Use --test to specify.")
             sys.exit(1)
-        for t in args.test:
-            print(f"  Auto-discovered test dir: {t}")
+        solver_names = [solver_label(t) for t in args.test]
+        print(f"  Found {len(args.test)} solver(s): {', '.join(solver_names)}")
 
     def get_style(dir_path):
         """Get plot style for a directory via the shared theme module."""
@@ -549,15 +565,14 @@ def main(argv=None):
     print("\u2500" * 96)
     print(f"Reference: {ref_label}")
     print(f"Per-step solver tol: {args.gmrestol:.0e}    "
-          f"Round-off floor (\u221aN\u00b7\u03b5): {roundoff_floor:.1e}  "
-          f"(N={n_dof} DOFs)")
+          f"Round-off floor (\u221aN\u00b7\u03b5): {roundoff_floor:.1e}")
     print("Note: L2 errors accumulate over cycles; "
           "per-step floors are lower bounds, not targets.")
     print()
 
-    header = f"  {'Test':<26s} {'Field':>5s}  {'L2@last':>18s}"
+    header = f"  {'Test':<26s} {'Field':>5s}   {'L2 (last cycle)':>22s}"
     print(header)
-    print("  " + "\u2500" * 51)
+    print("  " + "\u2500" * 55)
 
     for test_dir in args.test:
         test_lab = solver_label(test_dir)
@@ -566,17 +581,17 @@ def main(argv=None):
             field_name = f"{ftype}{comp}"
 
             if not data.cycles:
-                print(f"  {test_lab:<26s} {field_name:>5s}  {'N/A':>18s}")
+                print(f"  {test_lab:<26s} {field_name:>5s}   {'N/A':>22s}")
                 continue
 
             l2_last = data.l2_relative[-1]
 
             if all(v == 0 for v in data.l2_relative):
-                print(f"  {test_lab:<26s} {field_name:>5s}  {'0 (bit-identical)':>18s}")
+                print(f"  {test_lab:<26s} {field_name:>5s}   {'0 (bit-identical)':>22s}")
                 continue
 
             l2_str = _format_l2_with_pct(l2_last)
-            print(f"  {test_lab:<26s} {field_name:>5s}  {l2_str:>18s}")
+            print(f"  {test_lab:<26s} {field_name:>5s}   {l2_str:>22s}")
 
 
 if __name__ == "__main__":

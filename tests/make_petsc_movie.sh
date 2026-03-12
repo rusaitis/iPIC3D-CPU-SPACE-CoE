@@ -8,12 +8,12 @@
 # Usage:
 #   bash tests/make_petsc_movie.sh [--gmres DIR] [--petsc DIR ...] [--fps N] [--output-dir DIR]
 #
-# If --gmres/--petsc are omitted, auto-discovers from tests/test_petsc_output/.
+# If --gmres/--petsc are omitted, auto-discovers from tests/test_output/.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_OUTPUT_DIR="$SCRIPT_DIR/test_petsc_output"
+DEFAULT_OUTPUT_DIR="$SCRIPT_DIR/test_output"
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 GMRES_DIR=""

@@ -133,7 +133,7 @@ def main(data, args, theme, plot_path):
     ax1.spines['right'].set_visible(False)
 
     # ── Right panel: improvement bars ─────────────────────────────────
-    if data.gmres_times and data.petsc_labels:
+    if data.ref_times and data.comparison_labels:
         render_improvement_bars(ax2, data, solver_pcts, avg_improvements,
                                 args.sort, theme)
 
@@ -182,7 +182,7 @@ def main(data, args, theme, plot_path):
                           for g in data.bd_grids]
         ax3.set_xlabel(data.grid_label, fontsize=12)
         ax3.set_ylabel('Fraction of component time', fontsize=14)
-        ax3.set_title('Time Breakdown by Component  (GMRES baseline)',
+        ax3.set_title(f'Time Breakdown by Component  ({data.ref_label} baseline)',
                       fontsize=13, fontweight='bold')
         ax3.set_xticks(x_pos)
         ax3.set_xticklabels(bd_tick_labels, fontsize=9)

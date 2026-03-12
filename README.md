@@ -4,6 +4,16 @@ iPIC3D is an implicit particle-in-cell (PIC) code for 3D plasma simulations. Thi
 
 **This branch (`with-petsc`)** adds optional PETSc support as an alternative field solver to the built-in GMRES, selectable at runtime via the `-solver PETSc` flag.
 
+## Quickstart (pixi)
+
+```shell
+git clone https://github.com/rusaitis/iPIC3D-CPU-SPACE-CoE.git && cd iPIC3D-CPU-SPACE-CoE
+git checkout with-petsc
+pixi run build          # downloads all deps (incl. PETSc) + builds (~2 min first time)
+pixi run test-smoke     # 3-cycle sanity check
+pixi run test           # full GMRES vs PETSc comparison
+```
+
 ## Requirements
 
 - C++17 compiler (GCC, Clang, or AppleClang)
@@ -29,43 +39,37 @@ git checkout with-petsc
 
 #### Option A: pixi (recommended — manages all dependencies)
 
-[Pixi](https://pixi.sh) manages all C++ and Python dependencies automatically via conda-forge — no manual setup needed:
+[Pixi](https://pixi.sh) automatically downloads and manages all dependencies — including PETSc — on first run. No manual setup needed.
 
 ```shell
-pixi run build                     # configure + build (Release, GMRES only)
-pixi run build-petsc               # build with PETSc support
+pixi run build                     # configure + build (with PETSc)
 pixi run test-smoke                # run a short GEM2D simulation
-pixi run test-petsc                # compare GMRES vs PETSc (script defaults)
+pixi run test                      # compare GMRES vs PETSc
 ```
-
-Tasks that exist in only one environment (`build-petsc`, `test-petsc`) are resolved automatically by pixi — no `-e petsc` flag needed.
 
 **Passing custom arguments** — extra arguments after `--` are forwarded to the underlying command:
 
 ```shell
-pixi run test-petsc -- --np 8 --cycles 20
-pixi run test-petsc -- --np 4 --cycles 50 --grid 200 200
-pixi run test-petsc -- --grid-min 50 --grid-max 400   # scaling mode
+pixi run test -- --np 8 --cycles 20
+pixi run test -- --np 4 --cycles 50 --grid 200 200
+pixi run test -- --grid-min 50 --grid-max 400   # scaling mode
 ```
 
-**Running arbitrary commands** in the pixi environment (still needs `-e`):
+**Running arbitrary commands** in the pixi environment:
 
 ```shell
-pixi run -e petsc -- mpirun -np 4 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc
+pixi run -- mpirun -np 4 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc
 ```
 
-**Tip:** To avoid typing `-e petsc` for arbitrary commands, add a shell alias:
+Available environments: `default` (build with PETSc + Python), `build-only` (no Python), `py` (Python only).
 
-```shell
-alias pxp='pixi run -e petsc'      # in ~/.zshrc
-pxp -- mpirun -np 4 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc
-```
+Use `pixi shell` to drop into an interactive shell with all dependencies available (useful for Debug builds or custom CMake flags).
 
-Available environments: `default` (build + Python), `petsc` (+ PETSc), `build-only` (no Python), `py` (Python only).
+#### Option B: build.sh (HPC clusters / system toolchains only)
 
-Use `pixi shell -e petsc` to drop into an interactive shell with all dependencies available (useful for Debug builds or custom CMake flags).
-
-#### Option B: build.sh (HPC / Homebrew / manual)
+> Prefer `pixi run build` for local development. Use `build.sh` only on HPC
+> systems where pixi is unavailable or you need system-provided MPI/compilers.
+> Note: `build.sh` does not include PETSc by default — use `--petsc` if needed.
 
 ```shell
 ./build.sh                # default build (GMRES only)
@@ -84,7 +88,7 @@ For all available options and manual CMake instructions:
 # np = XLEN x YLEN x ZLEN (set in the input file)
 mpirun -np 8 build/iPIC3D inputfiles/Double_Harris.inp
 
-# With PETSc solver (requires --petsc build):
+# With PETSc solver (requires PETSc build):
 mpirun -np 8 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc
 
 # PETSc options can be passed directly on the command line:
@@ -103,28 +107,28 @@ PETSc runtime flags are passed through to PETSc automatically. Some useful ones:
 | `-ksp_monitor` | Print residual norm at each iteration |
 | `-ksp_view` | Print solver configuration after solve |
 
-## Testing the PETSc solver
+## Testing
 
-Requires a PETSc build (`pixi run build-petsc` or `./build.sh --petsc`).
+The test script auto-detects PETSc from the build and runs the appropriate solvers.
 
-**Multi-solver comparison** — runs GMRES and several PETSc Krylov methods, reports convergence and timing:
+**Multi-solver comparison** — runs GMRES and PETSc Krylov methods (when available), reports convergence and timing:
 ```shell
-pixi run test-petsc                                              # defaults: 8 procs, 10 cycles
-pixi run test-petsc -- --np 4 --cycles 20                        # custom
-pixi run test-petsc -- --np 8 --cycles 50 --grid 200 200 --topo 4 2
+pixi run test                                                    # defaults: 8 procs, 10 cycles
+pixi run test -- --np 4 --cycles 20                              # custom
+pixi run test -- --np 8 --cycles 50 --grid 200 200 --topo 4 2
 
 # or manually:
-./tests/test_petsc.sh                       # defaults: 8 procs, 10 cycles
-./tests/test_petsc.sh --np 4 --cycles 20    # custom
+./tests/test.sh                       # defaults: 8 procs, 10 cycles
+./tests/test.sh --np 4 --cycles 20    # custom
 ```
 
 **Scaling study** — use `--grid-min` / `--grid-max` to sweep grid sizes:
 ```shell
-pixi run test-petsc -- --grid-min 50 --grid-max 400              # defaults: 8 procs, 20 cycles
-pixi run test-petsc -- --grid-min 50 --grid-max 400 --cycles 10  # faster run
+pixi run test -- --grid-min 50 --grid-max 400              # defaults: 8 procs, 20 cycles
+pixi run test -- --grid-min 50 --grid-max 400 --cycles 10  # faster run
 ```
 
-Results are saved to `tests/test_petsc_output/` (CSV, HDF5 fields, plots).
+Results are saved to `tests/test_output/` (CSV, HDF5 fields, plots).
 
 ### Test recipes
 
@@ -132,24 +136,19 @@ Three common test scenarios:
 
 **1. Simple GMRES vs PETSc comparison** — single grid, two solvers:
 ```shell
-pixi run test-petsc -- --grid 100 100 --cycles 100 --solvers GMRES,PETSc_gmres
-# or: ./tests/test_petsc.sh --grid 100 100 --cycles 100 --solvers GMRES,PETSc_gmres
+pixi run test -- --grid 100 100 --cycles 100 --solvers GMRES,PETSc_gmres
 ```
 
 **2. Multi-solver grid sweep** — all PETSc Krylov methods across grid sizes, 3 averages:
 ```shell
-pixi run test-petsc -- --all-solvers --grid-min 50 --grid-max 150 --grid-step 50 \
+pixi run test -- --all-solvers --grid-min 50 --grid-max 150 --grid-step 50 \
   --cycles 100 --field-output 10 --avg 3
-# or: ./tests/test_petsc.sh --all-solvers --grid-min 50 --grid-max 150 --grid-step 50 \
-#       --cycles 100 --field-output 10 --avg 3
 ```
 
 **3. Extended run with field output** — longer simulation for convergence analysis:
 ```shell
-pixi run test-petsc -- --grid 150 150 --cycles 1000 --solvers GMRES,PETSc_bcgs \
+pixi run test -- --grid 150 150 --cycles 1000 --solvers GMRES,PETSc_bcgs \
   --field-output 10 --name long-run
-# or: ./tests/test_petsc.sh --grid 150 150 --cycles 1000 --solvers GMRES,PETSc_bcgs \
-#       --field-output 10 --name long-run
 ```
 
 `DiagnosticsOutputCycle` is hardcoded to 1 — `ConservedQuantities.txt` is always written every cycle (cheap). Use `--field-output N` to control the expensive HDF5 field snapshots.
@@ -173,8 +172,8 @@ pixi run plot-energy -- --output custom_energy.png
 
 Or run the scripts directly:
 ```shell
-python3 tests/plot_timing.py tests/test_petsc_output/timing_results.csv
-python3 tests/plot_energy.py tests/test_petsc_output/timing_results.csv --light
+python3 tests/plot_timing.py tests/test_output/timing_results.csv
+python3 tests/plot_energy.py tests/test_output/timing_results.csv --light
 ```
 
 ## Python postprocessing

@@ -106,7 +106,7 @@ def main(data, args, theme, plot_path):
     ax1.spines['right'].set_visible(False)
 
     # ── Right panel: improvement bars ─────────────────────────────────
-    if data.gmres_times and data.petsc_labels:
+    if data.ref_times and data.comparison_labels:
         render_improvement_bars(ax2, data, solver_pcts, avg_improvements,
                                 args.sort, theme)
 

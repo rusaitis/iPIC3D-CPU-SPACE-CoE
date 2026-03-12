@@ -116,6 +116,8 @@ _SOLVER_STYLES_LIGHT: Dict[str, dict] = {
     "PETSc_fgmres": {"color": "#AA3377", "marker": "D", "ls": "-."},
     "PETSc_tfqmr":  {"color": "#CCBB44", "marker": "v", "ls": ":"},
     "GMRES_2":      {"color": "#66CCEE", "marker": "d", "ls": "--"},
+    "CG":           {"color": "#117733", "marker": "P", "ls": "-"},
+    "BiCGStab":     {"color": "#882255", "marker": "X", "ls": "-."},
 }
 
 _SOLVER_STYLES_DARK: Dict[str, dict] = {
@@ -126,6 +128,8 @@ _SOLVER_STYLES_DARK: Dict[str, dict] = {
     "PETSc_fgmres": {"color": "#cba6f7", "marker": "D", "ls": "-."},
     "PETSc_tfqmr":  {"color": "#f9e2af", "marker": "v", "ls": ":"},
     "GMRES_2":      {"color": "#89dceb", "marker": "d", "ls": "--"},
+    "CG":           {"color": "#94e2d5", "marker": "P", "ls": "-"},
+    "BiCGStab":     {"color": "#f0a6ca", "marker": "X", "ls": "-."},
 }
 
 _DEFAULT_STYLE_LIGHT = {"color": "#607D8B", "marker": "x", "ls": ":"}
@@ -133,6 +137,11 @@ _DEFAULT_STYLE_DARK  = {"color": "#94a3b8", "marker": "x", "ls": ":"}
 
 _EXTRA_COLORS_LIGHT = ["#882255", "#332288", "#117733", "#999933", "#CC6677"]
 _EXTRA_COLORS_DARK  = ["#f0a6ca", "#b4befe", "#94e2d5", "#f9e2af", "#f38ba8"]
+_EXTRA_MARKERS = ["s", "^", "D", "v", "P", "X", "d", "h", "<", ">"]
+_EXTRA_LINESTYLES = ["-", "--", "-.", ":", "-"]
+
+# User-registered styles (populated via register_solver_style())
+_CUSTOM_STYLES: Dict[str, dict] = {}
 
 # Component breakdown colors (field, moments, mover) keyed by mode
 COMPONENT_COLORS = {
@@ -214,12 +223,25 @@ def apply_theme(args=None) -> Theme:
     return t
 
 
+def register_solver_style(key: str, color: str, marker: str = "o",
+                          ls: str = "-"):
+    """Register a custom solver style for use in plots.
+
+    Registered styles take priority over the hash-based fallback but
+    not over the built-in style tables.
+    """
+    _CUSTOM_STYLES[key] = {"color": color, "marker": marker, "ls": ls}
+
+
 def get_solver_style(label_or_path: str) -> dict:
     """Return ``{"color": ..., "marker": ..., "ls": ...}`` for a solver.
 
     *label_or_path* can be a directory path (basename is extracted) or a
     plain solver key like ``"PETSc_gmres"``.  Grid-size suffixes of the
     form ``_NxNxN`` are stripped before lookup.
+
+    Lookup order: built-in styles → prefix match → custom styles →
+    hash-based fallback (cycles through distinct markers and linestyles).
     """
     import os
     import re
@@ -229,7 +251,6 @@ def get_solver_style(label_or_path: str) -> dict:
 
     dark = active is not None and active.mode == "dark"
     styles = _SOLVER_STYLES_DARK if dark else _SOLVER_STYLES_LIGHT
-    default = _DEFAULT_STYLE_DARK if dark else _DEFAULT_STYLE_LIGHT
     extras = _EXTRA_COLORS_DARK if dark else _EXTRA_COLORS_LIGHT
 
     if key in styles:
@@ -237,6 +258,10 @@ def get_solver_style(label_or_path: str) -> dict:
     for k, v in styles.items():
         if basename.startswith(k):
             return dict(v)
+    if key in _CUSTOM_STYLES:
+        return dict(_CUSTOM_STYLES[key])
 
     idx = hash(basename) % len(extras)
-    return {"color": extras[idx], "marker": "o", "ls": "-"}
+    marker = _EXTRA_MARKERS[idx % len(_EXTRA_MARKERS)]
+    ls = _EXTRA_LINESTYLES[idx % len(_EXTRA_LINESTYLES)]
+    return {"color": extras[idx], "marker": marker, "ls": ls}

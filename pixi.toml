@@ -14,20 +14,11 @@ compilers   = "*"                                              # cc, c++, gfortr
 openmpi     = ">=5"
 hdf5        = { version = ">=1.14", build = "mpi_openmpi*" }  # parallel HDF5
 llvm-openmp = ">=18"
+petsc       = { version = ">=3.21", build = "real*" }          # real arithmetic, openmpi
 
 [feature.build.activation.env]
 IPIC3D_BUILD_DIR   = "build"
-IPIC3D_CMAKE_EXTRA = ""
-
-# ── PETSc (optional) ────────────────────────────────────────────────
-[feature.petsc.dependencies]
-petsc = { version = ">=3.21", build = "real*" }                # real arithmetic, openmpi
-
-# When the petsc environment is active, inject the PETSc CMake flag
-# and use a separate build directory so both builds can coexist.
-[feature.petsc.activation.env]
 IPIC3D_CMAKE_EXTRA = "-DUSE_PETSC=ON"
-IPIC3D_BUILD_DIR   = "build-petsc"
 
 # ── Python core ─────────────────────────────────────────────────────
 [feature.py.dependencies]
@@ -39,25 +30,19 @@ mpi4py     = "*"
 
 # ── Environments ────────────────────────────────────────────────────
 [environments]
-default    = { features = ["build", "py"],          solve-group = "default" }
-petsc      = { features = ["build", "petsc", "py"], solve-group = "default" }
+default    = { features = ["build", "py"], solve-group = "default" }
 build-only = { features = ["build"] }
 py         = { features = ["py"], no-default-feature = true }
 
 # ── Tasks ───────────────────────────────────────────────────────────
 [tasks]
-configure  = { cmd = "cmake -S . -B $IPIC3D_BUILD_DIR -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA", description = "Configure CMake build" }
-build      = { cmd = "cmake --build $IPIC3D_BUILD_DIR --parallel", depends-on = ["configure"], description = "Build iPIC3D" }
-clean      = { cmd = "rm -rf $IPIC3D_BUILD_DIR", description = "Remove build directory for current environment" }
-clean-all  = { cmd = "rm -rf build build-petsc", description = "Remove all build directories" }
-test-smoke = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp", depends-on = ["build"], description = "3-cycle GEM2D smoke test (4 procs)" }
-
-[feature.petsc.tasks]
-configure-petsc  = { cmd = "cmake -S . -B $IPIC3D_BUILD_DIR -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA", description = "Configure CMake build (PETSc)" }
-build-petsc      = { cmd = "cmake --build $IPIC3D_BUILD_DIR --parallel", depends-on = ["configure-petsc"], description = "Build iPIC3D (PETSc)" }
-test-petsc       = { cmd = "bash tests/test_petsc.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build-petsc"], description = "Full PETSc regression suite (GMRES vs PETSc)" }
-test-petsc-smoke = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp -solver PETSc", depends-on = ["build-petsc"], description = "3-cycle PETSc smoke test (4 procs)" }
-plot-timing      = { cmd = "python tests/plot_timing.py", description = "Solver timing comparison plot" }
-plot-fields      = { cmd = "python tests/plot_field_comparison.py", description = "Field heatmaps with difference panels" }
-plot-energy      = { cmd = "python tests/plot_energy.py", description = "Energy conservation plot" }
-plot-l2          = { cmd = "python tests/plot_l2_timeseries.py", description = "L2 error accumulation plot" }
+configure   = { cmd = "cmake -S . -B $IPIC3D_BUILD_DIR -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA", description = "Configure CMake build" }
+build       = { cmd = "cmake --build $IPIC3D_BUILD_DIR --parallel", depends-on = ["configure"], description = "Build iPIC3D (with PETSc)" }
+clean       = { cmd = "rm -rf $IPIC3D_BUILD_DIR", description = "Remove build directory" }
+clean-all   = { cmd = "rm -rf build build-petsc", description = "Remove all build directories" }
+test        = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], description = "Solver regression test (GMRES + PETSc comparison)" }
+test-smoke  = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp", depends-on = ["build"], description = "3-cycle GEM2D smoke test (4 procs)" }
+plot-timing = { cmd = "python tests/plot_timing.py", description = "Solver timing comparison (run test first)" }
+plot-fields = { cmd = "python tests/plot_field_comparison.py", description = "Field heatmaps (run test first)" }
+plot-energy = { cmd = "python tests/plot_energy.py", description = "Energy conservation plot (run test first)" }
+plot-l2     = { cmd = "python tests/plot_l2_timeseries.py", description = "L2 error plot (run test first)" }

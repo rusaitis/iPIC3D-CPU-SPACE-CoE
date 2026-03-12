@@ -15,7 +15,7 @@ plan-*.md
 # Test artifacts
 tests/*.png
 tests/*.csv
-tests/test_petsc_*/
+tests/test_output*/
 
 # Python
 __pycache__/

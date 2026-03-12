@@ -19,7 +19,7 @@ from typing import Optional
 def require_imports(*module_names: str) -> None:
     """Check that all required modules are importable; exit(2) if any missing.
 
-    Exit code 2 (not 0) lets callers like test_petsc.sh distinguish
+    Exit code 2 (not 0) lets callers like test.sh distinguish
     "missing dependency" from "success".
     """
     missing = []

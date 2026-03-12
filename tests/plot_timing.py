@@ -13,7 +13,7 @@ The output PNG is written alongside the CSV with the same base name.
 
 All configuration (solver labels, np, cycles, nzc, breakdown data) is read
 directly from the CSV. Environment variables are still accepted as overrides
-for backward compatibility when called from test_petsc_scaling.sh.
+for backward compatibility when called from the test script.
 """
 
 import argparse

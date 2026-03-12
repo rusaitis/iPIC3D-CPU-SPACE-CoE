@@ -2,6 +2,7 @@
 name = "ipic3d-scripts"
 version = "0.1.0"
 description = "Python postprocessing scripts for iPIC3D simulations"
+# Note: pixi.toml uses >=3.12 for local dev; this lower bound supports HPC systems
 requires-python = ">=3.10"
 dependencies = [
     "numpy",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# common.sh — shared helper functions for test_petsc.sh and test_petsc_scaling.sh
+# common.sh — shared helper functions for test.sh
 #
 # Source this file after PROJECT_DIR is set:
 #   source "$SCRIPT_DIR/common.sh"
@@ -27,7 +27,7 @@ validate_nonneg_int() {
 compute_topology() {
     local np="$1"
     local ylen xlen
-    ylen=$(python3 -c "
+    ylen=$("${PYTHON:-python3}" -c "
 import math
 n = $np
 best = (1, n)
@@ -47,9 +47,10 @@ warn_oversubscription() {
     local avail
     avail=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 0)
     if [[ $avail -gt 0 && $np -gt $avail ]]; then
-        echo "WARNING: --np $np exceeds $avail logical CPUs on this machine."
-        echo "         mpirun will oversubscribe, which degrades performance and may fail."
-        echo "         Consider using --np N with N <= $avail."
+        local _yw=$'\033[33m' _rs=$'\033[0m'
+        [[ ! -t 1 ]] && { _yw=''; _rs=''; }
+        echo "${_yw}WARNING:${_rs} --np $np exceeds $avail logical CPUs (oversubscription may degrade performance or fail)."
+        echo "         Consider --np N with N <= $avail."
         echo ""
     fi
 }

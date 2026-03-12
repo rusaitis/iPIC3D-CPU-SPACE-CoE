@@ -15,7 +15,11 @@ from plot_utils import parse_conserved_quantities, discover_profile_files
 # ── Constants ────────────────────────────────────────────────────────────
 
 METADATA_COLS = {
-    'grid_size', 'np', 'cycles', 'nzc',
+    'grid_size', 'np', 'cycles', 'nzc', 'ref_solver',
+    # New column names
+    'ref_moments_s', 'ref_mover_s',
+    'ref_field_pct', 'ref_moments_pct', 'ref_mover_pct',
+    # Legacy column names (backwards compat)
     'gmres_moments_s', 'gmres_mover_s',
     'gmres_field_pct', 'gmres_moments_pct', 'gmres_mover_pct',
 }
@@ -48,14 +52,32 @@ class ResultsData:
     # Energy data (per-solver ConservedQuantities)
     energy_data: dict        # label -> dict
     profile_labels: list     # solver labels matching profile_files
+    ref_solver: str = ""     # reference solver label (from CSV or first solver)
 
     @property
+    def ref_label(self):
+        """Label of the reference solver (first solver if not explicit)."""
+        return self.ref_solver or (self.solver_labels[0] if self.solver_labels else "GMRES")
+
+    @property
+    def ref_times(self):
+        """Timing data for the reference solver."""
+        return self.solver_times.get(self.ref_label, [])
+
+    @property
+    def comparison_labels(self):
+        """Solver labels excluding the reference."""
+        ref = self.ref_label
+        return [l for l in self.solver_labels if l != ref]
+
+    # Legacy aliases for backwards compatibility
+    @property
     def gmres_times(self):
-        return self.solver_times.get("GMRES", [])
+        return self.ref_times
 
     @property
     def petsc_labels(self):
-        return [l for l in self.solver_labels if l != "GMRES"]
+        return self.comparison_labels
 
     @property
     def all_times(self):
@@ -113,6 +135,11 @@ def load_results_csv(csv_path):
     np_    =     os.environ.get("NP",     first_row.get('np',     '?') or '?')
     cycles =     os.environ.get("CYCLES", first_row.get('cycles', '?') or '?')
 
+    # Reference solver: from env, CSV column, or default to first solver
+    ref_solver = (os.environ.get("REF_SOLVER")
+                  or first_row.get('ref_solver', '')
+                  or (solver_labels[0] if solver_labels else ''))
+
     # ── Breakdown data ────────────────────────────────────────────────
     def _parse_floats(env_key):
         return [float(x) if x != "NA" else None
@@ -125,7 +152,7 @@ def load_results_csv(csv_path):
         bd_mover   = _parse_floats("BD_MOVER_LIST")
     else:
         bd_grids, bd_field, bd_moments, bd_mover = [], [], [], []
-        gmres_label = solver_labels[0] if solver_labels else "GMRES"
+        ref_label_bd = ref_solver or (solver_labels[0] if solver_labels else "GMRES")
         with open(csv_path, newline='') as f:
             for row in csv.DictReader(f):
                 gs = row['grid_size']
@@ -133,9 +160,10 @@ def load_results_csv(csv_path):
                     bd_grids.append(int(gs))
                 except ValueError:
                     bd_grids.append(len(bd_grids))
-                f_val = row.get(gmres_label,      'NA')
-                m_val = row.get('gmres_moments_s', 'NA')
-                p_val = row.get('gmres_mover_s',   'NA')
+                f_val = row.get(ref_label_bd,       'NA')
+                # Support both new (ref_*) and legacy (gmres_*) column names
+                m_val = row.get('ref_moments_s', row.get('gmres_moments_s', 'NA'))
+                p_val = row.get('ref_mover_s',   row.get('gmres_mover_s',   'NA'))
                 bd_field.append(  float(f_val) if f_val not in ('NA', '') else None)
                 bd_moments.append(float(m_val) if m_val not in ('NA', '') else None)
                 bd_mover.append(  float(p_val) if p_val not in ('NA', '') else None)
@@ -204,6 +232,7 @@ def load_results_csv(csv_path):
         max_grid=max_grid,
         energy_data=energy_data,
         profile_labels=profile_labels,
+        ref_solver=ref_solver,
     )
 
 
@@ -229,25 +258,25 @@ def auto_time_unit(all_times):
 
 
 def compute_improvements(data):
-    """Compute per-solver improvement percentages vs GMRES.
+    """Compute per-solver improvement percentages vs the reference solver.
 
     Returns (solver_pcts, avg_improvements) where:
       solver_pcts:      dict label -> [pct, ...] per grid
       avg_improvements: dict label -> float average improvement
     """
-    gmres_times = data.gmres_times
-    petsc_labels = data.petsc_labels
+    ref_times = data.ref_times
+    comparison_labels = data.comparison_labels
 
-    if not gmres_times or not petsc_labels:
+    if not ref_times or not comparison_labels:
         return {}, {}
 
     solver_pcts = {}
     avg_improvements = {}
-    for label in petsc_labels:
+    for label in comparison_labels:
         times = data.solver_times[label]
-        pcts = [(gt - pt) / gt * 100
-                if gt is not None and pt is not None and gt > 0 else 0
-                for gt, pt in zip(gmres_times, times)]
+        pcts = [(rt - ct) / rt * 100
+                if rt is not None and ct is not None and rt > 0 else 0
+                for rt, ct in zip(ref_times, times)]
         solver_pcts[label] = pcts
         valid_pcts = [p for p in pcts if p != 0]
         if valid_pcts:
@@ -258,20 +287,21 @@ def compute_improvements(data):
 
 def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
                             sort, theme):
-    """Render improvement-vs-GMRES bar chart on the given axis.
+    """Render improvement bar chart vs the reference solver on the given axis.
 
     Handles both sorted-by-solver and grouped-by-grid modes.
     """
     from matplotlib.ticker import FuncFormatter
     from plot_theme import get_solver_style
 
-    petsc_labels = data.petsc_labels
+    comparison_labels = data.comparison_labels
+    ref_label = data.ref_label
     grids = data.grids
     tick_labels = data.tick_labels
 
     if sort:
         # ── Sorted mode: group bars by solver ────────────────────────
-        sorted_labels = sorted(petsc_labels,
+        sorted_labels = sorted(comparison_labels,
                                key=lambda l: avg_improvements.get(l, 0),
                                reverse=True)
         n_runs    = len(grids)
@@ -315,8 +345,8 @@ def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
 
         ax.axhline(y=0, color=theme.zero_line_color, linestyle='--',
                     linewidth=1, alpha=0.5)
-        ax.set_ylabel('Improvement vs GMRES (%)', fontsize=14)
-        ax.set_title('PETSc Improvement vs Built-in GMRES  (by solver)',
+        ax.set_ylabel(f'Improvement vs {ref_label} (%)', fontsize=14)
+        ax.set_title(f'Improvement vs {ref_label}  (by solver)',
                      fontsize=13, fontweight='bold')
         ax.yaxis.set_major_formatter(
             FuncFormatter(lambda x, _: f'{x:.0f}%'))
@@ -327,12 +357,12 @@ def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
     else:
         # ── Default mode: group bars by grid size ────────────────────
         x_positions = list(range(len(grids)))
-        bar_width   = 0.7 / len(petsc_labels)
+        bar_width   = 0.7 / len(comparison_labels)
 
-        for j, label in enumerate(petsc_labels):
+        for j, label in enumerate(comparison_labels):
             pcts    = solver_pcts[label]
             s       = get_solver_style(label)
-            offsets = [x + (j - len(petsc_labels)/2 + 0.5) * bar_width
+            offsets = [x + (j - len(comparison_labels)/2 + 0.5) * bar_width
                        for x in x_positions]
             bars    = ax.bar(offsets, pcts, width=bar_width, color=s["color"],
                              alpha=0.8, edgecolor=theme.bar_edge, linewidth=0.5,
@@ -347,8 +377,8 @@ def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
         ax.axhline(y=0, color=theme.zero_line_color, linestyle='--',
                     linewidth=1, alpha=0.5)
         ax.set_xlabel(data.grid_label, fontsize=12)
-        ax.set_ylabel('Improvement vs GMRES (%)', fontsize=14)
-        ax.set_title('PETSc Improvement vs Built-in GMRES',
+        ax.set_ylabel(f'Improvement vs {ref_label} (%)', fontsize=14)
+        ax.set_title(f'Improvement vs {ref_label}',
                      fontsize=13, fontweight='bold')
         ax.set_xticks(x_positions)
         ax.set_xticklabels(tick_labels, fontsize=9)

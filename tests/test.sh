@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
-# test_petsc.sh — Compare GMRES vs PETSc field solver performance
+# test.sh — Solver regression test: compare field solver configurations
+#
+# Auto-detects PETSc availability from the build. When PETSc is present,
+# runs GMRES vs PETSc comparison; otherwise runs GMRES only.
 #
 # Two modes:
 #   Single-grid (default): Runs all solvers on one grid config.
@@ -10,13 +13,13 @@
 #
 # Usage:
 #   # Single-grid mode
-#   ./tests/test_petsc.sh [--np N] [--cycles N] [--grid NXC NYC [NZC]] [--topo X Y [Z]] ...
+#   ./tests/test.sh [--np N] [--cycles N] [--grid NXC NYC [NZC]] [--topo X Y [Z]] ...
 #
 #   # Scaling mode
-#   ./tests/test_petsc.sh --grid-min 50 --grid-max 400 [--grid-step N] ...
+#   ./tests/test.sh --grid-min 50 --grid-max 400 [--grid-step N] ...
 #
 # Requirements:
-#   - Build with PETSc:  ./build.sh --petsc
+#   - Build iPIC3D:  pixi run build  (or ./build.sh)
 #   - MPI available (mpirun)
 #   - python3 (for statistics, plotting, convergence parsing; override with PYTHON env var)
 #   - Bash 4.0+ (brew install bash on macOS)
@@ -77,11 +80,16 @@ NO_PLOT=false
 NO_COLOR_FLAG=false
 BASELINE=false
 PETSC_OPTIONS=""
-TMPDIR_BASE=$(mktemp -d "${TMPDIR:-/tmp}/ipic3d_test_petsc.XXXXXX")
+TMPDIR_BASE=$(mktemp -d "${TMPDIR:-/tmp}/ipic3d_test.XXXXXX") \
+    || { echo "ERROR: Failed to create temp directory" >&2; exit 1; }
 PYTHON="${PYTHON:-python3}"
 
 # MPI flags: --oversubscribe is needed for OpenMPI 5+ when np > physical cores
-MPIRUN_FLAGS=(--oversubscribe)
+# Only add the flag for OpenMPI — MPICH/Intel MPI/Cray don't recognize it.
+MPIRUN_FLAGS=()
+if mpirun --version 2>&1 | grep -qi "open.mpi"; then
+    MPIRUN_FLAGS=(--oversubscribe)
+fi
 
 # ========================= Solver Configuration ============================
 #
@@ -94,10 +102,12 @@ MPIRUN_FLAGS=(--oversubscribe)
 #   1. Append to all three arrays below (keep them in sync)
 #   2. Guard behind ALL_SOLVERS or a new flag if experimental
 #
-# Default solvers (always included):
-SOLVER_LABELS=("GMRES"      "PETSc_gmres")
-SOLVER_TYPES=( "GMRES"      "PETSc")
-SOLVER_EXTRA=( ""           "")
+# Default: GMRES only. PETSc solvers added below if available.
+SOLVER_LABELS=("GMRES")
+SOLVER_TYPES=( "GMRES")
+SOLVER_EXTRA=( "")
+ADD_SOLVER_SPECS=()
+REF_SOLVER_LABEL=""
 
 # ========================= Section 3: Argument parsing =====================
 while [[ $# -gt 0 ]]; do
@@ -152,6 +162,12 @@ while [[ $# -gt 0 ]]; do
         --solvers)
             [[ $# -ge 2 ]] || { echo "Error: --solvers requires a comma-separated list" >&2; exit 2; }
             SOLVER_FILTER="$2"; shift 2 ;;
+        --ref-solver)
+            [[ $# -ge 2 ]] || { echo "Error: --ref-solver requires a solver label" >&2; exit 2; }
+            REF_SOLVER_LABEL="$2"; shift 2 ;;
+        --add-solver)
+            [[ $# -ge 2 ]] || { echo "Error: --add-solver requires LABEL:TYPE[:EXTRA]" >&2; exit 2; }
+            ADD_SOLVER_SPECS+=("$2"); shift 2 ;;
         --randomize)    RANDOMIZE=true;     shift ;;
         --clean)        CLEAN_OUTPUT=true;  shift ;;
         --movie)        MAKE_MOVIE=true;    shift ;;
@@ -216,8 +232,12 @@ Options:
   --grid-min N         Smallest XY grid size (triggers scaling mode)
   --grid-max N         Largest XY grid size (triggers scaling mode)
   --grid-step N        Grid size increment (default: 50)
-  --all-solvers        Add PETSc fgmres, bcgs, tfqmr
+  --all-solvers        Add PETSc fgmres, bcgs, tfqmr (requires PETSc build)
   --solvers LIST       Comma-separated solver labels to run (e.g. GMRES,PETSc_bcgs)
+  --ref-solver LABEL   Reference solver for comparisons (default: first solver)
+  --add-solver SPEC    Add custom solver: LABEL:TYPE[:EXTRA] (repeatable)
+                       Examples: --add-solver "GMRES_2:GMRES:"
+                                 --add-solver "PETSc_cg:PETSc:-ksp_type cg"
   --randomize          Shuffle solver run order
   --timeout N          Kill simulation after N seconds (requires timeout/gtimeout)
   --verbose            Show full output (default)
@@ -228,18 +248,18 @@ Options:
   --petsc-options STR  Extra PETSc KSP options for all PETSc runs (quoted string)
   --exe PATH           Path to iPIC3D executable (default: build/iPIC3D)
   --input FILE         Input file path (default: inputfiles/Double_Harris.inp)
-  --name TAG           Output dir suffix: test_petsc_output_TAG/
+  --name TAG           Output dir suffix: test_output_TAG/
   --field-output N     Save field data every N cycles (default: CYCLES in single-grid, off in scaling)
   --particle-output N  Save particle data every N cycles (0 = off)
   --movie              Generate mp4 movie of field comparison across cycles (requires ffmpeg)
   --baseline           Add a second GMRES run (baseline for floating-point comparison)
-  --output-dir DIR     Override output directory (default: tests/test_petsc_output/)
+  --output-dir DIR     Override output directory (default: tests/test_output/)
   --write-method M     HDF5 write method: phdf5, shdf5, pvtk (default: phdf5)
   --clean              Remove output directory before running (start fresh)
   --dry-run            Print commands without running them
 
 Output:
-  CSV and plots are saved to tests/test_petsc_output/ (or test_petsc_output_TAG/).
+  CSV and plots are saved to tests/test_output/ (or test_output_TAG/).
   CSV file: results.csv   Plot: results.png
 
 Examples:
@@ -259,7 +279,7 @@ Examples:
   $0 --grid-min 100 --grid-max 400 --name overnight
 HELPEOF
             exit 0 ;;
-        --)  shift; break ;;
+        --)  shift ;;  # consume -- (pixi inserts it before extra args)
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -276,9 +296,22 @@ fi
 if [[ "$_color" == true ]]; then
     RED=$'\033[31m'  GREEN=$'\033[32m'  YELLOW=$'\033[33m'  BLUE=$'\033[34m'
     BOLD=$'\033[1m'  DIM=$'\033[2m'     RESET=$'\033[0m'
+    ARROW='▸'  CHECK='✓'  CROSS='✗'  DOT='·'  MDASH='─'  HDASH='━'
 else
     RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' RESET=''
+    ARROW='>'  CHECK='[OK]'  CROSS='[FAIL]'  DOT='-'  MDASH='-'  HDASH='='
 fi
+
+# Single-line section header: ── TITLE ──────────────────────────
+section() {
+    local title="$1" width="${2:-60}"
+    local prefix="${MDASH}${MDASH} ${BOLD}${title}${RESET} "
+    local prefix_plain="${MDASH}${MDASH} ${title} "
+    local pad=$(( width - ${#prefix_plain} ))
+    (( pad < 2 )) && pad=2
+    printf -v trail '%*s' "$pad" ''; trail=${trail// /$MDASH}
+    echo "${DIM}${prefix}${trail}${RESET}"
+}
 
 # ========================= Section 4: Mode detection =======================
 SCALING_MODE=false
@@ -311,8 +344,16 @@ if [[ -z "$XLEN" || -z "$YLEN" ]]; then
     read -r XLEN YLEN <<< "$(compute_topology "$NP_XY")"
 fi
 
+# Validate that topology matches --np
+expected_np=$((XLEN * YLEN * ZLEN))
+if [[ $expected_np -ne $NP ]]; then
+    echo "ERROR: Topology ${XLEN}x${YLEN}x${ZLEN} requires $expected_np processes, but --np is $NP" >&2
+    exit 2
+fi
+
 # Parse grid values from input file once (single awk pass)
 read -r file_nxc file_nyc file_nzc <<< "$(awk -F= '
+    /^[[:space:]]*#/{next}
     /^nxc/ && !nxc {gsub(/[^0-9]/,"",$2); nxc=$2}
     /^nyc/ && !nyc {gsub(/[^0-9]/,"",$2); nyc=$2}
     /^nzc/ && !nzc {gsub(/[^0-9]/,"",$2); nzc=$2}
@@ -349,13 +390,13 @@ fi
 if [[ -n "$OUTPUT_DIR" ]]; then
     PERSISTENT_OUTPUT_DIR="$OUTPUT_DIR"
 elif [[ -n "$NAME_TAG" ]]; then
-    PERSISTENT_OUTPUT_DIR="$SCRIPT_DIR/test_petsc_output_${NAME_TAG}"
+    PERSISTENT_OUTPUT_DIR="$SCRIPT_DIR/test_output_${NAME_TAG}"
 else
-    PERSISTENT_OUTPUT_DIR="$SCRIPT_DIR/test_petsc_output"
+    PERSISTENT_OUTPUT_DIR="$SCRIPT_DIR/test_output"
 fi
 if [[ "$CLEAN_OUTPUT" == true && "$DRY_RUN" != true && -d "$PERSISTENT_OUTPUT_DIR" ]]; then
     # Safety: reject system directories
-    _clean_dir_real=$(cd "$PERSISTENT_OUTPUT_DIR" && pwd -P)
+    _clean_dir_real=$(cd "$PERSISTENT_OUTPUT_DIR" && pwd -P) || { echo "ERROR: Cannot access $PERSISTENT_OUTPUT_DIR" >&2; exit 1; }
     case "$_clean_dir_real" in
         /|/usr|/usr/*|/var|/var/*|/etc|/etc/*|/bin|/bin/*|/sbin|/sbin/*|"$HOME")
             echo "ERROR: --clean refuses to delete system directory: $PERSISTENT_OUTPUT_DIR" >&2
@@ -381,14 +422,32 @@ mkdir -p "$PERSISTENT_OUTPUT_DIR"
 CSV_FILE="$PERSISTENT_OUTPUT_DIR/results.csv"
 PLOT_FILE="$PERSISTENT_OUTPUT_DIR/results.png"
 
-# ========================= Section 5: Finalize solver list ==================
+# ========================= Section 5: PETSc detection & solver list =========
+# Auto-detect PETSc support from the build
+BUILD_DIR_PATH=$(dirname "$EXECUTABLE")
+HAS_PETSC=false
+if grep -q 'USE_PETSC:BOOL=ON' "$BUILD_DIR_PATH/CMakeCache.txt" 2>/dev/null; then
+    HAS_PETSC=true
+fi
+
+# Add default PETSc solver if available
+if [[ "$HAS_PETSC" == true ]]; then
+    SOLVER_LABELS+=("PETSc_gmres")
+    SOLVER_TYPES+=( "PETSc")
+    SOLVER_EXTRA+=( "")
+fi
+
 # Extra solvers added with --all-solvers
 if [[ "$ALL_SOLVERS" == true ]]; then
-    SOLVER_LABELS+=("PETSc_fgmres"  "PETSc_bcgs"  "PETSc_tfqmr")
-    SOLVER_TYPES+=( "PETSc"         "PETSc"       "PETSc")
-    SOLVER_EXTRA+=( "-ksp_type fgmres -ksp_gmres_restart 50 -ksp_max_it 1000" \
-                    "-ksp_type bcgs -ksp_max_it 1000" \
-                    "-ksp_type tfqmr -ksp_max_it 1000")
+    if [[ "$HAS_PETSC" == true ]]; then
+        SOLVER_LABELS+=("PETSc_fgmres"  "PETSc_bcgs"  "PETSc_tfqmr")
+        SOLVER_TYPES+=( "PETSc"         "PETSc"       "PETSc")
+        SOLVER_EXTRA+=( "-ksp_type fgmres -ksp_gmres_restart 50 -ksp_max_it 1000" \
+                        "-ksp_type bcgs -ksp_max_it 1000" \
+                        "-ksp_type tfqmr -ksp_max_it 1000")
+    else
+        echo "WARNING: --all-solvers ignored — build does not include PETSc" >&2
+    fi
 fi
 
 # Baseline GMRES run for floating-point comparison
@@ -397,6 +456,18 @@ if [[ "$BASELINE" == true ]]; then
     SOLVER_TYPES+=( "GMRES")
     SOLVER_EXTRA+=( "")
 fi
+
+# Process --add-solver specs (LABEL:TYPE[:EXTRA])
+for spec in ${ADD_SOLVER_SPECS[@]+"${ADD_SOLVER_SPECS[@]}"}; do
+    IFS=: read -r _as_label _as_type _as_extra <<< "$spec"
+    if [[ -z "$_as_label" || -z "$_as_type" ]]; then
+        echo "ERROR: --add-solver requires LABEL:TYPE[:EXTRA], got: '$spec'" >&2
+        exit 2
+    fi
+    SOLVER_LABELS+=("$_as_label")
+    SOLVER_TYPES+=("$_as_type")
+    SOLVER_EXTRA+=("${_as_extra:-}")
+done
 
 # Append --petsc-options to all PETSc solver extra args
 if [[ -n "$PETSC_OPTIONS" ]]; then
@@ -410,6 +481,16 @@ fi
 # Filter solvers if --solvers was given
 if [[ -n "$SOLVER_FILTER" ]]; then
     IFS=',' read -ra _wanted <<< "$SOLVER_FILTER"
+    # Validate: error if user explicitly requests PETSc solver but build lacks it
+    if [[ "$HAS_PETSC" == false ]]; then
+        for _w in "${_wanted[@]}"; do
+            if [[ "$_w" == PETSc* ]]; then
+                echo "ERROR: Solver '$_w' requires a PETSc build, but USE_PETSC is OFF." >&2
+                echo "       Build with: pixi run build  (or ./build.sh --petsc)" >&2
+                exit 2
+            fi
+        done
+    fi
     _new_labels=() _new_types=() _new_extra=()
     for ((si=0; si<${#SOLVER_LABELS[@]}; si++)); do
         for _w in "${_wanted[@]}"; do
@@ -431,7 +512,29 @@ if [[ -n "$SOLVER_FILTER" ]]; then
     SOLVER_EXTRA=("${_new_extra[@]}")
 fi
 
+[[ ${#SOLVER_LABELS[@]} -eq ${#SOLVER_TYPES[@]} && ${#SOLVER_TYPES[@]} -eq ${#SOLVER_EXTRA[@]} ]] \
+    || { echo "ERROR: Solver arrays out of sync (BUG)" >&2; exit 1; }
 NUM_SOLVERS=${#SOLVER_LABELS[@]}
+
+# Determine reference solver: default to first solver in the list
+if [[ -z "$REF_SOLVER_LABEL" ]]; then
+    REF_SOLVER_LABEL="${SOLVER_LABELS[0]}"
+else
+    # Validate that the specified ref solver exists
+    _ref_found=false
+    for _sl in "${SOLVER_LABELS[@]}"; do
+        [[ "$_sl" == "$REF_SOLVER_LABEL" ]] && _ref_found=true && break
+    done
+    if [[ "$_ref_found" != true ]]; then
+        echo "ERROR: --ref-solver '$REF_SOLVER_LABEL' not found in solver list: ${SOLVER_LABELS[*]}" >&2
+        exit 2
+    fi
+fi
+# Find the index of the reference solver
+REF_SOLVER_IDX=0
+for ((si=0; si<NUM_SOLVERS; si++)); do
+    [[ "${SOLVER_LABELS[$si]}" == "$REF_SOLVER_LABEL" ]] && REF_SOLVER_IDX=$si && break
+done
 
 # ========================= Section 6: Prerequisite checks ==================
 if ! command -v "$PYTHON" &>/dev/null; then
@@ -441,7 +544,7 @@ fi
 if [[ "$DRY_RUN" != true ]]; then
     if [[ ! -x "$EXECUTABLE" ]]; then
         echo "ERROR: Executable not found at $EXECUTABLE"
-        echo "       Build first with:  ./build.sh --petsc"
+        echo "       Build first with:  pixi run build  (or ./build.sh)"
         exit 1
     fi
     if [[ ! -f "$INPUT_FILE" ]]; then
@@ -453,7 +556,7 @@ fi
 warn_oversubscription "$NP"
 
 # ========================= Section 7: Helper functions =====================
-cleanup() { rm -rf "$TMPDIR_BASE"; }
+cleanup() { [[ -n "${TMPDIR_BASE:-}" ]] && rm -rf "$TMPDIR_BASE"; }
 trap cleanup EXIT INT TERM HUP
 
 # High-resolution timestamp. Uses $EPOCHREALTIME (Bash 5.0+, zero overhead)
@@ -465,14 +568,14 @@ else
 fi
 
 # Elapsed time: elapsed <start> <end>  →  stdout "X.XXX"
-elapsed() { awk "BEGIN{printf \"%.2f\", $2 - $1}"; }
+elapsed() { awk -v s="$1" -v e="$2" 'BEGIN{printf "%.2f", e - s}'; }
 
 # Compute mean and stdev for six space-separated value strings.
 # Args: field_str wall_str moments_str mover_str iters_str resid_str
 # Stdout: "avg_field std_field avg_moments avg_mover avg_iters avg_resid avg_wall"
 compute_stats() {
     "$PYTHON" -c "
-import statistics
+import sys, statistics
 def mean_str(arr):
     vals = [float(x) for x in arr if x not in ('NA','')]
     return f'{statistics.mean(vals):.2f}' if vals else 'NA'
@@ -480,15 +583,15 @@ def std_str(arr):
     vals = [float(x) for x in arr if x not in ('NA','')]
     return f'{statistics.stdev(vals):.2f}' if len(vals) > 1 else 'NA'
 
-field   = '$1'.split()
-wall    = '$2'.split()
-moments = '$3'.split()
-mover   = '$4'.split()
-iters   = '$5'.split()
-resid   = '$6'.split()
+field   = sys.argv[1].split()
+wall    = sys.argv[2].split()
+moments = sys.argv[3].split()
+mover   = sys.argv[4].split()
+iters   = sys.argv[5].split()
+resid   = sys.argv[6].split()
 
 print(f'{mean_str(field)} {std_str(field)} {mean_str(moments)} {mean_str(mover)} {mean_str(iters)} {mean_str(resid)} {mean_str(wall)}')
-"
+" "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
 # Create a test input file with reduced cycles and controlled output.
@@ -529,7 +632,7 @@ make_input() {
         -e "s|^DiagnosticsOutputCycle.*=.*|DiagnosticsOutputCycle         = 1|"
         -e "s|^WriteMethod.*=.*|WriteMethod                    = $WRITE_METHOD|"
     )
-    sed "${sed_args[@]}" "$INPUT_FILE" > "$inp"
+    sed "${sed_args[@]}" "$INPUT_FILE" > "$inp" || { echo "ERROR: Failed to create test input from $INPUT_FILE" >&2; return 1; }
     echo "$inp"
 }
 
@@ -544,36 +647,42 @@ logfile, outcsv = sys.argv[1], sys.argv[2]
 fields = []  # list of (field, mover, moment, write) cumulative tuples
 iterations = []  # per-solve iteration counts
 
+# Convergence pattern registry: (regex, iter_extractor)
+# Each entry tries to match a line; iter_extractor takes the match and returns
+# the iteration count. Patterns are tried in order, first match wins.
+ITER_PATTERNS = [
+    (re.compile(r'GMRES converged at restart (\d+); iteration (\d+) with error:'),
+     lambda m: int(m.group(1)) * 20 + int(m.group(2))),
+    (re.compile(r'GMRES converged without iterations'),
+     lambda m: 0),
+    (re.compile(r'PETSc KSP converged in (\d+) iterations'),
+     lambda m: int(m.group(1))),
+    (re.compile(r'PETSc KSP did NOT converge.*after (\d+) iterations'),
+     lambda m: int(m.group(1))),
+    # Add new solver patterns here:
+    # (re.compile(r'CG converged in (\d+) iterations'), lambda m: int(m.group(1))),
+]
+
 with open(logfile) as f:
     cur = {}
     for line in f:
         # Parse convergence lines for iteration counts
-        m = re.search(r'GMRES converged at restart (\d+); iteration (\d+) with error:', line)
-        if m:
-            iterations.append(int(m.group(1)) * 20 + int(m.group(2)))
-            continue
-        if 'GMRES converged without iterations' in line:
-            iterations.append(0)
-            continue
-        m = re.search(r'PETSc KSP converged in (\d+) iterations', line)
-        if m:
-            iterations.append(int(m.group(1)))
-            continue
-        m = re.search(r'PETSc KSP did NOT converge.*after (\d+) iterations', line)
-        if m:
-            iterations.append(int(m.group(1)))
-            continue
-
-        for key, pat in [('field', r'Field solver\s*:\s*([\d.eE+\-]+)'),
-                         ('mover', r'Particle mover\s*:\s*([\d.eE+\-]+)'),
-                         ('moment', r'Moment gatherer\s*:\s*([\d.eE+\-]+)'),
-                         ('write', r'Write data\s*:\s*([\d.eE+\-]+)')]:
-            m = re.search(pat, line)
+        for pat, extract in ITER_PATTERNS:
+            m = pat.search(line)
             if m:
-                cur[key] = float(m.group(1))
-        if len(cur) == 4:
-            fields.append((cur['field'], cur['mover'], cur['moment'], cur['write']))
-            cur = {}
+                iterations.append(extract(m))
+                break
+        else:
+            for key, pat in [('field', r'Field solver\s*:\s*([\d.eE+\-]+)'),
+                             ('mover', r'Particle mover\s*:\s*([\d.eE+\-]+)'),
+                             ('moment', r'Moment gatherer\s*:\s*([\d.eE+\-]+)'),
+                             ('write', r'Write data\s*:\s*([\d.eE+\-]+)')]:
+                m = re.search(pat, line)
+                if m:
+                    cur[key] = float(m.group(1))
+            if len(cur) == 4:
+                fields.append((cur['field'], cur['mover'], cur['moment'], cur['write']))
+                cur = {}
 
 with open(outcsv, 'w', newline='') as out:
     w = csv.writer(out)
@@ -602,48 +711,62 @@ iters_list = []
 residuals = []
 any_failed = False
 
+# Convergence pattern registry:
+# (name, success_regex, fail_regex, success_iter_extractor, success_residual_group,
+#  fail_iter_extractor, fail_residual_group)
+CONVERGENCE_PATTERNS = [
+    ("GMRES",
+     re.compile(r'GMRES converged at restart (\d+); iteration (\d+) with error:\s*([\d.eE+\-]+)'),
+     re.compile(r'GMRES not converged.*Final error:\s*([\d.eE+\-]+)'),
+     lambda m: int(m.group(1)) * 20 + int(m.group(2)),
+     3,     # residual group index in success regex
+     None,  # no iter count for GMRES failure
+     1),    # residual group index in fail regex
+    ("PETSc",
+     re.compile(r'PETSc KSP converged in (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)'),
+     re.compile(r'PETSc KSP did NOT converge.*after (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)'),
+     lambda m: int(m.group(1)),
+     2,
+     lambda m: int(m.group(1)),
+     2),
+    # Add new solver patterns here:
+    # ("CG",
+    #  re.compile(r'CG converged in (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)'),
+    #  re.compile(r'CG did NOT converge.*after (\d+) iterations'),
+    #  lambda m: int(m.group(1)), 2, lambda m: int(m.group(1)), None),
+]
+
+# Special case: "GMRES converged without iterations"
+GMRES_ZERO_ITER = re.compile(r'GMRES converged without iterations')
+
 with open(logfile) as f:
     for line in f:
-        # GMRES: "GMRES converged at restart R; iteration I with error: E"
-        m = re.search(r'GMRES converged at restart (\d+); iteration (\d+) with error:\s*([\d.eE+\-]+)', line)
-        if m:
-            restart, iteration = int(m.group(1)), int(m.group(2))
-            # GMRES restart size m=20 from EMfields3D.cpp:calculateE() (GMRES call: m=20)
-            total_iters = restart * 20 + iteration
-            iters_list.append(total_iters)
-            residuals.append(float(m.group(3)))
-            continue
-
-        # GMRES: "GMRES converged without iterations"
-        if 'GMRES converged without iterations' in line:
+        # Check zero-iteration GMRES convergence
+        if GMRES_ZERO_ITER.search(line):
             iters_list.append(0)
             residuals.append(0.0)
             continue
 
-        # GMRES: "GMRES not converged !! Final error: E"
-        m = re.search(r'GMRES not converged.*Final error:\s*([\d.eE+\-]+)', line)
-        if m:
-            any_failed = True
-            residuals.append(float(m.group(1)))
-            continue
-
-        # PETSc: "PETSc KSP converged in I iterations, residual = E"
-        m = re.search(r'PETSc KSP converged in (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)', line)
-        if m:
-            iters_list.append(int(m.group(1)))
-            residuals.append(float(m.group(2)))
-            continue
-
-        # PETSc: "WARNING: PETSc KSP did NOT converge (reason=R) after I iterations, residual = E"
-        m = re.search(r'PETSc KSP did NOT converge.*after (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)', line)
-        if m:
-            any_failed = True
-            iters_list.append(int(m.group(1)))
-            residuals.append(float(m.group(2)))
-            continue
+        matched = False
+        for name, success_re, fail_re, iter_fn, res_grp, fail_iter_fn, fail_res_grp in CONVERGENCE_PATTERNS:
+            m = success_re.search(line)
+            if m:
+                iters_list.append(iter_fn(m))
+                residuals.append(float(m.group(res_grp)))
+                matched = True
+                break
+            m = fail_re.search(line)
+            if m:
+                any_failed = True
+                if fail_iter_fn is not None:
+                    iters_list.append(fail_iter_fn(m))
+                if fail_res_grp is not None:
+                    residuals.append(float(m.group(fail_res_grp)))
+                matched = True
+                break
 
 if not iters_list and not residuals:
-    print("NA yes NA")
+    print("NA NA NA")
 else:
     avg_iters = sum(iters_list) / len(iters_list) if iters_list else 0
     converged = "no" if any_failed else "yes"
@@ -675,7 +798,7 @@ run_warmup() {
     local cmd=(mpirun "${MPIRUN_FLAGS[@]}" -np "$NP" "$EXECUTABLE" "$inp" -solver "$solver_type")
     [[ ${#extra_args[@]} -gt 0 ]] && cmd+=("${extra_args[@]}")
 
-    [[ "$VERBOSE" == true ]] && echo "    Warm-up ($WARMUP cycles)..." >&2
+    [[ "$VERBOSE" == true ]] && echo "    ${DIM}warm-up (${WARMUP} cycles)...${RESET}" >&2
     "${cmd[@]}" > "$warmup_dir/warmup.log" 2>&1 || true
 }
 
@@ -772,8 +895,8 @@ run_averaged() {
     [[ "$SCALING_MODE" == true ]] && I="    "
 
     local runs_info=""
-    [[ $AVG -gt 1 ]] && runs_info=",  Runs: $AVG"
-    [[ "$VERBOSE" == true ]] && echo "${I}--- ${BOLD}$label${RESET} ($solver_type) — ${nxc}x${nyc}x${nzc},  ${NP} procs,  ${CYCLES} cycles${runs_info}" >&2
+    [[ $AVG -gt 1 ]] && runs_info=" ${DOT} Runs: $AVG"
+    [[ "$VERBOSE" == true ]] && echo "${I}${ARROW} ${BOLD}$label${RESET} ($solver_type) ${DOT} ${nxc}x${nyc}x${nzc} ${DOT} ${NP} procs ${DOT} ${CYCLES} cycles${runs_info}" >&2
 
     local field_arr=() wall_arr=() moments_arr=() mover_arr=()
     local iters_arr=() residual_arr=()
@@ -786,7 +909,7 @@ run_averaged() {
 
     for ((r=1; r<=AVG; r++)); do
         if [[ $r -gt 1 && $COOLDOWN -gt 0 ]]; then
-            echo "${I}  Cooling down for ${COOLDOWN}s..." >&2
+            echo "${DIM}${I}  cooldown ${COOLDOWN}s...${RESET}" >&2
             sleep "$COOLDOWN"
         fi
 
@@ -821,9 +944,9 @@ run_averaged() {
 
         if [[ "$VERBOSE" == true ]]; then
             if [[ $AVG -gt 1 ]]; then
-                printf "${I}  Run %d/%d — wall: %s s,  field: %s s\n" "$r" "$AVG" "$wall_t" "$ft" >&2
+                printf "${I}  Run %d/%d ${DOT} ${ft}s field ${DOT} ${wall_t}s wall\n" "$r" "$AVG" >&2
             else
-                echo "${I}  Wall: ${wall_t} s,  Field: ${ft} s" >&2
+                echo "${I}  ${ft}s field ${DOT} ${wall_t}s wall" >&2
             fi
         fi
     done
@@ -853,7 +976,7 @@ run_averaged() {
     [[ "$all_converged" == false ]] && converged_str="no"
 
     if [[ $AVG -gt 1 ]]; then
-        echo "${I}  Mean field: ${avg_field} +/- ${std_field} s,  Mean wall: ${avg_wall} s" >&2
+        echo "${I}  ${BOLD}mean${RESET}: ${avg_field} ${DOT} ${std_field} s ${DOT} wall ${avg_wall} s" >&2
     fi
 
     echo "$avg_field $std_field $avg_moments $avg_mover $avg_iters $converged_str $avg_residual $avg_wall $last_logfile"
@@ -886,27 +1009,35 @@ extract_timing() {
 extract_convergence() {
     local logfile="$1" label="$2"
 
-    echo "  [$label] Convergence:"
+    echo "  ${BOLD}[$label]${RESET} Convergence:"
 
-    local gmres_lines gmres_fail petsc_conv petsc_fail
-    gmres_lines=$(grep -c "GMRES converged" "$logfile" 2>/dev/null) || gmres_lines=0
-    gmres_fail=$(grep -c "GMRES not converged" "$logfile" 2>/dev/null) || gmres_fail=0
-    petsc_conv=$(grep -c "PETSc KSP converged" "$logfile" 2>/dev/null) || petsc_conv=0
-    petsc_fail=$(grep -c "PETSc KSP did NOT converge" "$logfile" 2>/dev/null) || petsc_fail=0
+    # Solver convergence pattern registry: name, converged_pattern, failed_pattern
+    local -a _cv_names=("GMRES" "PETSc")
+    local -a _cv_conv=("GMRES converged" "PETSc KSP converged")
+    local -a _cv_fail=("GMRES not converged" "PETSc KSP did NOT converge")
+    # Add new solvers here:
+    # _cv_names+=("CG"); _cv_conv+=("CG converged"); _cv_fail+=("CG did NOT converge")
 
-    if [[ $gmres_lines -gt 0 || $gmres_fail -gt 0 ]]; then
-        echo "    GMRES: $gmres_lines converged, $gmres_fail failed"
-        grep "GMRES converged" "$logfile" | head -1 | sed 's/^/    First: /'
-        grep "GMRES converged" "$logfile" | tail -1 | sed 's/^/    Last:  /'
-    fi
+    local _any_found=false
+    for ((_ci=0; _ci<${#_cv_names[@]}; _ci++)); do
+        local _name="${_cv_names[$_ci]}"
+        local _conv_pat="${_cv_conv[$_ci]}"
+        local _fail_pat="${_cv_fail[$_ci]}"
+        local _conv_count _fail_count
+        _conv_count=$(grep -c "$_conv_pat" "$logfile" 2>/dev/null) || _conv_count=0
+        _fail_count=$(grep -c "$_fail_pat" "$logfile" 2>/dev/null) || _fail_count=0
 
-    if [[ $petsc_conv -gt 0 || $petsc_fail -gt 0 ]]; then
-        echo "    PETSc: $petsc_conv converged, $petsc_fail failed"
-        grep "PETSc KSP converged" "$logfile" | head -1 | sed 's/^/    First: /'
-        grep "PETSc KSP converged" "$logfile" | tail -1 | sed 's/^/    Last:  /'
-    fi
+        if [[ $_conv_count -gt 0 || $_fail_count -gt 0 ]]; then
+            _any_found=true
+            local _cv_mark="${GREEN}${CHECK}${RESET}"
+            [[ $_fail_count -gt 0 ]] && _cv_mark="${RED}${CROSS}${RESET}"
+            echo "    ${_cv_mark} ${_name}: $_conv_count converged, $_fail_count failed"
+            grep "$_conv_pat" "$logfile" | head -1 | sed 's/^/    First: /'
+            grep "$_conv_pat" "$logfile" | tail -1 | sed 's/^/    Last:  /'
+        fi
+    done
 
-    if [[ $gmres_lines -eq 0 && $gmres_fail -eq 0 && $petsc_conv -eq 0 && $petsc_fail -eq 0 ]]; then
+    if [[ "$_any_found" != true ]]; then
         echo "    (no convergence messages found)"
     fi
 }
@@ -917,22 +1048,22 @@ extract_convergence() {
 show_eta() {
     local t1="$1" g0="$2"
     export _C_BOLD="$BOLD" _C_RESET="$RESET"
-    "$PYTHON" - <<PYETA || true
-import os, time
+    "$PYTHON" - "$t1" "$g0" "$NUM_SOLVERS" "$t_sweep_start" "$SCALING_MODE" "${CONFIGS[*]}" <<'PYETA' || true
+import os, sys, time
 from datetime import datetime, timedelta
 
 _bold  = os.environ.get('_C_BOLD', '')
 _reset = os.environ.get('_C_RESET', '')
 
-t1        = $t1
-g0        = $g0
-n_solvers = $NUM_SOLVERS
-elapsed   = time.time() - $t_sweep_start
-scaling   = "$SCALING_MODE" == "true"
+t1        = float(sys.argv[1])
+g0        = float(sys.argv[2])
+n_solvers = int(sys.argv[3])
+elapsed   = time.time() - float(sys.argv[4])
+scaling   = sys.argv[5] == "true"
 
 if scaling:
     # N^2-scaled ETA
-    configs = """${CONFIGS[*]}""".split()
+    configs = sys.argv[6].split()
     # Parse first field (nxc) from each config triplet
     grids = []
     for i in range(0, len(configs), 3):
@@ -951,14 +1082,7 @@ def fmt(s):
     return f'{s//3600}h{(s%3600)//60:02d}m'
 
 eta = datetime.now() + timedelta(seconds=remaining_est)
-title = 'ESTIMATED TOTAL RUN TIME'
-msg = f'~{fmt(total_est)} total  |  ~{fmt(remaining_est)} remaining  |  ETA {eta:%H:%M}'
-pad = max(len(title), len(msg)) + 4
-print(f'  +{"-" * pad}+')
-print(f'  |  {_bold}{title:^{pad-4}}{_reset}  |')
-print(f'  +{"-" * pad}+')
-print(f'  |  {msg:^{pad-4}}  |')
-print(f'  +{"-" * pad}+')
+print(f'  {_bold}ETA{_reset}  ~{fmt(total_est)} total  |  ~{fmt(remaining_est)} remaining  |  done by {eta:%H:%M}')
 PYETA
 }
 
@@ -966,11 +1090,7 @@ PYETA
 CONFIGS=()
 if [[ "$SCALING_MODE" == true ]]; then
     # Compute LCM of XLEN and YLEN for grid divisibility
-    lcm=$("$PYTHON" -c "
-from math import gcd
-a, b = $XLEN, $YLEN
-print(a * b // gcd(a, b))
-")
+    lcm=$("$PYTHON" -c "import sys; from math import gcd; a,b=int(sys.argv[1]),int(sys.argv[2]); print(a*b//gcd(a,b))" "$XLEN" "$YLEN")
 
     prev_grids=()
     for (( g=GRID_MIN; g<=GRID_MAX; g+=GRID_STEP )); do
@@ -1006,7 +1126,16 @@ echo ""
 if [[ "$SCALING_MODE" == true ]]; then
     box_title="iPIC3D Scaling Study: Field Solver Comparison"
 else
-    box_title="iPIC3D Solver Comparison: GMRES vs PETSc"
+    if [[ $NUM_SOLVERS -gt 1 ]]; then
+        # Build "A vs B, C" label from solver list
+        _other_labels=""
+        for _sl in "${SOLVER_LABELS[@]}"; do
+            [[ "$_sl" != "$REF_SOLVER_LABEL" ]] && _other_labels+="${_other_labels:+, }$_sl"
+        done
+        box_title="iPIC3D Solver Comparison: ${REF_SOLVER_LABEL} vs ${_other_labels}"
+    else
+        box_title="iPIC3D Solver Test: ${SOLVER_LABELS[0]}"
+    fi
 fi
 
 # Collect all content lines, then size the box to fit
@@ -1027,7 +1156,7 @@ else
     box_lines+=("  Grid: ${show_nxc}x${show_nyc}x${show_nzc}")
 fi
 
-box_lines+=("  Solvers: ${SOLVER_LABELS[*]}")
+box_lines+=("  Solvers: ${SOLVER_LABELS[*]}  (ref: ${REF_SOLVER_LABEL})")
 for ((si=0; si<NUM_SOLVERS; si++)); do
     if [[ -n "${SOLVER_EXTRA[$si]}" ]]; then
         box_lines+=("    ${SOLVER_LABELS[$si]}: ${SOLVER_EXTRA[$si]}")
@@ -1037,7 +1166,7 @@ done
 [[ -n "$NAME_TAG" ]] && box_lines+=("  Name tag: $NAME_TAG")
 [[ -n "$FIELD_OUTPUT" || -n "$PARTICLE_OUTPUT" ]] && box_lines+=("  Field output: ${FIELD_OUTPUT:-off}   Particle output: ${PARTICLE_OUTPUT:-off}")
 [[ "$MAKE_MOVIE" == true ]] && box_lines+=("  Movie: yes (generate mp4 comparison movie)")
-[[ "$BASELINE" == true ]] && box_lines+=("  Baseline: GMRES_2 (same topology)")
+[[ "$BASELINE" == true ]] && box_lines+=("  Baseline: GMRES_2 (same solver, separate run)")
 [[ "$RANDOMIZE" == true ]] && box_lines+=("  Randomize: yes (solver order shuffled)")
 [[ -n "$TIMEOUT" ]] && box_lines+=("  Timeout: ${TIMEOUT}s per simulation")
 [[ "$WARMUP" -gt 0 ]] && box_lines+=("  Warm-up: $WARMUP cycles before timed runs")
@@ -1095,9 +1224,7 @@ for cfg in "${CONFIGS[@]}"; do
     config_tag="${cnxc}x${cnyc}x${cnzc}"
 
     if [[ "$SCALING_MODE" == true ]]; then
-        echo "${DIM}--------------------------------------------------------${RESET}"
-        echo "  ${BOLD}[$config_count/$total_configs]${RESET}  Grid: ${config_tag}  (${CYCLES} cycles, ${NP} procs)"
-        echo "${DIM}--------------------------------------------------------${RESET}"
+        section "[$config_count/$total_configs] Grid ${config_tag} ${DOT} ${CYCLES} cycles ${DOT} ${NP} procs"
     fi
 
     if [[ "$RANDOMIZE" == true ]]; then
@@ -1136,12 +1263,12 @@ for cfg in "${CONFIGS[@]}"; do
 
         for ((r=1; r<=AVG; r++)); do
             if [[ $r -gt 1 && $COOLDOWN -gt 0 ]]; then
-                echo "${RI}Cooling down for ${COOLDOWN}s..."
+                echo "${DIM}${RI}cooldown ${COOLDOWN}s...${RESET}"
                 sleep "$COOLDOWN"
             fi
 
             # Shuffle solver indices for this round
-            solver_order=($("$PYTHON" -c "import random; x=list(range($NUM_SOLVERS)); random.shuffle(x); print(*x)"))
+            solver_order=($("$PYTHON" -c "import sys,random; x=list(range(int(sys.argv[1]))); random.shuffle(x); print(*x)" "$NUM_SOLVERS"))
             order_str=""
             for si in "${solver_order[@]}"; do order_str+="${SOLVER_LABELS[$si]} "; done
             if [[ $AVG -gt 1 ]]; then
@@ -1158,7 +1285,7 @@ for cfg in "${CONFIGS[@]}"; do
                     read -ra extra_args <<< "${SOLVER_EXTRA[$si]}"
                 fi
 
-                printf "${RI}  ${BOLD}%-18s${RESET} ... " "$label"
+                printf "${RI}  ${ARROW} ${BOLD}%-18s${RESET}" "$label"
 
                 [[ -z "$first_run_t" ]] && t_r_before=$(timestamp)
 
@@ -1167,7 +1294,7 @@ for cfg in "${CONFIGS[@]}"; do
                 end_time=$(timestamp)
 
                 if [[ "$result" == "FAILED" || -z "$result" ]]; then
-                    echo "${RED}FAILED${RESET}"
+                    echo "  ${RED}${CROSS}${RESET}"
                     acc_failed[$si]=1
                     continue
                 fi
@@ -1176,13 +1303,13 @@ for cfg in "${CONFIGS[@]}"; do
 
                 wall_t=$(elapsed "$start_time" "$end_time")
 
-                echo "${ft} s  (wall: ${wall_t} s)"
+                echo "  ${ft}s field ${DOT} ${wall_t}s wall  ${GREEN}${CHECK}${RESET}"
 
                 # ETA after first completed run_solver
                 if [[ -z "$first_run_t" && "$ft" != "NA" && "$DRY_RUN" != true ]]; then
                     t_r_after=$(timestamp)
                     # Scale one run_solver to one full config: ×AVG×NUM_SOLVERS
-                    first_run_t=$(awk "BEGIN{printf \"%.2f\", ($t_r_after - $t_r_before) * $AVG * $NUM_SOLVERS}")
+                    first_run_t=$(awk -v ta="$t_r_after" -v tb="$t_r_before" -v avg="$AVG" -v ns="$NUM_SOLVERS" 'BEGIN{printf "%.2f", (ta - tb) * avg * ns}')
                     show_eta "$first_run_t" "$cnxc"
                 fi
 
@@ -1277,15 +1404,16 @@ for cfg in "${CONFIGS[@]}"; do
 
     # Print per-config speedup in scaling mode
     if [[ "$SCALING_MODE" == true ]]; then
-        # Find GMRES field time for this config
+        # Find reference solver field time for this config
         base_idx=$(( (config_count - 1) * NUM_SOLVERS ))
-        gmres_t="${ALL_FIELD[$base_idx]}"
-        if [[ "$gmres_t" != "NA" ]]; then
-            for ((si=1; si<NUM_SOLVERS; si++)); do
+        ref_t="${ALL_FIELD[$((base_idx + REF_SOLVER_IDX))]}"
+        if [[ "$ref_t" != "NA" ]]; then
+            for ((si=0; si<NUM_SOLVERS; si++)); do
+                [[ $si -eq $REF_SOLVER_IDX ]] && continue
                 idx=$(( base_idx + si ))
                 other_t="${ALL_FIELD[$idx]}"
                 if [[ "$other_t" != "NA" ]]; then
-                    speedup=$(awk "BEGIN{p=$other_t; if(p>0) printf \"%.2f\", $gmres_t/p; else print \"N/A\"}")
+                    speedup=$(awk -v p="$other_t" -v g="$ref_t" 'BEGIN{if(p>0) printf "%.2f", g/p; else print "N/A"}')
                     echo "    ${SOLVER_LABELS[$si]} speedup: ${speedup}x"
                 fi
             done
@@ -1296,7 +1424,8 @@ done
 
 # ========================= Section 11: Results =============================
 echo ""
-echo "${BOLD}========================= RESULTS =========================${RESET}"
+printf -v _results_pad '%*s' 22 ''; _results_pad=${_results_pad// /$HDASH}
+echo "${BOLD}${_results_pad} RESULTS ${_results_pad}${RESET}"
 echo ""
 
 # Export color codes for embedded Python blocks
@@ -1305,9 +1434,7 @@ export _C_GREEN="$GREEN" _C_RED="$RED" _C_RESET="$RESET" _C_BOLD="$BOLD"
 if [[ "$SCALING_MODE" != true ]]; then
     # ---- Single-grid mode: detailed output ----
     # Convergence
-    echo "${DIM}--------------------------------------------------------${RESET}"
-    echo "  ${BOLD}CONVERGENCE${RESET}"
-    echo "${DIM}--------------------------------------------------------${RESET}"
+    section "CONVERGENCE"
     for ((i=0; i<NUM_SOLVERS; i++)); do
         if [[ "$DRY_RUN" == true ]]; then
             echo "  [${ALL_LABELS[$i]}] Convergence: (dry-run, no log)"
@@ -1320,9 +1447,7 @@ if [[ "$SCALING_MODE" != true ]]; then
     done
 
     # Timing
-    echo "${DIM}--------------------------------------------------------${RESET}"
-    echo "  ${BOLD}TIMING${RESET}"
-    echo "${DIM}--------------------------------------------------------${RESET}"
+    section "TIMING"
     for ((i=0; i<NUM_SOLVERS; i++)); do
         if [[ "$DRY_RUN" == true ]]; then
             echo "  [${ALL_LABELS[$i]}] Timing: (dry-run, no log)"
@@ -1335,9 +1460,7 @@ if [[ "$SCALING_MODE" != true ]]; then
     done
 
     # Comparison table
-    echo "${DIM}-------------------------------------------------------------------------------${RESET}"
-    echo "  ${BOLD}COMPARISON SUMMARY${RESET}"
-    echo "${DIM}-------------------------------------------------------------------------------${RESET}"
+    section "COMPARISON SUMMARY" 79
 
     # Header
     printf "  ${BOLD}%-20s${RESET}" ""
@@ -1406,18 +1529,19 @@ if [[ "$SCALING_MODE" != true ]]; then
     echo ""
     echo ""
 
-    # Speedup vs GMRES
-    echo "  Speedup vs built-in GMRES (field solver time):"
+    # Speedup vs reference solver
+    echo "  Speedup vs ${REF_SOLVER_LABEL} (field solver time):"
     field_data=""
     for ((i=0; i<NUM_SOLVERS; i++)); do
         field_data+="${ALL_LABELS[$i]} ${ALL_FIELD[$i]}"$'\n'
     done
 
-    "$PYTHON" - <<EOF 2>/dev/null || echo "  (Could not compute speedup ratios)"
+    _REF_LABEL="$REF_SOLVER_LABEL" "$PYTHON" - <<EOF 2>/dev/null || echo "  (Could not compute speedup ratios)"
 import os
 _green = os.environ.get('_C_GREEN', '')
 _red   = os.environ.get('_C_RED', '')
 _reset = os.environ.get('_C_RESET', '')
+_ref_label = os.environ.get('_REF_LABEL', 'GMRES')
 
 data = {}
 for line in """$field_data""".strip().splitlines():
@@ -1427,10 +1551,10 @@ for line in """$field_data""".strip().splitlines():
             data[parts[0]] = float(parts[1])
         except ValueError:
             pass
-base = data.get('GMRES')
+base = data.get(_ref_label)
 if base:
     for label, val in data.items():
-        if label != 'GMRES' and val > 0:
+        if label != _ref_label and val > 0:
             sp = base / val
             c = _green if sp >= 1.0 else _red
             print(f'    {label:20s}  {c}{sp:.2f}x{_reset}  ({val:.2f}s vs {base:.2f}s)')
@@ -1439,9 +1563,7 @@ EOF
 
 else
     # ---- Scaling mode: summary table ----
-    echo "${DIM}--------------------------------------------------------${RESET}"
-    echo "  ${BOLD}SUMMARY${RESET}"
-    echo "${DIM}--------------------------------------------------------${RESET}"
+    section "SUMMARY"
 
     # Header
     printf "  ${BOLD}%-14s${RESET}" "Grid"
@@ -1469,7 +1591,7 @@ else
             t="${ALL_FIELD[$idx]}"
             printf " %12s s" "$t"
             if [[ "$t" != "NA" ]]; then
-                is_better=$(awk "BEGIN{print ($t < $best_time) ? \"yes\" : \"no\"}")
+                is_better=$(awk -v t="$t" -v bt="$best_time" 'BEGIN{print (t < bt) ? "yes" : "no"}')
                 if [[ "$is_better" == "yes" ]]; then
                     best_time="$t"
                     best_label="${ALL_LABELS[$idx]}"
@@ -1480,30 +1602,32 @@ else
     done
     echo ""
 
-    # Average speedup vs GMRES across all grid sizes, sorted by highest speedup
-    echo "  Average speedup vs built-in GMRES (field solver time):"
+    # Average speedup vs reference solver across all grid sizes
+    echo "  Average speedup vs ${REF_SOLVER_LABEL} (field solver time):"
 
-    # Build per-solver speedup data: label gmres_t1 other_t1 gmres_t2 other_t2 ...
+    # Build per-solver speedup data: label ref_t1 other_t1 ref_t2 other_t2 ...
     speedup_input=""
-    for ((si=1; si<NUM_SOLVERS; si++)); do
+    for ((si=0; si<NUM_SOLVERS; si++)); do
+        [[ $si -eq $REF_SOLVER_IDX ]] && continue
         speedup_input+="${SOLVER_LABELS[$si]}"
         for ((ci=0; ci<total_configs; ci++)); do
             base=$(( ci * NUM_SOLVERS ))
-            gmres_t="${ALL_FIELD[$base]}"
+            ref_t="${ALL_FIELD[$((base + REF_SOLVER_IDX))]}"
             other_t="${ALL_FIELD[$((base + si))]}"
-            speedup_input+=" $gmres_t $other_t"
+            speedup_input+=" $ref_t $other_t"
         done
         speedup_input+=$'\n'
     done
 
-    "$PYTHON" - <<PYSPEEDUP 2>/dev/null || echo "  (Could not compute average speedup)"
+    _SPEEDUP_DATA="$speedup_input" "$PYTHON" - <<'PYSPEEDUP' 2>/dev/null || echo "  (Could not compute average speedup)"
 import os
+
 _green = os.environ.get('_C_GREEN', '')
 _red   = os.environ.get('_C_RED', '')
 _reset = os.environ.get('_C_RESET', '')
 
 results = []
-for line in """$speedup_input""".strip().splitlines():
+for line in os.environ['_SPEEDUP_DATA'].strip().splitlines():
     parts = line.split()
     if len(parts) < 3:
         continue
@@ -1546,8 +1670,8 @@ fi
         printf ",%s,%s_std,%s_iters,%s_converged,%s_residual" \
             "$label" "$label" "$label" "$label" "$label"
     done
-    printf ",np,cycles,nzc,gmres_moments_s,gmres_mover_s"
-    printf ",gmres_field_pct,gmres_moments_pct,gmres_mover_pct"
+    printf ",np,cycles,nzc,ref_solver,ref_moments_s,ref_mover_s"
+    printf ",ref_field_pct,ref_moments_pct,ref_mover_pct"
     echo ""
 
     # Data rows
@@ -1562,9 +1686,9 @@ fi
             printf "%s" "${cnxc}x${cnyc}x${cnzc}"
         fi
 
-        local_gmres_field="NA"
-        local_gmres_moments="NA"
-        local_gmres_mover="NA"
+        local_ref_field="NA"
+        local_ref_moments="NA"
+        local_ref_mover="NA"
 
         for ((si=0; si<NUM_SOLVERS; si++)); do
             idx=$(( base + si ))
@@ -1572,40 +1696,46 @@ fi
                 "${ALL_FIELD[$idx]}" "${ALL_STD[$idx]}" \
                 "${ALL_ITERS[$idx]}" "${ALL_CONVERGED[$idx]}" "${ALL_RESIDUAL[$idx]}"
 
-            if [[ $si -eq 0 ]]; then
-                local_gmres_field="${ALL_FIELD[$idx]}"
-                local_gmres_moments="${ALL_MOMENTS[$idx]}"
-                local_gmres_mover="${ALL_MOVER[$idx]}"
+            if [[ $si -eq $REF_SOLVER_IDX ]]; then
+                local_ref_field="${ALL_FIELD[$idx]}"
+                local_ref_moments="${ALL_MOMENTS[$idx]}"
+                local_ref_mover="${ALL_MOVER[$idx]}"
             fi
         done
 
-        # GMRES breakdown percentages
-        gmres_pcts=$("$PYTHON" -c "
-f = float('$local_gmres_field')   if '$local_gmres_field'   != 'NA' else None
-m = float('$local_gmres_moments') if '$local_gmres_moments' != 'NA' else None
-p = float('$local_gmres_mover')   if '$local_gmres_mover'   != 'NA' else None
+        # Reference solver breakdown percentages
+        ref_pcts=$("$PYTHON" -c "
+import sys
+f_s, m_s, p_s = sys.argv[1], sys.argv[2], sys.argv[3]
+f = float(f_s) if f_s != 'NA' else None
+m = float(m_s) if m_s != 'NA' else None
+p = float(p_s) if p_s != 'NA' else None
 vals = [v for v in [f, m, p] if v is not None]
 total = sum(vals) if vals else 0
 if total > 0 and m is not None and p is not None:
     print(f'{f/total*100:.1f},{m/total*100:.1f},{p/total*100:.1f}')
 else:
     print('NA,NA,NA')
-" 2>/dev/null) || gmres_pcts="NA,NA,NA"
+" "$local_ref_field" "$local_ref_moments" "$local_ref_mover" 2>/dev/null) || ref_pcts="NA,NA,NA"
 
-        printf ",%s,%s,%s,%s,%s,%s\n" \
-            "$NP" "$CYCLES" "$cnzc" \
-            "$local_gmres_moments" "$local_gmres_mover" "$gmres_pcts"
+        printf ",%s,%s,%s,%s,%s,%s,%s\n" \
+            "$NP" "$CYCLES" "$cnzc" "$REF_SOLVER_LABEL" \
+            "$local_ref_moments" "$local_ref_mover" "$ref_pcts"
     done
 } > "$CSV_FILE"
 
-echo "  CSV saved to:  $CSV_FILE"
+# Write ref_solver.txt so plot scripts can auto-discover the reference
+echo "$REF_SOLVER_LABEL" > "$PERSISTENT_OUTPUT_DIR/ref_solver.txt"
+
+echo "  ${ARROW} CSV saved to: $CSV_FILE"
 
 # ---- Generate plot ----
 if [[ "$NO_PLOT" != true ]]; then
-    echo "  Generating plot..."
+    echo "  ${ARROW} Generating plot..."
     export CSV_FILE PLOT_FILE NP CYCLES
     export PROFILE_DIR="$PERSISTENT_OUTPUT_DIR"
     export SOLVER_LABEL_LIST="${SOLVER_LABELS[*]}"
+    export REF_SOLVER="$REF_SOLVER_LABEL"
 
     # Build breakdown data for env export
     BD_GRIDS_arr=() BD_FIELD_arr=() BD_MOMENTS_arr=() BD_MOVER_arr=()
@@ -1626,7 +1756,7 @@ if [[ "$NO_PLOT" != true ]]; then
     "$PYTHON" "$SCRIPT_DIR/plot_timing.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Plot generation failed (see above)."
     "$PYTHON" "$SCRIPT_DIR/plot_energy.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Energy plot generation failed."
 else
-    echo "  Plotting skipped (--no-plot)."
+    echo "  ${ARROW} Plotting skipped (--no-plot)."
 fi
 
 # ---- Visual comparison, movie & L2 (when field output was saved) ----
@@ -1635,30 +1765,31 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
     for v_cfg in "${CONFIGS[@]}"; do
         read -r v_nxc v_nyc v_nzc <<< "$v_cfg"
         v_config_tag="${v_nxc}x${v_nyc}x${v_nzc}"
-        gmres_dir="$PERSISTENT_OUTPUT_DIR/GMRES_${v_config_tag}"
-        petsc_args=()
-        for ((si=1; si<NUM_SOLVERS; si++)); do
-            petsc_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
-            if [[ -d "$petsc_dir" ]]; then
-                petsc_args+=(--petsc "$petsc_dir")
+        ref_dir="$PERSISTENT_OUTPUT_DIR/${REF_SOLVER_LABEL}_${v_config_tag}"
+        test_args=()
+        for ((si=0; si<NUM_SOLVERS; si++)); do
+            [[ $si -eq $REF_SOLVER_IDX ]] && continue
+            test_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
+            if [[ -d "$test_dir" ]]; then
+                test_args+=(--test "$test_dir")
             fi
         done
 
-        [[ -d "$gmres_dir" && ${#petsc_args[@]} -gt 0 ]] || continue
+        [[ -d "$ref_dir" && ${#test_args[@]} -gt 0 ]] || continue
 
         if [[ -f "$SCRIPT_DIR/plot_field_comparison.py" ]]; then
-            echo "  Running visual comparison (${v_config_tag})..."
+            echo "  ${ARROW} Visual comparison ${DOT} ${v_config_tag}"
             "$PYTHON" "$SCRIPT_DIR/plot_field_comparison.py" \
-                --gmres "$gmres_dir" "${petsc_args[@]}" || \
+                --ref "$ref_dir" "${test_args[@]}" || \
                 echo "  ${YELLOW}WARNING:${RESET} Visual comparison failed for ${v_config_tag}."
         fi
 
         # ---- Movie generation (when --movie flag was passed) ----
         if [[ "$MAKE_MOVIE" == true ]]; then
             if command -v ffmpeg &>/dev/null; then
-                echo "  Generating comparison movie (${v_config_tag})..."
+                echo "  ${ARROW} Generating movie ${DOT} ${v_config_tag}"
                 bash "$SCRIPT_DIR/make_petsc_movie.sh" \
-                    --gmres "$gmres_dir" "${petsc_args[@]}" || \
+                    --ref "$ref_dir" "${test_args[@]}" || \
                     echo "  ${YELLOW}WARNING:${RESET} Movie generation failed for ${v_config_tag}."
             else
                 echo "  ${YELLOW}WARNING:${RESET} ffmpeg not found, skipping movie generation."
@@ -1668,14 +1799,15 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
         # ---- L2 time-series plot ----
         if [[ -f "$SCRIPT_DIR/plot_l2_timeseries.py" ]]; then
             l2_test_args=()
-            for ((si=1; si<NUM_SOLVERS; si++)); do
+            for ((si=0; si<NUM_SOLVERS; si++)); do
+                [[ $si -eq $REF_SOLVER_IDX ]] && continue
                 test_dir="$PERSISTENT_OUTPUT_DIR/${SOLVER_LABELS[$si]}_${v_config_tag}"
                 [[ -d "$test_dir" ]] && l2_test_args+=(--test "$test_dir")
             done
             if [[ ${#l2_test_args[@]} -gt 0 ]]; then
-                echo "  Generating L2 time-series plot (${v_config_tag})..."
+                echo "  ${ARROW} L2 time-series plot ${DOT} ${v_config_tag}"
                 "$PYTHON" "$SCRIPT_DIR/plot_l2_timeseries.py" \
-                    --ref "$gmres_dir" "${l2_test_args[@]}" || \
+                    --ref "$ref_dir" "${l2_test_args[@]}" || \
                     echo "  ${YELLOW}WARNING:${RESET} L2 time-series plot failed for ${v_config_tag}."
             fi
         fi
@@ -1683,4 +1815,5 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
 fi
 
 echo ""
-echo "${DIM}--------------------------------------------------------${RESET}"
+printf -v _trail_sep '%*s' 60 ''; _trail_sep=${_trail_sep// /$MDASH}
+echo "${DIM}${_trail_sep}${RESET}"

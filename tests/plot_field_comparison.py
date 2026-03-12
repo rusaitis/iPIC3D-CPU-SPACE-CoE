@@ -2,12 +2,12 @@
 """
 plot_field_comparison.py — Visual comparison of field solver outputs.
 
-Compares electromagnetic field data produced by different solvers (e.g. GMRES vs PETSc)
-to verify they produce equivalent results on Double Harris magnetic reconnection runs.
+Compares electromagnetic field data produced by different solvers to verify
+they produce equivalent results on Double Harris magnetic reconnection runs.
 
 Usage:
-    python3 plot_field_comparison.py --gmres <dir> --petsc <dir> [--petsc <dir> ...]
-    python3 plot_field_comparison.py                  # auto-discovers from test_petsc_output/
+    python3 plot_field_comparison.py --ref <dir> --test <dir> [--test <dir> ...]
+    python3 plot_field_comparison.py                  # auto-discovers from test_output/
 
 HDF5 layout (phdf5 global files):
     <run_dir>/Fields_NNNNN/B_NNNNN.h5  →  /Fields/Bx, /Fields/By, /Fields/Bz  (X, Y, Z)
@@ -134,45 +134,45 @@ def _render_field_row(fig, axes_row, ref_2d, test_2d, field_label,
 
 # ── Comparison figure generator ───────────────────────────────────────────
 
-def generate_comparison(cycle, petsc_dir, gmres_data_cache, fields,
-                        fixed_vmax, diff_mode, gmres_dir, gmres_label,
+def generate_comparison(cycle, test_dir, ref_data_cache, fields,
+                        fixed_vmax, diff_mode, ref_dir, ref_label,
                         theme=None, output_dir=None):
     """Generate a comparison figure for one cycle and one test directory.
 
     Parameters
     ----------
     cycle : int
-    petsc_dir : str
-    gmres_data_cache : dict  {(ftype, comp): np.ndarray}
+    test_dir : str           Test run directory.
+    ref_data_cache : dict    {(ftype, comp): np.ndarray} for the reference solver.
     fields : list            [(ftype, comp, latex_label), ...]
     fixed_vmax : dict        Pre-computed bounds; keys like (ftype, comp, "field"|"diff"|"pct_diff")
     diff_mode : str          "percent" or "absolute"
-    gmres_dir : str          Reference run directory (for output path)
-    gmres_label : str        Reference run label
+    ref_dir : str            Reference run directory (for output path).
+    ref_label : str          Reference run label.
     theme : Theme or None    Active theme (falls back to plot_theme.active)
-    output_dir : str or None Directory for output PNGs (default: parent of gmres_dir)
+    output_dir : str or None Directory for output PNGs (default: parent of ref_dir)
     """
     if theme is None:
         from plot_theme import active as _active
         theme = _active
-    petsc_lab = solver_label(petsc_dir)
-    petsc_data = {}
+    test_lab = solver_label(test_dir)
+    test_data = {}
     for ftype, comp, _ in fields:
         try:
-            petsc_data[(ftype, comp)] = load_field(petsc_dir, cycle, ftype, comp,
-                                                   z_slice=0)
+            test_data[(ftype, comp)] = load_field(test_dir, cycle, ftype, comp,
+                                                  z_slice=0)
         except (FileNotFoundError, KeyError) as e:
             print(f"  ERROR: Could not load {ftype}{comp} cycle {cycle} "
-                  f"from {petsc_lab}: {e}")
+                  f"from {test_lab}: {e}")
             return
 
     # Shape check
     for ftype, comp, label in fields:
-        g_shape = gmres_data_cache[(ftype, comp)].shape
-        p_shape = petsc_data[(ftype, comp)].shape
-        if g_shape != p_shape:
+        r_shape = ref_data_cache[(ftype, comp)].shape
+        t_shape = test_data[(ftype, comp)].shape
+        if r_shape != t_shape:
             print(f"  ERROR: Shape mismatch for {label}: "
-                  f"GMRES {g_shape} vs {petsc_lab} {p_shape}")
+                  f"{ref_label} {r_shape} vs {test_lab} {t_shape}")
             sys.exit(1)
 
     # ── Create figure: N_fields rows × 3 columns ──────────────────────────
@@ -181,38 +181,38 @@ def generate_comparison(cycle, petsc_dir, gmres_data_cache, fields,
     if n_rows == 1:
         axes = axes[np.newaxis, :]  # ensure 2D indexing
     diff_label_suffix = "Diff (% of peak)" if diff_mode == "percent" else "Difference"
-    fig.suptitle(f"Field Comparison: {gmres_label} vs {petsc_lab}  (cycle {cycle:05d})",
+    fig.suptitle(f"Field Comparison: {ref_label} vs {test_lab}  (cycle {cycle:05d})",
                  fontsize=14, fontweight='bold', y=0.95)
 
     for row, (ftype, comp, field_label) in enumerate(fields):
-        gdata = gmres_data_cache[(ftype, comp)].T   # transpose: rows=Y, cols=X
-        pdata = petsc_data[(ftype, comp)].T
-        _render_field_row(fig, axes[row], gdata, pdata, field_label,
-                          gmres_label, petsc_lab, fixed_vmax, ftype, comp,
+        rdata = ref_data_cache[(ftype, comp)].T   # transpose: rows=Y, cols=X
+        tdata = test_data[(ftype, comp)].T
+        _render_field_row(fig, axes[row], rdata, tdata, field_label,
+                          ref_label, test_lab, fixed_vmax, ftype, comp,
                           diff_mode, diff_label_suffix, theme)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     # ── Save PNG ──────────────────────────────────────────────────────────
-    parent_dir = output_dir if output_dir else os.path.dirname(gmres_dir)
+    parent_dir = output_dir if output_dir else os.path.dirname(ref_dir)
     out_png = os.path.join(parent_dir,
-                           f"visual_comparison_{petsc_lab}_cycle{cycle:05d}.png")
+                           f"visual_comparison_{test_lab}_cycle{cycle:05d}.png")
     fig.savefig(out_png, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {out_png}")
 
     # ── Console summary ──────────────────────────────────────────────────
     for ftype, comp, field_label in fields:
-        gdata = gmres_data_cache[(ftype, comp)]
-        pdata = petsc_data[(ftype, comp)]
-        diff = pdata - gdata
+        rdata = ref_data_cache[(ftype, comp)]
+        tdata = test_data[(ftype, comp)]
+        diff = tdata - rdata
         max_abs = np.max(np.abs(diff))
-        norm_g = np.linalg.norm(gdata)
-        l2_rel = np.linalg.norm(diff) / norm_g if norm_g > 0 else 0.0
+        norm_r = np.linalg.norm(rdata)
+        l2_rel = np.linalg.norm(diff) / norm_r if norm_r > 0 else 0.0
         extra = ""
         if diff_mode == "percent":
             peak_ref = fixed_vmax.get((ftype, comp, "peak_ref")) \
-                or np.max(np.abs(gdata))
+                or np.max(np.abs(rdata))
             if peak_ref > 0:
                 extra = f"   max |%diff| = {max_abs / peak_ref * 100:.4f}%"
         print(f"    {field_label:5s}  |max diff| = {max_abs:.2e}   "
@@ -230,14 +230,14 @@ def main(argv=None):
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('--gmres', default=None,
-                        help='Path to GMRES field output directory (auto-discovered if omitted)')
-    parser.add_argument('--petsc', action='append', default=None,
-                        help='Path to PETSc field output directory (repeatable; auto-discovered if omitted)')
     parser.add_argument('--ref', default=None,
-                        help='Reference run directory (solver-agnostic alias for --gmres)')
+                        help='Reference run directory (auto-discovered if omitted)')
     parser.add_argument('--test', action='append', default=None,
-                        help='Test run directory (solver-agnostic alias for --petsc; repeatable)')
+                        help='Test run directory (repeatable; auto-discovered if omitted)')
+    # Legacy aliases (hidden, kept for backwards compatibility)
+    parser.add_argument('--gmres', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--petsc', action='append', default=None,
+                        help=argparse.SUPPRESS)
     parser.add_argument('--cycle', type=int, default=-1,
                         help='Cycle to compare (-1 = last available)')
     parser.add_argument('--vmax-Bx', type=float, default=None,
@@ -261,22 +261,26 @@ def main(argv=None):
     parser.add_argument('--print-bounds', action='store_true',
                         help='Print vmax bounds for all fields and exit (no plot)')
     parser.add_argument('--output-dir', default=None,
-                        help='Directory for output PNGs (default: next to GMRES directory)')
+                        help='Directory for output PNGs (default: next to reference directory)')
     add_theme_arg(parser)
 
     args = parser.parse_args(argv)
     theme = apply_theme(args)
 
-    # ── Merge solver-agnostic aliases ────────────────────────────────────
-    if args.gmres is None and args.ref is not None:
-        args.gmres = args.ref
-    elif args.gmres is not None and args.ref is not None:
-        parser.error("Cannot specify both --gmres and --ref")
+    # ── Merge legacy aliases (--gmres → --ref, --petsc → --test) ────────
+    if args.ref is None and args.gmres is not None:
+        import warnings
+        warnings.warn("--gmres is deprecated, use --ref instead", FutureWarning)
+        args.ref = args.gmres
+    elif args.ref is not None and args.gmres is not None:
+        parser.error("Cannot specify both --ref and --gmres")
 
-    if args.petsc is None and args.test is not None:
-        args.petsc = args.test
-    elif args.petsc is not None and args.test is not None:
-        args.petsc.extend(args.test)
+    if args.test is None and args.petsc is not None:
+        import warnings
+        warnings.warn("--petsc is deprecated, use --test instead", FutureWarning)
+        args.test = args.petsc
+    elif args.test is not None and args.petsc is not None:
+        args.test.extend(args.petsc)
 
     # ── Fixed bounds lookup ──────────────────────────────────────────────
     fixed_vmax = {}
@@ -294,31 +298,51 @@ def main(argv=None):
         fixed_vmax[("E", "z", "pct_diff")] = args.vmax_Ez_pct
 
     # ── Auto-discovery ────────────────────────────────────────────────────
-    output_dir = os.path.join(script_dir, "test_petsc_output")
+    output_dir = os.path.join(script_dir, "test_output")
 
-    if args.gmres is None:
-        candidates = sorted(glob.glob(os.path.join(output_dir, "GMRES_*")))
+    if args.ref is None:
+        # Read ref_solver.txt if present, otherwise pick the first solver dir
+        ref_prefix = None
+        ref_solver_file = os.path.join(output_dir, "ref_solver.txt")
+        if os.path.isfile(ref_solver_file):
+            with open(ref_solver_file) as f:
+                ref_prefix = f.read().strip()
+
+        if ref_prefix:
+            candidates = sorted(glob.glob(
+                os.path.join(output_dir, f"{ref_prefix}_*")))
+        else:
+            candidates = sorted(glob.glob(os.path.join(output_dir, "GMRES_*")))
         candidates = [c for c in candidates if os.path.isdir(c)]
         if not candidates:
-            print("  ERROR: No GMRES directory found in test_petsc_output/. "
-                  "Use --gmres to specify.")
-            sys.exit(1)
-        args.gmres = candidates[0]
-        print(f"  Auto-discovered GMRES dir: {args.gmres}")
-
-    if args.petsc is None:
-        candidates = sorted(glob.glob(os.path.join(output_dir, "PETSc_*")))
-        candidates = [c for c in candidates if os.path.isdir(c)]
+            # Fallback: pick the first solver directory alphabetically
+            all_dirs_fb = sorted(glob.glob(os.path.join(output_dir, "*")))
+            candidates = [d for d in all_dirs_fb
+                          if os.path.isdir(d)
+                          and re.search(r'_\d+x\d+', os.path.basename(d))]
         if not candidates:
-            print("  ERROR: No PETSc directory found in test_petsc_output/. "
-                  "Use --petsc to specify.")
+            print("  ERROR: No reference directory found in test_output/. "
+                  "Use --ref to specify.")
             sys.exit(1)
-        args.petsc = candidates
-        for p in args.petsc:
-            print(f"  Auto-discovered PETSc dir: {p}")
+        args.ref = candidates[0]
+        print(f"  Auto-discovered ref dir: {args.ref}")
+
+    if args.test is None:
+        # Discover all non-reference solver directories
+        all_dirs = sorted(glob.glob(os.path.join(output_dir, "*")))
+        candidates = [d for d in all_dirs
+                      if os.path.isdir(d) and d != args.ref
+                      and re.search(r'_\d+x\d+', os.path.basename(d))]
+        if not candidates:
+            print("  ERROR: No test directories found in test_output/. "
+                  "Use --test to specify.")
+            sys.exit(1)
+        args.test = candidates
+        solver_names = [solver_label(d) for d in args.test]
+        print(f"  Found {len(args.test)} solver(s): {', '.join(solver_names)}")
 
     # ── Find common cycles ───────────────────────────────────────────────
-    all_dirs = [args.gmres] + args.petsc
+    all_dirs = [args.ref] + args.test
     all_cycle_sets = [set(discover_cycles(d)) for d in all_dirs]
     common_cycles = sorted(set.intersection(*all_cycle_sets))
 
@@ -344,31 +368,31 @@ def main(argv=None):
         sys.exit(1)
 
     # ── Load data ────────────────────────────────────────────────────────
-    gmres_label = solver_label(args.gmres)
-    gmres_data = {}
+    ref_label = solver_label(args.ref)
+    ref_data = {}
     for ftype, comp, _ in fields:
-        gmres_data[(ftype, comp)] = load_field(args.gmres, cycle, ftype, comp,
-                                               z_slice=0)
+        ref_data[(ftype, comp)] = load_field(args.ref, cycle, ftype, comp,
+                                             z_slice=0)
 
     # ── Print-bounds mode ────────────────────────────────────────────────
     if args.print_bounds:
         bound_names = {("B", "x"): "Bx", ("E", "z"): "Ez"}
         for ftype, comp, _ in fields:
             name = bound_names[(ftype, comp)]
-            gdata = gmres_data[(ftype, comp)]
-            peak_ref = np.max(np.abs(gdata))
+            rdata = ref_data[(ftype, comp)]
+            peak_ref = np.max(np.abs(rdata))
             vmax_field = peak_ref
             vmax_diff = 0.0
             vmax_pct = 0.0
-            for petsc_dir in args.petsc:
+            for test_dir in args.test:
                 try:
-                    pdata = load_field(petsc_dir, cycle, ftype, comp, z_slice=0)
+                    tdata = load_field(test_dir, cycle, ftype, comp, z_slice=0)
                 except (FileNotFoundError, KeyError) as e:
                     print(f"  WARNING: Could not load {ftype}{comp} from "
-                          f"{solver_label(petsc_dir)}: {e}")
+                          f"{solver_label(test_dir)}: {e}")
                     continue
-                vmax_field = max(vmax_field, np.max(np.abs(pdata)))
-                abs_diff = np.max(np.abs(pdata - gdata))
+                vmax_field = max(vmax_field, np.max(np.abs(tdata)))
+                abs_diff = np.max(np.abs(tdata - rdata))
                 vmax_diff = max(vmax_diff, abs_diff)
                 if peak_ref > 0:
                     vmax_pct = max(vmax_pct, abs_diff / peak_ref * 100.0)
@@ -384,32 +408,32 @@ def main(argv=None):
         print(f"  All-cycles mode: {len(common_cycles)} cycles to process")
 
         # Pass 1: scan all cycles to find global peak_ref and max pct_diff per field
-        global_peak_ref = {}   # (ftype, comp) → float
-        global_vmax_pct = {}   # (ftype, comp) → float
-        global_vmax_field = {} # (ftype, comp) → float
+        global_peak_ref = {}   # (ftype, comp) -> float
+        global_vmax_pct = {}   # (ftype, comp) -> float
+        global_vmax_field = {} # (ftype, comp) -> float
 
         for c in common_cycles:
-            gdata_cache = {}
+            ref_cache = {}
             for ftype, comp, _ in fields:
-                gdata_cache[(ftype, comp)] = load_field(args.gmres, c, ftype, comp,
-                                                        z_slice=0)
-                peak = np.max(np.abs(gdata_cache[(ftype, comp)]))
+                ref_cache[(ftype, comp)] = load_field(args.ref, c, ftype, comp,
+                                                      z_slice=0)
+                peak = np.max(np.abs(ref_cache[(ftype, comp)]))
                 global_peak_ref[(ftype, comp)] = max(
                     global_peak_ref.get((ftype, comp), 0.0), peak)
                 global_vmax_field[(ftype, comp)] = max(
                     global_vmax_field.get((ftype, comp), 0.0), peak)
 
-            for petsc_dir in args.petsc:
+            for test_dir in args.test:
                 for ftype, comp, _ in fields:
                     try:
-                        pdata = load_field(petsc_dir, c, ftype, comp, z_slice=0)
+                        tdata = load_field(test_dir, c, ftype, comp, z_slice=0)
                     except (FileNotFoundError, KeyError) as e:
                         print(f"  WARNING: Could not load {ftype}{comp} cycle {c} "
-                              f"from {solver_label(petsc_dir)}: {e}")
+                              f"from {solver_label(test_dir)}: {e}")
                         continue
                     global_vmax_field[(ftype, comp)] = max(
-                        global_vmax_field[(ftype, comp)], np.max(np.abs(pdata)))
-                    diff = pdata - gdata_cache[(ftype, comp)]
+                        global_vmax_field[(ftype, comp)], np.max(np.abs(tdata)))
+                    diff = tdata - ref_cache[(ftype, comp)]
                     peak_ref = global_peak_ref[(ftype, comp)]
                     if peak_ref > 0:
                         max_pct = np.max(np.abs(diff)) / peak_ref * 100.0
@@ -442,22 +466,22 @@ def main(argv=None):
         # Pass 2: render each cycle
         for c in common_cycles:
             print(f"  Comparing cycle {c:05d}")
-            gdata_cache = {}
+            ref_cache = {}
             for ftype, comp, _ in fields:
-                gdata_cache[(ftype, comp)] = load_field(args.gmres, c, ftype, comp,
-                                                        z_slice=0)
-            for petsc_dir in args.petsc:
-                generate_comparison(c, petsc_dir, gdata_cache, fields,
+                ref_cache[(ftype, comp)] = load_field(args.ref, c, ftype, comp,
+                                                      z_slice=0)
+            for test_dir in args.test:
+                generate_comparison(c, test_dir, ref_cache, fields,
                                     fixed_vmax, args.diff_mode,
-                                    args.gmres, gmres_label, theme=theme,
+                                    args.ref, ref_label, theme=theme,
                                     output_dir=args.output_dir)
 
     else:
         # ── Single-cycle mode (original behavior) ────────────────────────
-        for petsc_dir in args.petsc:
-            generate_comparison(cycle, petsc_dir, gmres_data, fields,
+        for test_dir in args.test:
+            generate_comparison(cycle, test_dir, ref_data, fields,
                                 fixed_vmax, args.diff_mode,
-                                args.gmres, gmres_label, theme=theme,
+                                args.ref, ref_label, theme=theme,
                                 output_dir=args.output_dir)
 
 
