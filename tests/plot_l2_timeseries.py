@@ -3,8 +3,8 @@
 plot_l2_timeseries.py — L2 error accumulation analysis over simulation cycles.
 
 Computes L2 relative error between a reference run and one or more test runs
-at each output cycle, fits exponential growth rates, and generates a diagnostic
-plot with significance analysis.
+at each output cycle, fits power-law growth models, and generates a diagnostic
+plot with local exponent analysis.
 
 Usage:
     python3 tests/plot_l2_timeseries.py --ref DIR --test DIR [--test DIR ...]
@@ -164,26 +164,117 @@ def solver_label(run_dir):
     return os.path.basename(run_dir)
 
 
-def fit_growth(cycles, l2_vals):
-    """Fit log(L2) = intercept + gamma * cycle via numpy.polyfit.
+def _r_squared(y_obs, y_pred):
+    """Coefficient of determination in log space."""
+    ss_res = np.sum((y_obs - y_pred) ** 2)
+    ss_tot = np.sum((y_obs - np.mean(y_obs)) ** 2)
+    return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    Returns (gamma, r_squared, intercept) or None if insufficient data.
-    gamma is the Lyapunov-like growth rate per cycle.
+
+def fit_powerlaw(cycles, l2_vals):
+    """Fit L2 = A·t^α in log-log space, with optional piecewise split.
+
+    Returns dict with keys:
+        alpha, r2, A           — global power-law fit
+        knee_cycle             — split cycle (None if piecewise not triggered)
+        alpha_early, alpha_late, r2_piecewise — piecewise fit (None if not triggered)
+    Returns None if insufficient data.
     """
     if len(cycles) < 3:
         return None
-    mask = [v > 0 for v in l2_vals]
-    c = [cycles[i] for i in range(len(cycles)) if mask[i]]
-    v = [l2_vals[i] for i in range(len(l2_vals)) if mask[i]]
+    mask = np.array([v > 0 and c > 0 for c, v in zip(cycles, l2_vals)])
+    c = np.array(cycles, dtype=float)[mask]
+    v = np.array(l2_vals, dtype=float)[mask]
     if len(c) < 3:
         return None
-    c_arr = np.array(c, dtype=float)
+
+    log_c = np.log(c)
     log_v = np.log(v)
-    gamma, intercept = np.polyfit(c_arr, log_v, 1)
-    ss_res = np.sum((log_v - (gamma * c_arr + intercept)) ** 2)
-    ss_tot = np.sum((log_v - np.mean(log_v)) ** 2)
-    r_sq = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    return gamma, r_sq, intercept
+
+    # Global power-law: log(L2) = log(A) + α·log(t)
+    alpha, log_A = np.polyfit(log_c, log_v, 1)
+    A = np.exp(log_A)
+    r2 = _r_squared(log_v, log_A + alpha * log_c)
+
+    result = dict(alpha=alpha, r2=r2, A=A,
+                  knee_cycle=None, alpha_early=None,
+                  alpha_late=None, r2_piecewise=None)
+
+    # Try piecewise power-law: split at each candidate index
+    n = len(c)
+    if n < 6:
+        return result
+
+    best_ssr = np.inf
+    best_k = None
+    best_left = best_right = None
+
+    for k in range(2, n - 2):
+        # Left segment
+        alpha_l, logA_l = np.polyfit(log_c[:k], log_v[:k], 1)
+        pred_l = logA_l + alpha_l * log_c[:k]
+        # Right segment
+        alpha_r, logA_r = np.polyfit(log_c[k:], log_v[k:], 1)
+        pred_r = logA_r + alpha_r * log_c[k:]
+
+        ssr = np.sum((log_v[:k] - pred_l) ** 2) + np.sum((log_v[k:] - pred_r) ** 2)
+        if ssr < best_ssr:
+            best_ssr = ssr
+            best_k = k
+            best_left = (alpha_l, logA_l)
+            best_right = (alpha_r, logA_r)
+
+    if best_k is not None and best_left is not None:
+        pred_pw = np.empty_like(log_v)
+        pred_pw[:best_k] = best_left[1] + best_left[0] * log_c[:best_k]
+        pred_pw[best_k:] = best_right[1] + best_right[0] * log_c[best_k:]
+        r2_pw = _r_squared(log_v, pred_pw)
+
+        if r2_pw - r2 >= 0.05:
+            result['knee_cycle'] = float(c[best_k])
+            result['alpha_early'] = best_left[0]
+            result['alpha_late'] = best_right[0]
+            result['r2_piecewise'] = r2_pw
+
+    return result
+
+
+def compute_local_exponent(cycles, l2_vals):
+    """Δlog(L2)/Δlog(t) at midpoints — instantaneous power-law exponent.
+
+    Returns (midpoint_cycles, local_alpha) arrays, or (None, None) if
+    insufficient data.
+    """
+    mask = np.array([v > 0 and c > 0 for c, v in zip(cycles, l2_vals)])
+    c = np.array(cycles, dtype=float)[mask]
+    v = np.array(l2_vals, dtype=float)[mask]
+    if len(c) < 2:
+        return None, None
+
+    log_c = np.log(c)
+    log_v = np.log(v)
+
+    d_log_c = np.diff(log_c)
+    d_log_v = np.diff(log_v)
+
+    # Avoid division by zero at identical cycle values
+    good = d_log_c != 0
+    mids = 0.5 * (c[:-1] + c[1:])
+    local_alpha = np.where(good, d_log_v / d_log_c, 0.0)
+
+    return mids[good], local_alpha[good]
+
+
+def _format_l2_with_pct(val):
+    """Format L2 value with parenthetical percentage when > 1e-6."""
+    s = f"{val:.2e}"
+    if val > 1e-6:
+        pct = val * 100
+        if pct >= 0.01:
+            s += f" ({pct:.2f}%)"
+        else:
+            s += f" ({pct:.1e}%)"
+    return s
 
 
 # ── Find common cycles ───────────────────────────────────────────────────
@@ -285,18 +376,19 @@ plt.rcParams.update({
 })
 
 n_fields = len(fields)
-fig, axes = plt.subplots(1, n_fields, figsize=(7 * n_fields, 5.5), dpi=150,
-                         squeeze=False)
-axes = axes[0]
+fig = plt.figure(figsize=(7 * n_fields, 7), dpi=150,
+                 layout='constrained')
+gs = fig.add_gridspec(2, n_fields, height_ratios=[3, 1], hspace=0.08)
 
 fig.suptitle(f"L2 Error Accumulation  (ref: {ref_label})",
              fontsize=13, fontweight='bold', y=0.98)
 
-# Cache fit results: fit_cache[(test_dir, ftype, comp)] = fit_growth result
+# Cache fit results: fit_cache[(test_dir, ftype, comp)] = fit_powerlaw result
 fit_cache = {}
 
 for fi, (ftype, comp, flabel) in enumerate(fields):
-    ax = axes[fi]
+    ax_top = fig.add_subplot(gs[0, fi])
+    ax_bot = fig.add_subplot(gs[1, fi], sharex=ax_top)
     any_nonzero = False
 
     for test_dir in args.test:
@@ -313,62 +405,164 @@ for fi, (ftype, comp, flabel) in enumerate(fields):
         # Check for bit-identical runs (all L2 = 0)
         all_zero = all(v == 0 for v in l2_arr)
         if all_zero:
-            # Can't plot 0 on log scale — add invisible line for legend
-            ax.plot([], [], color=style['color'], linestyle=style['ls'],
-                    marker=style['marker'], label=f"{test_lab} (bit-identical)")
+            ax_top.plot([], [], color=style['color'], linestyle=style['ls'],
+                        marker=style['marker'],
+                        label=f"{test_lab} (bit-identical)")
             continue
 
         any_nonzero = True
 
-        ax.semilogy(cycles_arr, l2_arr,
-                    color=style['color'], marker=style['marker'],
-                    linestyle=style['ls'], linewidth=1.8, markersize=5,
-                    markeredgecolor='white', markeredgewidth=0.5,
-                    label=test_lab, alpha=0.9)
+        ax_top.semilogy(cycles_arr, l2_arr,
+                        color=style['color'], marker=style['marker'],
+                        linestyle=style['ls'], linewidth=1.8, markersize=5,
+                        markeredgecolor='white', markeredgewidth=0.5,
+                        label=test_lab, alpha=0.9, zorder=3)
 
-        # Exponential fit overlay
-        fit = fit_growth(cycles_arr, l2_arr)
+        # Power-law fit overlay
+        fit = fit_powerlaw(cycles_arr, l2_arr)
         fit_cache[(test_dir, ftype, comp)] = fit
         if fit is not None:
-            gamma, r_sq, intercept = fit
-            fit_y = np.exp(intercept + gamma * np.array(cycles_arr))
-            ax.semilogy(cycles_arr, fit_y,
-                        color=style['color'], linestyle='--', linewidth=1,
-                        alpha=0.5)
-            # Annotate growth rate near the midpoint of the curve
-            mid_idx = len(cycles_arr) // 2
-            ax.annotate(
-                f"\u03b3={gamma:.3f}/cyc (R\u00b2={r_sq:.2f})",
-                xy=(cycles_arr[mid_idx], l2_arr[mid_idx]),
-                fontsize=8, color=style['color'],
-                xytext=(5, 5), textcoords='offset points',
-                bbox=dict(boxstyle='round,pad=0.2',
-                          facecolor='white', alpha=0.7,
-                          edgecolor=style['color'], linewidth=0.5))
+            c_fit = np.array([c for c in cycles_arr if c > 0], dtype=float)
+            knee = fit['knee_cycle']
 
-    # Reference lines (only meaningful on log scale)
+            if knee is not None:
+                # Piecewise power-law: two segments with different dashes
+                left = c_fit[c_fit <= knee]
+                right = c_fit[c_fit >= knee]
+                if len(left) > 0:
+                    y_left = np.exp(np.log(fit['A']) +
+                                    fit['alpha'] * np.log(left))
+                    # Re-fit left segment for its own A
+                    mask_l = c_fit <= knee
+                    vals_l = np.array([l2_arr[i] for i, c in enumerate(
+                        cycles_arr) if c > 0 and c <= knee])
+                    if len(vals_l) >= 2:
+                        alpha_l = fit['alpha_early']
+                        logA_l = np.mean(np.log(vals_l) -
+                                         alpha_l * np.log(
+                                             c_fit[mask_l][:len(vals_l)]))
+                        y_left = np.exp(logA_l + alpha_l * np.log(left))
+                    ax_top.semilogy(left, y_left,
+                                    color=style['color'], linestyle='--',
+                                    linewidth=1, alpha=0.5)
+                if len(right) > 0:
+                    vals_r = np.array([l2_arr[i] for i, c in enumerate(
+                        cycles_arr) if c > 0 and c >= knee])
+                    if len(vals_r) >= 2:
+                        alpha_r = fit['alpha_late']
+                        logA_r = np.mean(np.log(vals_r) -
+                                         alpha_r * np.log(right[:len(vals_r)]))
+                        y_right = np.exp(logA_r + alpha_r * np.log(right))
+                    else:
+                        y_right = fit['A'] * right ** fit['alpha']
+                    ax_top.semilogy(right, y_right,
+                                    color=style['color'], linestyle=':',
+                                    linewidth=1, alpha=0.5)
+                # Vertical knee marker
+                ax_top.axvline(x=knee, color=style['color'],
+                               linestyle='-', linewidth=0.5, alpha=0.3)
+                # Transient fill
+                ax_top.axvspan(c_fit[0], knee,
+                               color=style['color'], alpha=0.08, zorder=0)
+                # Annotation with early/late exponents
+                ann_x = cycles_arr[-1] * 0.65
+                ann_idx = max(0, len(cycles_arr) * 2 // 3)
+                ann_y = l2_arr[min(ann_idx, len(l2_arr) - 1)]
+                ax_top.annotate(
+                    f"\u03b1={fit['alpha_early']:.1f}/{fit['alpha_late']:.1f}"
+                    f" (R\u00b2={fit['r2_piecewise']:.2f})",
+                    xy=(ann_x, ann_y), fontsize=8, color=style['color'],
+                    xytext=(5, 5), textcoords='offset points',
+                    bbox=dict(boxstyle='round,pad=0.2',
+                              facecolor='white', alpha=0.7,
+                              edgecolor=style['color'], linewidth=0.5))
+            else:
+                # Single power-law fit curve
+                fit_y = fit['A'] * c_fit ** fit['alpha']
+                ax_top.semilogy(c_fit, fit_y,
+                                color=style['color'], linestyle='--',
+                                linewidth=1, alpha=0.5)
+                # Annotation
+                mid_idx = len(cycles_arr) // 2
+                ax_top.annotate(
+                    f"\u03b1={fit['alpha']:.2f} (R\u00b2={fit['r2']:.2f})",
+                    xy=(cycles_arr[mid_idx], l2_arr[mid_idx]),
+                    fontsize=8, color=style['color'],
+                    xytext=(5, 5), textcoords='offset points',
+                    bbox=dict(boxstyle='round,pad=0.2',
+                              facecolor='white', alpha=0.7,
+                              edgecolor=style['color'], linewidth=0.5))
+
+            # Final-value annotation with percentage
+            last_val = l2_arr[-1]
+            if last_val > 0:
+                lbl = _format_l2_with_pct(last_val)
+                ax_top.annotate(
+                    lbl, xy=(cycles_arr[-1], last_val),
+                    fontsize=7, color=style['color'],
+                    xytext=(5, -10), textcoords='offset points',
+                    ha='left', va='top')
+
+        # Local exponent in bottom panel
+        mids, loc_alpha = compute_local_exponent(cycles_arr, l2_arr)
+        if mids is not None and len(mids) > 0:
+            ax_bot.plot(mids, loc_alpha,
+                        color=style['color'], marker=style['marker'],
+                        linestyle=style['ls'], linewidth=1.2, markersize=3,
+                        markeredgecolor='white', markeredgewidth=0.3,
+                        alpha=0.85)
+
+    # Reference lines on top panel (only meaningful on log scale)
     if any_nonzero:
-        ax.axhline(y=args.gmrestol, color='gray', linestyle='--',
-                   linewidth=0.8, alpha=0.6,
-                   label=f'GMREStol = {args.gmrestol:.0e}')
-        ax.axhline(y=roundoff_floor, color='gray', linestyle=':',
-                   linewidth=0.8, alpha=0.6,
-                   label=f'\u221aN\u00b7\u03b5 = {roundoff_floor:.1e}')
+        ax_top.axhline(y=args.gmrestol, color='gray', linestyle='--',
+                       linewidth=0.8, alpha=0.6,
+                       label=f'solver tol (per step) = {args.gmrestol:.0e}')
+        ax_top.axhline(y=roundoff_floor, color='gray', linestyle=':',
+                       linewidth=0.8, alpha=0.6,
+                       label=(f'round-off floor '
+                              f'($\\sqrt{{N}}\\cdot\\varepsilon$)'
+                              f' = {roundoff_floor:.1e}'))
+        # Annotate the gap between per-step floors and cumulative error
+        ax_top.text(0.98, 0.02,
+                    'ref. lines = per-step precision;\n'
+                    'data = cumulative error over N cycles',
+                    transform=ax_top.transAxes, fontsize=6.5,
+                    color='#888888', ha='right', va='bottom',
+                    style='italic')
     else:
-        ax.text(0.5, 0.5,
-                "All test runs are bit-identical\nwith the reference",
-                transform=ax.transAxes, ha='center', va='center',
-                fontsize=12, color='#666666')
+        ax_top.text(0.5, 0.5,
+                    "All test runs are bit-identical\nwith the reference",
+                    transform=ax_top.transAxes, ha='center', va='center',
+                    fontsize=12, color='#666666')
 
-    ax.set_xlabel('Cycle', fontsize=11)
-    ax.set_ylabel('L2 relative error', fontsize=11)
-    ax.set_title(flabel, fontsize=13, fontweight='bold')
-    ax.legend(fontsize=8, loc='upper left')
-    ax.grid(True, which='both', alpha=0.3)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    # Bottom panel: reference exponent lines
+    if any_nonzero:
+        for ref_alpha, ref_lbl in [(0.5, 'diffusive'), (1.0, 'linear'),
+                                   (2.0, 'quadratic')]:
+            ax_bot.axhline(y=ref_alpha, color='#999999', linestyle=':',
+                           linewidth=0.6, alpha=0.5)
+            ax_bot.text(ax_bot.get_xlim()[1] if ax_bot.get_xlim()[1] > 0
+                        else cycles_arr[-1],
+                        ref_alpha + 0.1, ref_lbl,
+                        fontsize=6, color='#999999', ha='right', va='bottom')
+        ax_bot.set_ylim(-0.5, 6)
+        ax_bot.set_ylabel(r'Error growth exponent $\alpha$', fontsize=9)
+        ax_bot.set_title(
+            r'$L_2 \propto t^\alpha$  (local $\alpha$ between consecutive cycles)',
+            fontsize=8, loc='left', color='#666666', style='italic')
 
-fig.tight_layout(rect=[0, 0, 1, 0.94])
+    ax_bot.set_xlabel('Cycle', fontsize=11)
+    plt.setp(ax_top.get_xticklabels(), visible=False)
+    ax_top.set_ylabel('$L_2$ relative error', fontsize=11)
+    ax_top.set_title(flabel, fontsize=13, fontweight='bold')
+    ax_top.legend(fontsize=8, loc='upper left')
+    ax_top.grid(True, which='both', alpha=0.3)
+    ax_bot.grid(True, which='both', alpha=0.3)
+    for ax in (ax_top, ax_bot):
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+# Layout handled by constrained_layout=True
 
 # ── Save PNG ──────────────────────────────────────────────────────────────
 if args.output:
@@ -398,19 +592,53 @@ if args.csv:
                             f"{data['ref_norm'][i]:.6e}\n")
     print(f"  Saved: {csv_path}")
 
+    # Summary CSV with power-law fit parameters
+    summary_path = os.path.splitext(out_png)[0] + "_summary.csv"
+    with open(summary_path, 'w') as f:
+        f.write("test_label,field,alpha,r2,l2_last,amplification,"
+                "knee_cycle,alpha_early,alpha_late\n")
+        for test_dir in args.test:
+            test_lab = solver_label(test_dir)
+            for ftype, comp, flabel in fields:
+                data = results[test_dir][(ftype, comp)]
+                if not data['cycles']:
+                    continue
+                fit = fit_cache.get((test_dir, ftype, comp))
+                l2_last = data['l2_rel'][-1]
+                nz = [v for v in data['l2_rel'] if v > 0]
+                amplif = l2_last / nz[0] if nz and nz[0] > 0 else 0.0
+                if fit is not None:
+                    knee_s = (f"{fit['knee_cycle']:.1f}"
+                              if fit['knee_cycle'] else "")
+                    ae_s = (f"{fit['alpha_early']:.4f}"
+                            if fit['alpha_early'] is not None else "")
+                    al_s = (f"{fit['alpha_late']:.4f}"
+                            if fit['alpha_late'] is not None else "")
+                    f.write(f"{test_lab},{ftype}{comp},"
+                            f"{fit['alpha']:.4f},{fit['r2']:.4f},"
+                            f"{l2_last:.6e},{amplif:.2f},"
+                            f"{knee_s},{ae_s},{al_s}\n")
+                else:
+                    f.write(f"{test_lab},{ftype}{comp},"
+                            f",,{l2_last:.6e},{amplif:.2f},,,\n")
+    print(f"  Saved: {summary_path}")
+
 # ── Console summary ──────────────────────────────────────────────────────
 print()
 print("L2 Error Accumulation Summary")
-print("\u2500" * 80)
+print("\u2500" * 96)
 print(f"Reference: {ref_label}")
-print(f"Solver tol: {args.gmrestol:.0e}    "
-      f"Round-off floor: {roundoff_floor:.1e} (N={n_dof})")
+print(f"Per-step solver tol: {args.gmrestol:.0e}    "
+      f"Round-off floor (\u221aN\u00b7\u03b5): {roundoff_floor:.1e}  "
+      f"(N={n_dof} DOFs)")
+print("Note: L2 errors accumulate over cycles; "
+      "per-step floors are lower bounds, not targets.")
 print()
 
-header = (f"  {'Test':<30s} {'Field':>5s}  {'L2@first':>10s}  "
-          f"{'L2@last':>10s}  {'\u03b3 (/cyc)':>10s}  {'R\u00b2':>5s}")
+header = (f"  {'Test':<26s} {'Field':>5s}  {'L2@last':>18s}  "
+          f"{'\u03b1':>6s}  {'R\u00b2':>5s}  {'Amplif.':>8s}  {'Knee':>5s}")
 print(header)
-print("  " + "\u2500" * 78)
+print("  " + "\u2500" * 90)
 
 for test_dir in args.test:
     test_lab = solver_label(test_dir)
@@ -419,28 +647,40 @@ for test_dir in args.test:
         field_name = f"{ftype}{comp}"
 
         if not data['cycles']:
-            print(f"  {test_lab:<30s} {field_name:>5s}  "
-                  f"{'N/A':>10s}  {'N/A':>10s}  {'N/A':>10s}  {'N/A':>5s}")
+            print(f"  {test_lab:<26s} {field_name:>5s}  "
+                  f"{'N/A':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
+                  f"{'N/A':>8s}  {'N/A':>5s}")
             continue
 
-        l2_first = data['l2_rel'][0]
         l2_last = data['l2_rel'][-1]
 
         if all(v == 0 for v in data['l2_rel']):
-            print(f"  {test_lab:<30s} {field_name:>5s}  "
-                  f"{'0 (ident.)':>10s}  {'0':>10s}  "
-                  f"{'N/A':>10s}  {'N/A':>5s}")
+            print(f"  {test_lab:<26s} {field_name:>5s}  "
+                  f"{'0 (bit-identical)':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
+                  f"{'N/A':>8s}  {'\u2014':>5s}")
             continue
+
+        l2_str = _format_l2_with_pct(l2_last)
+        nz = [v for v in data['l2_rel'] if v > 0]
+        amplif = l2_last / nz[0] if nz and nz[0] > 0 else 0.0
+        amplif_str = f"{amplif:.1f}x"
 
         fit = fit_cache.get((test_dir, ftype, comp))
         if fit is not None:
-            gamma, r_sq, _ = fit
-            gamma_str = f"{gamma:.4f}"
-            r_sq_str = f"{r_sq:.2f}"
+            alpha_str = f"{fit['alpha']:.2f}"
+            r_sq_str = f"{fit['r2']:.2f}"
+            if fit['knee_cycle'] is not None:
+                knee_str = f"{fit['knee_cycle']:.0f}"
+                alpha_str = (f"{fit['alpha_early']:.1f}/"
+                             f"{fit['alpha_late']:.1f}")
+                r_sq_str = f"{fit['r2_piecewise']:.2f}"
+            else:
+                knee_str = "\u2014"
         else:
-            gamma_str = "N/A"
+            alpha_str = "N/A"
             r_sq_str = "N/A"
+            knee_str = "\u2014"
 
-        print(f"  {test_lab:<30s} {field_name:>5s}  "
-              f"{l2_first:>10.2e}  {l2_last:>10.2e}  "
-              f"{gamma_str:>10s}  {r_sq_str:>5s}")
+        print(f"  {test_lab:<26s} {field_name:>5s}  "
+              f"{l2_str:>18s}  {alpha_str:>6s}  {r_sq_str:>5s}  "
+              f"{amplif_str:>8s}  {knee_str:>5s}")
