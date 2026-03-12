@@ -57,3 +57,7 @@ configure-petsc  = { cmd = "cmake -S . -B $IPIC3D_BUILD_DIR -DCMAKE_BUILD_TYPE=R
 build-petsc      = { cmd = "cmake --build $IPIC3D_BUILD_DIR --parallel", depends-on = ["configure-petsc"], description = "Build iPIC3D (PETSc)" }
 test-petsc       = { cmd = "bash tests/test_petsc.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build-petsc"], description = "Full PETSc regression suite (GMRES vs PETSc)" }
 test-petsc-smoke = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp -solver PETSc", depends-on = ["build-petsc"], description = "3-cycle PETSc smoke test (4 procs)" }
+plot-timing      = { cmd = "python3 tests/plot_timing.py", description = "Solver timing comparison plot" }
+plot-fields      = { cmd = "python3 tests/plot_field_comparison.py", description = "Field heatmaps with difference panels" }
+plot-energy      = { cmd = "python3 tests/plot_energy.py", description = "Energy conservation plot" }
+plot-l2          = { cmd = "python3 tests/plot_l2_timeseries.py", description = "L2 error accumulation plot" }

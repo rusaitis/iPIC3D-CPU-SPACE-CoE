@@ -109,13 +109,58 @@ Two test scripts compare the built-in GMRES and PETSc solvers (requires a `--pet
 ./tests/test_petsc.sh --np 8 --cycles 50 --grid 200 200 --topo 4 2
 ```
 
-**Scaling study** — sweeps grid sizes from 50x50 to 400x400, generates a CSV and plot:
+**Scaling study** — use `--grid-min` / `--grid-max` to sweep grid sizes:
 ```shell
-./tests/test_petsc_scaling.sh               # defaults: 8 procs, 20 cycles
-./tests/test_petsc_scaling.sh --cycles 10   # faster run
+./tests/test_petsc.sh --grid-min 50 --grid-max 400              # defaults: 8 procs, 20 cycles
+./tests/test_petsc.sh --grid-min 50 --grid-max 400 --cycles 10  # faster run
 ```
 
-Results are saved to `tests/scaling_results.csv` and `tests/scaling_plot.png`.
+Results are saved to `tests/test_petsc_output/` (CSV, HDF5 fields, plots).
+
+### Test recipes
+
+Three common test scenarios:
+
+**1. Simple GMRES vs PETSc comparison** — single grid, two solvers:
+```shell
+./tests/test_petsc.sh --grid 100 100 --cycles 100 --solvers GMRES,PETSc_gmres
+```
+
+**2. Multi-solver grid sweep** — all PETSc Krylov methods across grid sizes:
+```shell
+./tests/test_petsc.sh --all-solvers --grid-min 50 --grid-max 150 --grid-step 50 --cycles 100
+```
+
+**3. Extended run with field output** — longer simulation for convergence analysis:
+```shell
+./tests/test_petsc.sh --grid 150 150 --cycles 1000 --solvers GMRES,PETSc_bcgs \
+  --field-output 10 --name long-run
+```
+
+`DiagnosticsOutputCycle` is hardcoded to 1 — `ConservedQuantities.txt` is always written every cycle (cheap). Use `--field-output N` to control the expensive HDF5 field snapshots.
+
+### Plotting results
+
+After a test run, generate plots from the output directory:
+```shell
+pixi run plot-timing                 # solver timing comparison
+pixi run plot-fields                 # 2D field heatmaps with difference panels
+pixi run plot-energy                 # energy conservation
+pixi run plot-l2                     # L2 error accumulation over cycles
+```
+
+All plotting commands accept `--light` for a light theme (default is dark). Pass extra arguments after `--`:
+```shell
+pixi run plot-timing -- --sort --loglog
+pixi run plot-fields -- --fields Bx,By,Ez --all-cycles
+pixi run plot-energy -- --output custom_energy.png
+```
+
+Or run the scripts directly:
+```shell
+python3 tests/plot_timing.py tests/test_petsc_output/timing_results.csv
+python3 tests/plot_energy.py tests/test_petsc_output/timing_results.csv --light
+```
 
 ## Python postprocessing
 
