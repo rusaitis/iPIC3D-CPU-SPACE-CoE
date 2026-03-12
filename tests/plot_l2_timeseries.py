@@ -23,7 +23,7 @@ import re
 import sys
 
 from plot_utils import (require_imports, discover_cycles, solver_label,
-                        load_field, PowerLawFit, L2ErrorSeries)
+                        load_field, parse_field_specs, PowerLawFit, L2ErrorSeries)
 
 require_imports("numpy", "matplotlib", "h5py")
 
@@ -60,17 +60,7 @@ args = parser.parse_args()
 theme = apply_theme(args)
 
 # ── Parse field specifications ────────────────────────────────────────────
-fields = []
-for spec in args.fields.split(','):
-    spec = spec.strip()
-    if len(spec) == 2:
-        field_type = spec[0].upper()
-        component = spec[1].lower()
-        field_latex = f"${field_type}_{component}$"
-        fields.append((field_type, component, field_latex))
-    else:
-        print(f"  WARNING: Unrecognized field spec '{spec}', skipping.")
-
+fields = parse_field_specs(args.fields)
 if not fields:
     print("  ERROR: No valid fields specified.")
     sys.exit(1)

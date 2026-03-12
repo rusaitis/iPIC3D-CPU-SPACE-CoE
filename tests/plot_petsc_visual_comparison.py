@@ -21,7 +21,7 @@ import re
 import sys
 
 from plot_utils import (require_imports, discover_cycles, solver_label,
-                        load_field, find_common_cycles)
+                        load_field, find_common_cycles, parse_field_specs)
 
 require_imports("numpy", "matplotlib", "h5py")
 
@@ -61,12 +61,16 @@ parser.add_argument('--vmax-Bx-pct', type=float, default=None,
                     help='Fixed %% scale for Bx difference panel (percent mode)')
 parser.add_argument('--vmax-Ez-pct', type=float, default=None,
                     help='Fixed %% scale for Ez difference panel (percent mode)')
+parser.add_argument('--fields', default='Bx,Ez',
+                    help='Field components to compare (default: Bx,Ez)')
 parser.add_argument('--diff-mode', choices=['percent', 'absolute'], default='percent',
                     help='Difference panel normalization (default: percent)')
 parser.add_argument('--all-cycles', action='store_true',
                     help='Generate one PNG per common cycle with consistent colorbar scale')
 parser.add_argument('--print-bounds', action='store_true',
                     help='Print vmax bounds for all fields and exit (no plot)')
+parser.add_argument('--output-dir', default=None,
+                    help='Directory for output PNGs (default: next to GMRES directory)')
 
 from plot_theme import add_theme_arg, apply_theme
 add_theme_arg(parser)
@@ -155,10 +159,11 @@ else:
 print(f"  Comparing cycle {cycle:05d}")
 
 # ── Fields to compare ────────────────────────────────────────────────────
-# Bx: reconnecting magnetic field component (reverses across the current sheet)
-# Ez: out-of-plane reconnection electric field (proxy for reconnection rate)
-# These are the primary diagnostics for Double Harris sheet simulations.
-fields = [("B", "x", "$B_x$"), ("E", "z", "$E_z$")]
+# Default: Bx (reconnecting component) and Ez (reconnection electric field)
+fields = parse_field_specs(args.fields)
+if not fields:
+    print("  ERROR: No valid fields specified.")
+    sys.exit(1)
 
 # ── Load data ────────────────────────────────────────────────────────────
 gmres_label = solver_label(args.gmres)
@@ -290,7 +295,7 @@ def _render_field_row(fig, axes_row, ref_2d, test_2d, field_label,
 
 def generate_comparison(cycle, petsc_dir, gmres_data_cache, fields,
                         fixed_vmax, diff_mode, gmres_dir, gmres_label,
-                        theme=None):
+                        theme=None, output_dir=None):
     """Generate a comparison figure for one cycle and one test directory.
 
     Parameters
@@ -304,6 +309,7 @@ def generate_comparison(cycle, petsc_dir, gmres_data_cache, fields,
     gmres_dir : str          Reference run directory (for output path)
     gmres_label : str        Reference run label
     theme : Theme or None    Active theme (falls back to plot_theme.active)
+    output_dir : str or None Directory for output PNGs (default: parent of gmres_dir)
     """
     if theme is None:
         from plot_theme import active as _active
@@ -328,8 +334,11 @@ def generate_comparison(cycle, petsc_dir, gmres_data_cache, fields,
                   f"GMRES {g_shape} vs {petsc_lab} {p_shape}")
             sys.exit(1)
 
-    # ── Create figure: 2 rows × 3 columns ────────────────────────────────
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9), dpi=150)
+    # ── Create figure: N_fields rows × 3 columns ──────────────────────────
+    n_rows = len(fields)
+    fig, axes = plt.subplots(n_rows, 3, figsize=(16, 4.5 * n_rows), dpi=150)
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]  # ensure 2D indexing
     diff_label_suffix = "Diff (% of peak)" if diff_mode == "percent" else "Difference"
     fig.suptitle(f"Field Comparison: {gmres_label} vs {petsc_lab}  (cycle {cycle:05d})",
                  fontsize=14, fontweight='bold', y=0.95)
@@ -344,7 +353,7 @@ def generate_comparison(cycle, petsc_dir, gmres_data_cache, fields,
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     # ── Save PNG ──────────────────────────────────────────────────────────
-    parent_dir = os.path.dirname(gmres_dir)
+    parent_dir = output_dir if output_dir else os.path.dirname(gmres_dir)
     out_png = os.path.join(parent_dir,
                            f"visual_comparison_{petsc_lab}_cycle{cycle:05d}.png")
     fig.savefig(out_png, dpi=150, bbox_inches='tight')
@@ -440,11 +449,13 @@ if args.all_cycles:
         for petsc_dir in args.petsc:
             generate_comparison(c, petsc_dir, gdata_cache, fields,
                                 fixed_vmax, args.diff_mode,
-                                args.gmres, gmres_label, theme=theme)
+                                args.gmres, gmres_label, theme=theme,
+                                output_dir=args.output_dir)
 
 else:
     # ── Single-cycle mode (original behavior) ────────────────────────────
     for petsc_dir in args.petsc:
         generate_comparison(cycle, petsc_dir, gmres_data, fields,
                             fixed_vmax, args.diff_mode,
-                            args.gmres, gmres_label, theme=theme)
+                            args.gmres, gmres_label, theme=theme,
+                            output_dir=args.output_dir)

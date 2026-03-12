@@ -31,13 +31,15 @@ except ImportError:
 
 from plot_theme import (add_theme_arg, apply_theme, get_solver_style,
                         COMPONENT_COLORS, PROFILE_LINESTYLES)
-from plot_utils import parse_conserved_quantities
+from plot_utils import parse_conserved_quantities, discover_profile_files
 
 # ── CLI args ──────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('csv', nargs='?', default=None, metavar='CSV_FILE',
                     help='Path to results CSV (default: results.csv next to this script)')
+parser.add_argument('--output', default=None,
+                    help='Override output PNG path')
 add_theme_arg(parser)
 args = parser.parse_args()
 theme = apply_theme(args)
@@ -52,30 +54,14 @@ elif "CSV_FILE" in os.environ:
 else:
     csv_path = os.path.join(script_dir, "results.csv")
 
-plot_path = os.path.splitext(csv_path)[0] + "_energy.png"
+if args.output:
+    plot_path = args.output
+else:
+    plot_path = os.path.splitext(csv_path)[0] + "_energy.png"
 
 # ── Profile file discovery ────────────────────────────────────────────────
 profile_dir = os.environ.get("PROFILE_DIR", os.path.dirname(csv_path))
-profile_files_all = sorted(glob.glob(os.path.join(profile_dir, "profile_*.csv")))
-
-
-def parse_grid(path: str) -> int:
-    """Extract grid N from filename like profile_GMRES_100x100x1.csv -> 100."""
-    base = os.path.splitext(os.path.basename(path))[0]
-    grid_part = base.rsplit('_', 1)[-1]
-    try:
-        return int(grid_part.split('x')[0])
-    except (ValueError, IndexError):
-        return 0
-
-
-# Keep only the largest grid when multiple grids exist
-if profile_files_all:
-    max_grid = max(parse_grid(f) for f in profile_files_all)
-    profile_files = [f for f in profile_files_all if parse_grid(f) == max_grid]
-else:
-    profile_files = []
-    max_grid = 0
+profile_files, max_grid = discover_profile_files(profile_dir)
 
 # ── Energy data discovery ─────────────────────────────────────────────────
 energy_data = {}   # label → dict from parse_conserved_quantities

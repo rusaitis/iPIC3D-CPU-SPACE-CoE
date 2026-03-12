@@ -140,6 +140,57 @@ def parse_conserved_quantities(run_dir: str) -> dict:
     return result if result['cycle'] else {}
 
 
+# ── Profile file discovery ────────────────────────────────────────────────
+
+def parse_grid_from_filename(path: str) -> int:
+    """Extract grid N from filename like profile_GMRES_100x100x1.csv -> 100."""
+    base = os.path.splitext(os.path.basename(path))[0]
+    grid_part = base.rsplit('_', 1)[-1]
+    try:
+        return int(grid_part.split('x')[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def discover_profile_files(profile_dir: str, largest_only: bool = True) -> tuple:
+    """Find profile_*.csv files, optionally keeping only the largest grid.
+
+    Returns (profile_files, max_grid) where max_grid is the N value of
+    the largest grid found, or 0 if no files matched.
+    """
+    all_files = sorted(glob.glob(os.path.join(profile_dir, "profile_*.csv")))
+    if not all_files:
+        return [], 0
+
+    max_grid = max(parse_grid_from_filename(f) for f in all_files)
+    if largest_only:
+        files = [f for f in all_files if parse_grid_from_filename(f) == max_grid]
+    else:
+        files = all_files
+    return files, max_grid
+
+
+# ── Field spec parsing ───────────────────────────────────────────────────
+
+def parse_field_specs(spec_str: str) -> list:
+    """Parse 'Bx,Ez,By' into [('B','x','$B_x$'), ('E','z','$E_z$'), ...].
+
+    Each spec must be exactly two characters: field type (B/E) and
+    component (x/y/z).  Invalid specs are skipped with a warning.
+    """
+    fields = []
+    for spec in spec_str.split(','):
+        spec = spec.strip()
+        if len(spec) == 2:
+            field_type = spec[0].upper()
+            component = spec[1].lower()
+            field_latex = f"${field_type}_{component}$"
+            fields.append((field_type, component, field_latex))
+        else:
+            print(f"  WARNING: Unrecognized field spec '{spec}', skipping.")
+    return fields
+
+
 # ── Dataclasses ──────────────────────────────────────────────────────────
 
 @dataclasses.dataclass(frozen=True)
