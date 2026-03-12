@@ -9,7 +9,7 @@ profile, and energy drift.
 Usage (standalone):
     python3 plot_single_grid.py [results.csv] [--sort] [--profile-smooth N] [--output PATH]
 
-Usually invoked via the dispatcher plot_petsc_test_results.py.
+Usually invoked via the dispatcher plot_timing.py.
 """
 
 import argparse
@@ -32,7 +32,7 @@ except ImportError:
 
 from plot_theme import (add_theme_arg, apply_theme, get_solver_style,
                         COMPONENT_COLORS, PROFILE_LINESTYLES)
-from plot_results_common import (
+from plot_timing_common import (
     ResultsData, load_results_csv, resolve_csv_path, resolve_plot_path,
     darken_color, auto_time_unit, compute_improvements,
     render_improvement_bars, render_summary_annotation, apply_tick_rotation,

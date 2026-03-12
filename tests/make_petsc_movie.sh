@@ -3,7 +3,7 @@
 # make_petsc_movie.sh — Generate mp4 movies of GMRES vs PETSc field comparison.
 #
 # Loops over all common output cycles, generates a PNG per cycle via
-# plot_petsc_visual_comparison.py, then stitches them into an mp4 with ffmpeg.
+# plot_field_comparison.py, then stitches them into an mp4 with ffmpeg.
 #
 # Usage:
 #   bash tests/make_petsc_movie.sh [--gmres DIR] [--petsc DIR ...] [--fps N] [--output-dir DIR]
@@ -74,8 +74,8 @@ if ! command -v ffmpeg &>/dev/null; then
     exit 1
 fi
 
-if [[ ! -f "$SCRIPT_DIR/plot_petsc_visual_comparison.py" ]]; then
-    echo "ERROR: plot_petsc_visual_comparison.py not found in $SCRIPT_DIR/" >&2
+if [[ ! -f "$SCRIPT_DIR/plot_field_comparison.py" ]]; then
+    echo "ERROR: plot_field_comparison.py not found in $SCRIPT_DIR/" >&2
     exit 1
 fi
 
@@ -145,7 +145,7 @@ fi
 # ── Pre-compute color bounds from last cycle ─────────────────────────────
 last_cycle="${common_cycles[$last_idx]}"
 echo "  Pre-computing color bounds from cycle $last_cycle..."
-bounds=$(python3 "$SCRIPT_DIR/plot_petsc_visual_comparison.py" \
+bounds=$(python3 "$SCRIPT_DIR/plot_field_comparison.py" \
     --gmres "$GMRES_DIR" "${petsc_args[@]}" --cycle "$last_cycle" --print-bounds)
 
 vmax_Bx=$(echo "$bounds" | sed -n 's/^vmax_Bx=//p')
@@ -160,7 +160,7 @@ echo "    vmax_Ez=$vmax_Ez  vmax_Ez_diff=$vmax_Ez_diff"
 echo "  Generating comparison frames..."
 for cycle in "${common_cycles[@]}"; do
     printf "    Cycle %05d\n" "$cycle"
-    python3 "$SCRIPT_DIR/plot_petsc_visual_comparison.py" \
+    python3 "$SCRIPT_DIR/plot_field_comparison.py" \
         --gmres "$GMRES_DIR" "${petsc_args[@]}" --cycle "$cycle" \
         --vmax-Bx "$vmax_Bx" --vmax-Bx-diff "$vmax_Bx_diff" \
         --vmax-Ez "$vmax_Ez" --vmax-Ez-diff "$vmax_Ez_diff" || {

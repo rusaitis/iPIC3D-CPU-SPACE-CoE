@@ -1624,8 +1624,8 @@ if [[ "$NO_PLOT" != true ]]; then
     export BD_MOMENTS_LIST="${BD_MOMENTS_arr[*]}"
     export BD_MOVER_LIST="${BD_MOVER_arr[*]}"
 
-    python3 "$SCRIPT_DIR/plot_petsc_test_results.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Plot generation failed (see above)."
-    python3 "$SCRIPT_DIR/plot_petsc_energy.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Energy plot generation failed."
+    python3 "$SCRIPT_DIR/plot_timing.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Plot generation failed (see above)."
+    python3 "$SCRIPT_DIR/plot_energy.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Energy plot generation failed."
 else
     echo "  Plotting skipped (--no-plot)."
 fi
@@ -1644,10 +1644,10 @@ for ((si=1; si<NUM_SOLVERS; si++)); do
 done
 
 if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; then
-    if [[ -f "$SCRIPT_DIR/plot_petsc_visual_comparison.py" ]]; then
+    if [[ -f "$SCRIPT_DIR/plot_field_comparison.py" ]]; then
         if [[ -d "$gmres_dir" && ${#petsc_args[@]} -gt 0 ]]; then
             echo "  Running visual comparison..."
-            python3 "$SCRIPT_DIR/plot_petsc_visual_comparison.py" \
+            python3 "$SCRIPT_DIR/plot_field_comparison.py" \
                 --gmres "$gmres_dir" "${petsc_args[@]}" || \
                 echo "  ${YELLOW}WARNING:${RESET} Visual comparison failed."
         fi

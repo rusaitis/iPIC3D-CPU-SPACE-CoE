@@ -33,68 +33,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import h5py
 
-# ── CLI args ──────────────────────────────────────────────────────────────
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
-parser = argparse.ArgumentParser(
-    description=__doc__,
-    formatter_class=argparse.RawDescriptionHelpFormatter,
-)
-parser.add_argument('--ref', '--gmres', default=None,
-                    help='Reference run directory (auto-discovered if omitted)')
-parser.add_argument('--test', '--petsc', action='append', default=None,
-                    help='Test run directory (repeatable; auto-discovered if omitted)')
-parser.add_argument('--fields', default='Bx,Ez',
-                    help='Field components to compare (default: Bx,Ez)')
-parser.add_argument('--gmrestol', type=float, default=1e-15,
-                    help='Solver tolerance for reference line (default: 1e-15)')
-parser.add_argument('--csv', action='store_true',
-                    help='Write results_l2_error.csv alongside PNG')
-parser.add_argument('--output', default=None,
-                    help='Override output PNG path')
-
-from plot_theme import add_theme_arg, apply_theme, get_solver_style
-add_theme_arg(parser)
-
-args = parser.parse_args()
-theme = apply_theme(args)
-
-# ── Parse field specifications ────────────────────────────────────────────
-fields = parse_field_specs(args.fields)
-if not fields:
-    print("  ERROR: No valid fields specified.")
-    sys.exit(1)
-
-# ── Auto-discovery ────────────────────────────────────────────────────────
-output_dir = os.path.join(script_dir, "test_petsc_output")
-
-if args.ref is None:
-    candidates = sorted(glob.glob(os.path.join(output_dir, "GMRES_*")))
-    candidates = [c for c in candidates if os.path.isdir(c)
-                  and not os.path.basename(c).startswith("GMRES_2")]
-    if not candidates:
-        print("  ERROR: No GMRES reference directory found in test_petsc_output/.")
-        print("         Use --ref to specify.")
-        sys.exit(1)
-    args.ref = candidates[0]
-    print(f"  Auto-discovered ref dir: {args.ref}")
-
-if args.test is None:
-    all_dirs = sorted(glob.glob(os.path.join(output_dir, "*")))
-    args.test = [d for d in all_dirs
-                 if os.path.isdir(d) and d != args.ref
-                 and re.search(r'_\d+x\d+x\d+$', os.path.basename(d))]
-    if not args.test:
-        print("  ERROR: No test directories found in test_petsc_output/.")
-        print("         Use --test to specify.")
-        sys.exit(1)
-    for t in args.test:
-        print(f"  Auto-discovered test dir: {t}")
-
-def get_style(dir_path):
-    """Get plot style for a directory via the shared theme module."""
-    return get_solver_style(dir_path)
-
 
 # ── Fitting and analysis ─────────────────────────────────────────────────
 
@@ -332,271 +270,339 @@ def _plot_local_exponent(ax, cycles_arr, l2_arr, style, theme):
                 alpha=0.85)
 
 
-# ── Find common cycles ───────────────────────────────────────────────────
-ref_cycles = set(discover_cycles(args.ref))
-all_test_cycles = [set(discover_cycles(t)) for t in args.test]
-common_cycles = sorted(ref_cycles.intersection(*all_test_cycles))
+# ── Main entry point ─────────────────────────────────────────────────────
 
-if not common_cycles:
-    print("  ERROR: No common output cycles found across run directories.")
-    sys.exit(1)
+def main(argv=None):
+    from plot_theme import add_theme_arg, apply_theme, get_solver_style
 
-print(f"  Found {len(common_cycles)} common cycles: "
-      f"{common_cycles[0]} .. {common_cycles[-1]}")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
 
-ref_label = solver_label(args.ref)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('--ref', '--gmres', default=None,
+                        help='Reference run directory (auto-discovered if omitted)')
+    parser.add_argument('--test', '--petsc', action='append', default=None,
+                        help='Test run directory (repeatable; auto-discovered if omitted)')
+    parser.add_argument('--fields', default='Bx,Ez',
+                        help='Field components to compare (default: Bx,Ez)')
+    parser.add_argument('--gmrestol', type=float, default=1e-15,
+                        help='Solver tolerance for reference line (default: 1e-15)')
+    parser.add_argument('--csv', action='store_true',
+                        help='Write results_l2_error.csv alongside PNG')
+    parser.add_argument('--output', default=None,
+                        help='Override output PNG path')
+    add_theme_arg(parser)
 
-# ── Compute N_dof and round-off floor ────────────────────────────────────
-sample_ftype, sample_comp = fields[0][0], fields[0][1]
-try:
-    cycle_str = f"{common_cycles[0]:05d}"
-    h5_path = os.path.join(args.ref, f"Fields_{cycle_str}",
-                           f"{sample_ftype}_{cycle_str}.h5")
-    with h5py.File(h5_path, "r") as f:
-        n_dof = int(np.prod(f[f"/Fields/{sample_ftype}{sample_comp}"].shape))
-except Exception:
-    n_dof = 10000  # fallback
+    args = parser.parse_args(argv)
+    theme = apply_theme(args)
 
-eps_machine = np.finfo(np.float64).eps
-# Expected round-off floor: each of N_dof independent values contributes
-# ~eps noise, so ||noise||_2 ~ sqrt(N_dof) * eps by CLT.
-roundoff_floor = np.sqrt(n_dof) * eps_machine
+    # ── Parse field specifications ────────────────────────────────────────
+    fields = parse_field_specs(args.fields)
+    if not fields:
+        print("  ERROR: No valid fields specified.")
+        sys.exit(1)
 
-# ── Compute L2 errors (one cycle at a time to limit memory) ──────────────
-results = {t: {} for t in args.test}
+    # ── Auto-discovery ────────────────────────────────────────────────────
+    output_dir = os.path.join(script_dir, "test_petsc_output")
 
-for ftype, comp, field_latex in fields:
-    for test_dir in args.test:
-        results[test_dir][(ftype, comp)] = L2ErrorSeries()
+    if args.ref is None:
+        candidates = sorted(glob.glob(os.path.join(output_dir, "GMRES_*")))
+        candidates = [c for c in candidates if os.path.isdir(c)
+                      and not os.path.basename(c).startswith("GMRES_2")]
+        if not candidates:
+            print("  ERROR: No GMRES reference directory found in test_petsc_output/.")
+            print("         Use --ref to specify.")
+            sys.exit(1)
+        args.ref = candidates[0]
+        print(f"  Auto-discovered ref dir: {args.ref}")
 
-    for cycle in common_cycles:
-        try:
-            ref_data = load_field(args.ref, cycle, ftype, comp)
-        except (OSError, KeyError) as e:
-            print(f"  WARNING: Could not load ref {ftype}{comp} cycle {cycle}: {e}")
-            continue
+    if args.test is None:
+        all_dirs = sorted(glob.glob(os.path.join(output_dir, "*")))
+        args.test = [d for d in all_dirs
+                     if os.path.isdir(d) and d != args.ref
+                     and re.search(r'_\d+x\d+x\d+$', os.path.basename(d))]
+        if not args.test:
+            print("  ERROR: No test directories found in test_petsc_output/.")
+            print("         Use --test to specify.")
+            sys.exit(1)
+        for t in args.test:
+            print(f"  Auto-discovered test dir: {t}")
 
-        ref_norm = np.linalg.norm(ref_data)
+    def get_style(dir_path):
+        """Get plot style for a directory via the shared theme module."""
+        return get_solver_style(dir_path)
 
-        for test_dir in args.test:
-            try:
-                test_data = load_field(test_dir, cycle, ftype, comp)
-            except (OSError, KeyError) as e:
-                print(f"  WARNING: Could not load {ftype}{comp} cycle {cycle} "
-                      f"from {solver_label(test_dir)}: {e}")
-                continue
+    # ── Find common cycles ───────────────────────────────────────────────
+    ref_cycles = set(discover_cycles(args.ref))
+    all_test_cycles = [set(discover_cycles(t)) for t in args.test]
+    common_cycles = sorted(ref_cycles.intersection(*all_test_cycles))
 
-            if ref_data.shape != test_data.shape:
-                print(f"  WARNING: Shape mismatch at cycle {cycle} for {field_latex}: "
-                      f"{ref_data.shape} vs {test_data.shape}, skipping.")
-                continue
+    if not common_cycles:
+        print("  ERROR: No common output cycles found across run directories.")
+        sys.exit(1)
 
-            diff = test_data - ref_data
-            l2_rel = np.linalg.norm(diff) / ref_norm if ref_norm > 0 else 0.0
-            max_abs = float(np.max(np.abs(diff)))
+    print(f"  Found {len(common_cycles)} common cycles: "
+          f"{common_cycles[0]} .. {common_cycles[-1]}")
 
-            series = results[test_dir][(ftype, comp)]
-            series.cycles.append(cycle)
-            series.l2_relative.append(l2_rel)
-            series.max_absolute.append(max_abs)
-            series.ref_norm.append(ref_norm)
+    ref_label = solver_label(args.ref)
 
-for test_dir in args.test:
-    print(f"  Processed: {solver_label(test_dir)}")
+    # ── Compute N_dof and round-off floor ────────────────────────────────
+    sample_ftype, sample_comp = fields[0][0], fields[0][1]
+    try:
+        cycle_str = f"{common_cycles[0]:05d}"
+        h5_path = os.path.join(args.ref, f"Fields_{cycle_str}",
+                               f"{sample_ftype}_{cycle_str}.h5")
+        with h5py.File(h5_path, "r") as f:
+            n_dof = int(np.prod(f[f"/Fields/{sample_ftype}{sample_comp}"].shape))
+    except Exception:
+        n_dof = 10000  # fallback
 
-# ── Plot ──────────────────────────────────────────────────────────────────
-n_fields = len(fields)
-fig = plt.figure(figsize=(7 * n_fields, 7), dpi=150,
-                 layout='constrained')
-gs = fig.add_gridspec(2, n_fields, height_ratios=[3, 1], hspace=0.08)
+    eps_machine = np.finfo(np.float64).eps
+    # Expected round-off floor: each of N_dof independent values contributes
+    # ~eps noise, so ||noise||_2 ~ sqrt(N_dof) * eps by CLT.
+    roundoff_floor = np.sqrt(n_dof) * eps_machine
 
-fig.suptitle(f"L2 Error Accumulation  (ref: {ref_label})",
-             fontsize=13, fontweight='bold', y=1.02)
+    # ── Compute L2 errors (one cycle at a time to limit memory) ──────────
+    results = {t: {} for t in args.test}
 
-# Cache fit results: fit_cache[(test_dir, ftype, comp)] = PowerLawFit
-fit_cache = {}
-
-for fi, (ftype, comp, field_latex) in enumerate(fields):
-    ax_top = fig.add_subplot(gs[0, fi])
-    ax_bot = fig.add_subplot(gs[1, fi], sharex=ax_top)
-    any_nonzero = False
-
-    for ri, test_dir in enumerate(args.test):
-        test_lab = solver_label(test_dir)
-        data = results[test_dir][(ftype, comp)]
-        cycles_arr = data.cycles
-        l2_arr = data.l2_relative
-
-        if not cycles_arr:
-            continue
-
-        style = get_style(test_dir)
-
-        # Check for bit-identical runs (all L2 = 0)
-        all_zero = all(v == 0 for v in l2_arr)
-        if all_zero:
-            ax_top.plot([], [], color=style['color'], linestyle=style['ls'],
-                        marker=style['marker'],
-                        label=f"{test_lab} (bit-identical)")
-            continue
-
-        any_nonzero = True
-
-        ax_top.semilogy(cycles_arr, l2_arr,
-                        color=style['color'], marker=style['marker'],
-                        linestyle=style['ls'], linewidth=1.8, markersize=5,
-                        markeredgecolor=theme.marker_edge, markeredgewidth=0.5,
-                        label=test_lab, alpha=0.9, zorder=3)
-
-        # Power-law fit overlay
-        fit = fit_powerlaw(cycles_arr, l2_arr)
-        fit_cache[(test_dir, ftype, comp)] = fit
-        _plot_fit_overlay(ax_top, cycles_arr, l2_arr, fit, style,
-                          run_index=ri)
-
-        # Local exponent in bottom panel
-        _plot_local_exponent(ax_bot, cycles_arr, l2_arr, style, theme)
-
-    # Reference lines on top panel (only meaningful on log scale)
-    if any_nonzero:
-        ax_top.axhline(y=args.gmrestol, color=theme.refline_color,
-                       linestyle='--', linewidth=0.8, alpha=0.6)
-        ax_top.text(0.5, args.gmrestol,
-                    f'solver tol = {args.gmrestol:.0e}',
-                    transform=ax_top.get_yaxis_transform(),
-                    fontsize=8, color=theme.refline_color,
-                    va='bottom', ha='center')
-        ax_top.axhline(y=roundoff_floor, color=theme.refline_color,
-                       linestyle=':', linewidth=0.8, alpha=0.6)
-        ax_top.text(0.5, roundoff_floor,
-                    f'round-off floor = {roundoff_floor:.1e}',
-                    transform=ax_top.get_yaxis_transform(),
-                    fontsize=8, color=theme.refline_color,
-                    va='bottom', ha='center')
-    else:
-        ax_top.text(0.5, 0.5,
-                    "All test runs are bit-identical\nwith the reference",
-                    transform=ax_top.transAxes, ha='center', va='center',
-                    fontsize=12, color=theme.text_secondary)
-
-    # Bottom panel: reference exponent lines
-    if any_nonzero:
-        _ref_color = '#9399b2' if theme.mode == 'dark' else '#8890a8'
-        for ref_alpha, ref_lbl in [(0.5, '0.5'), (1.0, '1'),
-                                   (2.0, '2')]:
-            ax_bot.axhline(y=ref_alpha, color=_ref_color,
-                           linestyle='--', linewidth=0.5, alpha=0.5)
-            ax_bot.text(ax_bot.get_xlim()[1] if ax_bot.get_xlim()[1] > 0
-                        else cycles_arr[-1],
-                        ref_alpha, ref_lbl,
-                        fontsize=7, color=_ref_color, alpha=0.7,
-                        ha='right', va='bottom')
-        ax_bot.set_ylim(-0.5, 6)
-        ax_bot.set_ylabel(r'Error growth exponent $\alpha$', fontsize=9)
-        ax_bot.set_title(
-            r'$L_2 \propto t^\alpha$  (local $\alpha$ between consecutive cycles)',
-            fontsize=9, loc='left', color=theme.text_secondary, style='italic')
-
-    ax_bot.set_xlabel('Cycle', fontsize=11)
-    plt.setp(ax_top.get_xticklabels(), visible=False)
-    ax_top.set_ylabel('$L_2$ relative error', fontsize=11)
-    ax_top.set_title(field_latex, fontsize=13, fontweight='bold')
-    leg = ax_top.legend(fontsize=9, loc='lower right')
-    for text in leg.get_texts():
-        if 'transient' in text.get_text():
-            text.set_alpha(0.4)
-    ax_top.grid(True, which='both', alpha=0.3)
-    ax_bot.grid(True, which='both', alpha=0.3)
-    for ax in (ax_top, ax_bot):
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-
-# Layout handled by constrained_layout=True
-
-# ── Save PNG ──────────────────────────────────────────────────────────────
-if args.output:
-    out_png = args.output
-else:
-    parent_dir = os.path.dirname(args.ref)
-    out_png = os.path.join(parent_dir, "results_l2_error.png")
-
-fig.savefig(out_png, dpi=150, bbox_inches='tight')
-plt.close(fig)
-print(f"  Saved: {out_png}")
-
-# ── CSV output ────────────────────────────────────────────────────────────
-if args.csv:
-    csv_path = os.path.splitext(out_png)[0] + ".csv"
-    with open(csv_path, 'w') as f:
-        f.write("cycle,ref_label,test_label,field,"
-                "l2_rel_err,max_abs_diff,ref_l2_norm\n")
-        for test_dir in args.test:
-            test_lab = solver_label(test_dir)
-            for ftype, comp, field_latex in fields:
-                data = results[test_dir][(ftype, comp)]
-                for i, cycle in enumerate(data.cycles):
-                    f.write(f"{cycle},{ref_label},{test_lab},"
-                            f"{ftype}{comp},{data.l2_relative[i]:.6e},"
-                            f"{data.max_absolute[i]:.6e},"
-                            f"{data.ref_norm[i]:.6e}\n")
-    print(f"  Saved: {csv_path}")
-
-# ── Console summary ──────────────────────────────────────────────────────
-print()
-print("L2 Error Accumulation Summary")
-print("\u2500" * 96)
-print(f"Reference: {ref_label}")
-print(f"Per-step solver tol: {args.gmrestol:.0e}    "
-      f"Round-off floor (\u221aN\u00b7\u03b5): {roundoff_floor:.1e}  "
-      f"(N={n_dof} DOFs)")
-print("Note: L2 errors accumulate over cycles; "
-      "per-step floors are lower bounds, not targets.")
-print()
-
-header = (f"  {'Test':<26s} {'Field':>5s}  {'L2@last':>18s}  "
-          f"{'\u03b1':>6s}  {'R\u00b2':>5s}  {'Amplif.':>8s}  {'Knee':>5s}")
-print(header)
-print("  " + "\u2500" * 90)
-
-for test_dir in args.test:
-    test_lab = solver_label(test_dir)
     for ftype, comp, field_latex in fields:
-        data = results[test_dir][(ftype, comp)]
-        field_name = f"{ftype}{comp}"
+        for test_dir in args.test:
+            results[test_dir][(ftype, comp)] = L2ErrorSeries()
 
-        if not data.cycles:
-            print(f"  {test_lab:<26s} {field_name:>5s}  "
-                  f"{'N/A':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
-                  f"{'N/A':>8s}  {'N/A':>5s}")
-            continue
+        for cycle in common_cycles:
+            try:
+                ref_data = load_field(args.ref, cycle, ftype, comp)
+            except (OSError, KeyError) as e:
+                print(f"  WARNING: Could not load ref {ftype}{comp} cycle {cycle}: {e}")
+                continue
 
-        l2_last = data.l2_relative[-1]
+            ref_norm = np.linalg.norm(ref_data)
 
-        if all(v == 0 for v in data.l2_relative):
-            print(f"  {test_lab:<26s} {field_name:>5s}  "
-                  f"{'0 (bit-identical)':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
-                  f"{'N/A':>8s}  {'\u2014':>5s}")
-            continue
+            for test_dir in args.test:
+                try:
+                    test_data = load_field(test_dir, cycle, ftype, comp)
+                except (OSError, KeyError) as e:
+                    print(f"  WARNING: Could not load {ftype}{comp} cycle {cycle} "
+                          f"from {solver_label(test_dir)}: {e}")
+                    continue
 
-        l2_str = _format_l2_with_pct(l2_last)
-        amplif_str = f"{_amplification(data.l2_relative):.1f}x"
+                if ref_data.shape != test_data.shape:
+                    print(f"  WARNING: Shape mismatch at cycle {cycle} for {field_latex}: "
+                          f"{ref_data.shape} vs {test_data.shape}, skipping.")
+                    continue
 
-        fit = fit_cache.get((test_dir, ftype, comp))
-        if fit is not None:
-            alpha_str = f"{fit.alpha:.2f}"
-            r_sq_str = f"{fit.r_squared:.2f}"
-            if fit.knee_cycle is not None:
-                knee_str = f"{fit.knee_cycle:.0f}"
-                alpha_str = (f"{fit.alpha_early:.1f}/"
-                             f"{fit.alpha_late:.1f}")
-                r_sq_str = f"{fit.r_squared_piecewise:.2f}"
-            else:
-                knee_str = "\u2014"
+                diff = test_data - ref_data
+                l2_rel = np.linalg.norm(diff) / ref_norm if ref_norm > 0 else 0.0
+                max_abs = float(np.max(np.abs(diff)))
+
+                series = results[test_dir][(ftype, comp)]
+                series.cycles.append(cycle)
+                series.l2_relative.append(l2_rel)
+                series.max_absolute.append(max_abs)
+                series.ref_norm.append(ref_norm)
+
+    for test_dir in args.test:
+        print(f"  Processed: {solver_label(test_dir)}")
+
+    # ── Plot ──────────────────────────────────────────────────────────────
+    n_fields = len(fields)
+    fig = plt.figure(figsize=(7 * n_fields, 7), dpi=150,
+                     layout='constrained')
+    gs = fig.add_gridspec(2, n_fields, height_ratios=[3, 1], hspace=0.08)
+
+    fig.suptitle(f"L2 Error Accumulation  (ref: {ref_label})",
+                 fontsize=13, fontweight='bold', y=1.02)
+
+    # Cache fit results: fit_cache[(test_dir, ftype, comp)] = PowerLawFit
+    fit_cache = {}
+
+    for fi, (ftype, comp, field_latex) in enumerate(fields):
+        ax_top = fig.add_subplot(gs[0, fi])
+        ax_bot = fig.add_subplot(gs[1, fi], sharex=ax_top)
+        any_nonzero = False
+
+        for ri, test_dir in enumerate(args.test):
+            test_lab = solver_label(test_dir)
+            data = results[test_dir][(ftype, comp)]
+            cycles_arr = data.cycles
+            l2_arr = data.l2_relative
+
+            if not cycles_arr:
+                continue
+
+            style = get_style(test_dir)
+
+            # Check for bit-identical runs (all L2 = 0)
+            all_zero = all(v == 0 for v in l2_arr)
+            if all_zero:
+                ax_top.plot([], [], color=style['color'], linestyle=style['ls'],
+                            marker=style['marker'],
+                            label=f"{test_lab} (bit-identical)")
+                continue
+
+            any_nonzero = True
+
+            ax_top.semilogy(cycles_arr, l2_arr,
+                            color=style['color'], marker=style['marker'],
+                            linestyle=style['ls'], linewidth=1.8, markersize=5,
+                            markeredgecolor=theme.marker_edge, markeredgewidth=0.5,
+                            label=test_lab, alpha=0.9, zorder=3)
+
+            # Power-law fit overlay
+            fit = fit_powerlaw(cycles_arr, l2_arr)
+            fit_cache[(test_dir, ftype, comp)] = fit
+            _plot_fit_overlay(ax_top, cycles_arr, l2_arr, fit, style,
+                              run_index=ri)
+
+            # Local exponent in bottom panel
+            _plot_local_exponent(ax_bot, cycles_arr, l2_arr, style, theme)
+
+        # Reference lines on top panel (only meaningful on log scale)
+        if any_nonzero:
+            ax_top.axhline(y=args.gmrestol, color=theme.refline_color,
+                           linestyle='--', linewidth=0.8, alpha=0.6)
+            ax_top.text(0.5, args.gmrestol,
+                        f'solver tol = {args.gmrestol:.0e}',
+                        transform=ax_top.get_yaxis_transform(),
+                        fontsize=8, color=theme.refline_color,
+                        va='bottom', ha='center')
+            ax_top.axhline(y=roundoff_floor, color=theme.refline_color,
+                           linestyle=':', linewidth=0.8, alpha=0.6)
+            ax_top.text(0.5, roundoff_floor,
+                        f'round-off floor = {roundoff_floor:.1e}',
+                        transform=ax_top.get_yaxis_transform(),
+                        fontsize=8, color=theme.refline_color,
+                        va='bottom', ha='center')
         else:
-            alpha_str = "N/A"
-            r_sq_str = "N/A"
-            knee_str = "\u2014"
+            ax_top.text(0.5, 0.5,
+                        "All test runs are bit-identical\nwith the reference",
+                        transform=ax_top.transAxes, ha='center', va='center',
+                        fontsize=12, color=theme.text_secondary)
 
-        print(f"  {test_lab:<26s} {field_name:>5s}  "
-              f"{l2_str:>18s}  {alpha_str:>6s}  {r_sq_str:>5s}  "
-              f"{amplif_str:>8s}  {knee_str:>5s}")
+        # Bottom panel: reference exponent lines
+        if any_nonzero:
+            _ref_color = '#9399b2' if theme.mode == 'dark' else '#8890a8'
+            for ref_alpha, ref_lbl in [(0.5, '0.5'), (1.0, '1'),
+                                       (2.0, '2')]:
+                ax_bot.axhline(y=ref_alpha, color=_ref_color,
+                               linestyle='--', linewidth=0.5, alpha=0.5)
+                ax_bot.text(ax_bot.get_xlim()[1] if ax_bot.get_xlim()[1] > 0
+                            else cycles_arr[-1],
+                            ref_alpha, ref_lbl,
+                            fontsize=7, color=_ref_color, alpha=0.7,
+                            ha='right', va='bottom')
+            ax_bot.set_ylim(-0.5, 6)
+            ax_bot.set_ylabel(r'Error growth exponent $\alpha$', fontsize=9)
+            ax_bot.set_title(
+                r'$L_2 \propto t^\alpha$  (local $\alpha$ between consecutive cycles)',
+                fontsize=9, loc='left', color=theme.text_secondary, style='italic')
+
+        ax_bot.set_xlabel('Cycle', fontsize=11)
+        plt.setp(ax_top.get_xticklabels(), visible=False)
+        ax_top.set_ylabel('$L_2$ relative error', fontsize=11)
+        ax_top.set_title(field_latex, fontsize=13, fontweight='bold')
+        leg = ax_top.legend(fontsize=9, loc='lower right')
+        for text in leg.get_texts():
+            if 'transient' in text.get_text():
+                text.set_alpha(0.4)
+        ax_top.grid(True, which='both', alpha=0.3)
+        ax_bot.grid(True, which='both', alpha=0.3)
+        for ax in (ax_top, ax_bot):
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+
+    # Layout handled by constrained_layout=True
+
+    # ── Save PNG ──────────────────────────────────────────────────────────
+    if args.output:
+        out_png = args.output
+    else:
+        parent_dir = os.path.dirname(args.ref)
+        out_png = os.path.join(parent_dir, "results_l2_error.png")
+
+    fig.savefig(out_png, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {out_png}")
+
+    # ── CSV output ────────────────────────────────────────────────────────
+    if args.csv:
+        csv_path = os.path.splitext(out_png)[0] + ".csv"
+        with open(csv_path, 'w') as f:
+            f.write("cycle,ref_label,test_label,field,"
+                    "l2_rel_err,max_abs_diff,ref_l2_norm\n")
+            for test_dir in args.test:
+                test_lab = solver_label(test_dir)
+                for ftype, comp, field_latex in fields:
+                    data = results[test_dir][(ftype, comp)]
+                    for i, cycle in enumerate(data.cycles):
+                        f.write(f"{cycle},{ref_label},{test_lab},"
+                                f"{ftype}{comp},{data.l2_relative[i]:.6e},"
+                                f"{data.max_absolute[i]:.6e},"
+                                f"{data.ref_norm[i]:.6e}\n")
+        print(f"  Saved: {csv_path}")
+
+    # ── Console summary ──────────────────────────────────────────────────
+    print()
+    print("L2 Error Accumulation Summary")
+    print("\u2500" * 96)
+    print(f"Reference: {ref_label}")
+    print(f"Per-step solver tol: {args.gmrestol:.0e}    "
+          f"Round-off floor (\u221aN\u00b7\u03b5): {roundoff_floor:.1e}  "
+          f"(N={n_dof} DOFs)")
+    print("Note: L2 errors accumulate over cycles; "
+          "per-step floors are lower bounds, not targets.")
+    print()
+
+    header = (f"  {'Test':<26s} {'Field':>5s}  {'L2@last':>18s}  "
+              f"{'\u03b1':>6s}  {'R\u00b2':>5s}  {'Amplif.':>8s}  {'Knee':>5s}")
+    print(header)
+    print("  " + "\u2500" * 90)
+
+    for test_dir in args.test:
+        test_lab = solver_label(test_dir)
+        for ftype, comp, field_latex in fields:
+            data = results[test_dir][(ftype, comp)]
+            field_name = f"{ftype}{comp}"
+
+            if not data.cycles:
+                print(f"  {test_lab:<26s} {field_name:>5s}  "
+                      f"{'N/A':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
+                      f"{'N/A':>8s}  {'N/A':>5s}")
+                continue
+
+            l2_last = data.l2_relative[-1]
+
+            if all(v == 0 for v in data.l2_relative):
+                print(f"  {test_lab:<26s} {field_name:>5s}  "
+                      f"{'0 (bit-identical)':>18s}  {'N/A':>6s}  {'N/A':>5s}  "
+                      f"{'N/A':>8s}  {'\u2014':>5s}")
+                continue
+
+            l2_str = _format_l2_with_pct(l2_last)
+            amplif_str = f"{_amplification(data.l2_relative):.1f}x"
+
+            fit = fit_cache.get((test_dir, ftype, comp))
+            if fit is not None:
+                alpha_str = f"{fit.alpha:.2f}"
+                r_sq_str = f"{fit.r_squared:.2f}"
+                if fit.knee_cycle is not None:
+                    knee_str = f"{fit.knee_cycle:.0f}"
+                    alpha_str = (f"{fit.alpha_early:.1f}/"
+                                 f"{fit.alpha_late:.1f}")
+                    r_sq_str = f"{fit.r_squared_piecewise:.2f}"
+                else:
+                    knee_str = "\u2014"
+            else:
+                alpha_str = "N/A"
+                r_sq_str = "N/A"
+                knee_str = "\u2014"
+
+            print(f"  {test_lab:<26s} {field_name:>5s}  "
+                  f"{l2_str:>18s}  {alpha_str:>6s}  {r_sq_str:>5s}  "
+                  f"{amplif_str:>8s}  {knee_str:>5s}")
+
+
+if __name__ == "__main__":
+    main()

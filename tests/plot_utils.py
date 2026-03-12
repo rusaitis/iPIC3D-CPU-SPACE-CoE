@@ -3,7 +3,7 @@
 plot_utils.py — Shared utilities for iPIC3D test plotting scripts.
 
 Consolidates HDF5 I/O, cycle discovery, and dataclasses used by
-plot_l2_timeseries.py and plot_petsc_visual_comparison.py.
+plot_l2_timeseries.py and plot_field_comparison.py.
 """
 
 import dataclasses

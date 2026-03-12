@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-plot_results_common.py — Shared CSV loading, data structures, and rendering
+plot_timing_common.py — Shared CSV loading, data structures, and rendering
 helpers for iPIC3D solver comparison plots (plot_single_grid / plot_scaling).
 """
 
