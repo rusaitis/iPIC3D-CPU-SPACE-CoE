@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-plot_petsc_test_results.py — Generate scaling plots from a scaling_results.csv file.
+plot_petsc_test_results.py — Generate scaling plots from a results.csv file.
 
 Usage:
-    python3 plot_petsc_test_results.py [path/to/scaling_results.csv] [--loglog] [--ref-slope N] [--sort]
+    python3 plot_petsc_test_results.py [path/to/results.csv] [--loglog] [--ref-slope N] [--sort]
 
-The CSV path defaults to scaling_results.csv next to this script.
+The CSV path defaults to results.csv next to this script.
 The output PNG is written alongside the CSV with the same base name.
 
 All configuration (solver labels, np, cycles, nzc, breakdown data) is read
@@ -31,44 +31,29 @@ try:
 except ImportError:
     print("  WARNING: matplotlib not installed, skipping plot generation.")
     print("  Install with: pip3 install matplotlib")
-    raise SystemExit(0)
+    raise SystemExit(2)
 
 # ── CLI args ───────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('csv', nargs='?', default=None, metavar='CSV_FILE',
-                    help='Path to CSV (default: scaling_results.csv next to this script)')
+                    help='Path to CSV (default: results.csv next to this script)')
 parser.add_argument('--loglog', action='store_true',
                     help='Use log-log axes for the time plot (default: linear)')
 parser.add_argument('--ref-slope', type=float, default=None, metavar='N',
                     help='Show reference slope N^exp (e.g. --ref-slope 2)')
 parser.add_argument('--sort', action='store_true',
                     help='Group improvement bars by solver (sorted by avg improvement)')
-parser.add_argument('--profile-smooth', type=int, default=None, metavar='N',
-                    help='Smooth profile plot by averaging over N cycles')
+parser.add_argument('--profile-smooth', type=int, default=5, metavar='N',
+                    help='Smooth profile plot with rolling average over N cycles (0 to disable)')
+
+from plot_theme import (add_theme_arg, apply_theme, get_solver_style,
+                        COMPONENT_COLORS, PROFILE_LINESTYLES)
+from plot_utils import parse_conserved_quantities
+add_theme_arg(parser)
+
 args = parser.parse_args()
-
-# ── Modern styling ────────────────────────────────────────────────────────
-try:
-    plt.style.use('seaborn-v0_8-whitegrid')
-except OSError:
-    try:
-        plt.style.use('seaborn-whitegrid')
-    except OSError:
-        pass
-
-plt.rcParams.update({
-    'font.family': 'sans-serif',
-    'font.size': 11,
-    'axes.titlesize': 14,
-    'axes.titleweight': 'bold',
-    'axes.labelsize': 12,
-    'axes.linewidth': 0.8,
-    'grid.alpha': 0.25,
-    'legend.framealpha': 0.9,
-    'legend.edgecolor': '#cccccc',
-    'axes.facecolor': '#fafafa',
-})
+theme = apply_theme(args)
 
 # ── I/O paths ──────────────────────────────────────────────────────────────
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -78,7 +63,7 @@ if args.csv is not None:
 elif "CSV_FILE" in os.environ:
     csv_path = os.environ["CSV_FILE"]
 else:
-    csv_path = os.path.join(script_dir, "scaling_results.csv")
+    csv_path = os.path.join(script_dir, "results.csv")
 
 if "PLOT_FILE" in os.environ:
     plot_path = os.environ["PLOT_FILE"]
@@ -124,7 +109,11 @@ else:
     gmres_label = solver_labels[0] if solver_labels else "GMRES"
     with open(csv_path, newline='') as f:
         for row in csv.DictReader(f):
-            bd_grids.append(int(row['grid_size']))
+            gs = row['grid_size']
+            try:
+                bd_grids.append(int(gs))
+            except ValueError:
+                bd_grids.append(len(bd_grids))
             f_val = row.get(gmres_label,      'NA')
             m_val = row.get('gmres_moments_s', 'NA')
             p_val = row.get('gmres_mover_s',   'NA')
@@ -157,16 +146,14 @@ with open(csv_path, newline='') as f:
 # Detect single-row mode (single-grid comparison)
 single_row = len(grids) == 1
 
-# ── Styles ─────────────────────────────────────────────────────────────────
-styles = {
-    "GMRES":        {"color": "#4477AA", "marker": "o", "ls": "-"},
-    "PETSc":        {"color": "#EE6677", "marker": "s", "ls": "-"},
-    "PETSc_gmres":  {"color": "#EE6677", "marker": "s", "ls": "-"},
-    "PETSc_bcgs":   {"color": "#228833", "marker": "^", "ls": "--"},
-    "PETSc_fgmres": {"color": "#AA3377", "marker": "D", "ls": "-."},
-    "PETSc_tfqmr":  {"color": "#CCBB44", "marker": "v", "ls": ":"},
-}
-default_style = {"color": "#607D8B", "marker": "x", "ls": ":"}
+def _style(label: str) -> dict:
+    return get_solver_style(label)
+
+def darken_color(color, factor=0.45):
+    """Return a much darker version of a matplotlib color."""
+    import matplotlib.colors as mcolors
+    r, g, b = mcolors.to_rgb(color)
+    return (r * factor, g * factor, b * factor)
 
 # ── Time unit ──────────────────────────────────────────────────────────────
 all_times = [t for tlist in solver_times.values() for t in tlist if t is not None]
@@ -181,7 +168,7 @@ else:
 profile_dir = os.environ.get("PROFILE_DIR", os.path.dirname(csv_path))
 profile_files_all = sorted(glob.glob(os.path.join(profile_dir, "profile_*.csv")))
 
-def parse_grid(path):
+def parse_grid(path: str) -> int:
     """Extract grid N from filename like profile_GMRES_100x100x1.csv -> 100."""
     base = os.path.splitext(os.path.basename(path))[0]
     grid_part = base.rsplit('_', 1)[-1]
@@ -198,28 +185,59 @@ else:
     profile_files = []
     max_grid = 0
 
+# ── Energy data discovery ──────────────────────────────────────────────────
+# Map profile files to run directories (profile_SOLVER_GRID.csv → SOLVER_GRID/)
+energy_data = {}   # label → dict from parse_conserved_quantities
+profile_labels = []  # ordered solver labels matching profile_files
+
+for pf in profile_files:
+    base = os.path.splitext(os.path.basename(pf))[0]
+    parts = base[len("profile_"):]
+    label = re.sub(r'_\d+x\d+x\d+$', '', parts)
+    grid_suffix = re.search(r'_(\d+x\d+x\d+)$', parts)
+    run_dir_name = f"{label}_{grid_suffix.group(1)}" if grid_suffix else parts
+    run_dir = os.path.join(os.path.dirname(pf), run_dir_name)
+    profile_labels.append(label)
+    cq = parse_conserved_quantities(run_dir)
+    if cq:
+        energy_data[label] = cq
+
+has_energy = single_row and bool(energy_data)
+
 # ── Layout ─────────────────────────────────────────────────────────────────
 has_breakdown = bool(bd_grids) and any(m is not None for m in bd_moments)
 has_profile = single_row and bool(profile_files)
 has_bottom = has_breakdown or has_profile
 
-fig = plt.figure(figsize=(15, 10 if has_bottom else 6))
-gs  = GridSpec(2 if has_bottom else 1, 2, figure=fig,
+n_rows = 1
+height_ratios = [3]
+if has_bottom:
+    n_rows = 2
+    height_ratios = [3, 2]
+if has_energy:
+    n_rows = 3
+    height_ratios = [3, 2, 2]
+
+fig_height = {1: 6, 2: 10, 3: 14}[n_rows]
+fig = plt.figure(figsize=(15, fig_height))
+gs  = GridSpec(n_rows, 2, figure=fig,
+               height_ratios=height_ratios,
                hspace=0.45, wspace=0.35,
-               top=0.90, bottom=0.10, left=0.07, right=0.97)
+               top=0.93, bottom=0.06, left=0.07, right=0.97)
 ax1 = fig.add_subplot(gs[0, 0])
 ax2 = fig.add_subplot(gs[0, 1])
 
 date_str = datetime.now().strftime("%Y-%m-%d")
+suptitle_y = 0.98 if n_rows >= 3 else 0.97
 if single_row:
     fig.suptitle(
         f'iPIC3D Solver Comparison  —  {grid_strings[0]}  ·  {np_} procs · {cycles} cycles · {date_str}',
-        fontsize=12, color='#444444', y=0.97
+        fontsize=12, color=theme.text_secondary, y=suptitle_y
     )
 else:
     fig.suptitle(
         f'iPIC3D Field Solver Scaling  —  {np_} procs · {cycles} cycles · {date_str}',
-        fontsize=12, color='#444444', y=0.97
+        fontsize=12, color=theme.text_secondary, y=suptitle_y
     )
 
 grid_label   = f'Grid size (N × N × {nzc})' if nzc > 1 else 'Grid size (N × N)'
@@ -245,21 +263,22 @@ if single_row:
         e = solver_stds[label][0]
         bar_vals.append(t * scale if t is not None else 0)
         bar_errs.append(e * scale if e is not None else 0)
-        s = styles.get(label, default_style)
+        s = _style(label)
         bar_colors.append(s["color"])
 
     bars = ax1.bar(bar_x, bar_vals, color=bar_colors, alpha=0.85,
-                   edgecolor='white', linewidth=0.5,
+                   edgecolor=theme.bar_edge, linewidth=0.5,
                    yerr=bar_errs if any(e > 0 for e in bar_errs) else None,
                    capsize=5)
-    for bar, val in zip(bars, bar_vals):
+    for bar, val, col in zip(bars, bar_vals, bar_colors):
         if val > 0:
-            ax1.text(bar.get_x() + bar.get_width()/2, val + max(bar_vals) * 0.02,
-                     f'{val:.3f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+            ax1.text(bar.get_x() + bar.get_width()/2, val / 2,
+                     f'{val:.1f}', ha='center', va='center',
+                     fontsize=20, fontweight='heavy', color=darken_color(col))
 
     ax1.set_xticks(bar_x)
     ax1.set_xticklabels(solver_labels, fontsize=10)
-    ax1.set_ylabel(f'Field solver time ({unit})', fontsize=12)
+    ax1.set_ylabel(f'Field solver time ({unit})', fontsize=14)
     ax1.set_title(f'Field Solver Time  ({grid_strings[0]})', fontsize=13, fontweight='bold')
     ax1.grid(True, axis='y', alpha=0.3)
     ax1.spines['top'].set_visible(False)
@@ -273,18 +292,18 @@ else:
         valid = [(g, t, e) for g, t, e in zip(grids, times, stds) if t is not None]
         if not valid:
             continue
-        vg, vt_raw, vstd_raw = zip(*valid)
-        vt = [t * scale for t in vt_raw]
-        s  = styles.get(label, default_style)
-        ax1.plot(vg, vt, marker=s["marker"], linestyle=s["ls"], color=s["color"],
-                 linewidth=2, markersize=7, label=label, markeredgecolor='white',
+        grid_vals, time_vals_raw, std_vals_raw = zip(*valid)
+        vt = [t * scale for t in time_vals_raw]
+        s  = _style(label)
+        ax1.plot(grid_vals, vt, marker=s["marker"], linestyle=s["ls"], color=s["color"],
+                 linewidth=2, markersize=7, label=label, markeredgecolor=theme.marker_edge,
                  markeredgewidth=0.8)
-        has_errs = any(e is not None for e in vstd_raw)
+        has_errs = any(e is not None for e in std_vals_raw)
         if has_errs:
-            ve = [e * scale if e is not None else 0 for e in vstd_raw]
+            ve = [e * scale if e is not None else 0 for e in std_vals_raw]
             lo = [t - e for t, e in zip(vt, ve)]
             hi = [t + e for t, e in zip(vt, ve)]
-            ax1.fill_between(vg, lo, hi, color=s["color"], alpha=0.12)
+            ax1.fill_between(grid_vals, lo, hi, color=s["color"], alpha=0.12)
 
     # Optional reference slope (--ref-slope N)
     if args.ref_slope is not None:
@@ -296,11 +315,11 @@ else:
             y_mid  = math.exp(sum(math.log(t) for t in all_positive) / len(all_positive)) * 0.3
             C      = y_mid / x_mid ** exp
             ax1.plot([x0, x1], [C * x0 ** exp, C * x1 ** exp],
-                     color='#999999', linestyle=':', linewidth=1.5, alpha=0.5,
+                     color=theme.refline_color, linestyle=':', linewidth=1.5, alpha=0.5,
                      label=f'$\\propto N^{{{exp:g}}}$')
 
     ax1.set_xlabel(grid_label, fontsize=12)
-    ax1.set_ylabel(f'Field solver time ({unit})', fontsize=12)
+    ax1.set_ylabel(f'Field solver time ({unit})', fontsize=14)
     ax1.set_title('Field Solver Time vs Grid Size', fontsize=13, fontweight='bold')
     if args.loglog:
         ax1.set_xscale('log')
@@ -345,20 +364,19 @@ if gmres_times and petsc_labels:
 
         for gi, label in enumerate(sorted_labels):
             pcts        = solver_pcts[label]
-            s           = styles.get(label, default_style)
+            s           = _style(label)
             group_start = gi * (n_runs + group_gap)
             x_bars      = [group_start + i for i in range(n_runs)]
 
             bars = ax2.bar(x_bars, pcts, width=bar_width, color=s["color"],
                            alpha=0.8, edgecolor='white', linewidth=0.5)
-            # Percentage labels on bars
+            # Percentage labels centered in bars
             for bar, pct in zip(bars, pcts):
                 if abs(pct) > 0.5:
-                    y  = pct + (0.4 if pct >= 0 else -0.4)
-                    va = 'bottom' if pct >= 0 else 'top'
-                    ax2.text(bar.get_x() + bar.get_width()/2, y,
-                             f'{pct:.0f}%', ha='center', va=va,
-                             fontsize=9, fontweight='bold')
+                    ax2.text(bar.get_x() + bar.get_width()/2, pct / 2,
+                             f'{pct:.0f}%', ha='center', va='center',
+                             fontsize=20, fontweight='heavy',
+                             color=darken_color(s["color"]))
 
         # Major ticks: solver names centered under each group
         group_centers = [gi * (n_runs + group_gap) + (n_runs - 1) / 2
@@ -377,11 +395,11 @@ if gmres_times and petsc_labels:
                 all_bar_labels.append(str(i + 1))
         ax2.set_xticks(all_bar_x, minor=True)
         ax2.set_xticklabels(all_bar_labels, minor=True, fontsize=7,
-                            color='#666666')
+                            color=theme.text_secondary)
         ax2.tick_params(axis='x', which='minor', length=0, pad=2)
 
-        ax2.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.5)
-        ax2.set_ylabel('Improvement vs GMRES (%)', fontsize=12)
+        ax2.axhline(y=0, color=theme.zero_line_color, linestyle='--', linewidth=1, alpha=0.5)
+        ax2.set_ylabel('Improvement vs GMRES (%)', fontsize=14)
         ax2.set_title('PETSc Improvement vs Built-in GMRES  (by solver)',
                       fontsize=13, fontweight='bold')
         ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}%'))
@@ -396,46 +414,47 @@ if gmres_times and petsc_labels:
 
         for j, label in enumerate(petsc_labels):
             pcts    = solver_pcts[label]
-            s       = styles.get(label, default_style)
+            s       = _style(label)
             offsets = [x + (j - len(petsc_labels)/2 + 0.5) * bar_width
                        for x in x_positions]
             bars    = ax2.bar(offsets, pcts, width=bar_width, color=s["color"],
-                              alpha=0.8, edgecolor='white', linewidth=0.5,
+                              alpha=0.8, edgecolor=theme.bar_edge, linewidth=0.5,
                               label=label)
             for bar, pct in zip(bars, pcts):
                 if abs(pct) > 0.5:
-                    y  = pct + (0.3 if pct >= 0 else -0.3)
-                    va = 'bottom' if pct >= 0 else 'top'
-                    ax2.text(bar.get_x() + bar.get_width()/2, y,
-                             f'{pct:.0f}%', ha='center', va=va,
-                             fontsize=7, fontweight='bold')
+                    ax2.text(bar.get_x() + bar.get_width()/2, pct / 2,
+                             f'{pct:.0f}%', ha='center', va='center',
+                             fontsize=20, fontweight='heavy',
+                             color=darken_color(s["color"]))
 
-        ax2.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+        ax2.axhline(y=0, color=theme.zero_line_color, linestyle='--', linewidth=1, alpha=0.5)
         ax2.set_xlabel(grid_label, fontsize=12)
-        ax2.set_ylabel('Improvement vs GMRES (%)', fontsize=12)
+        ax2.set_ylabel('Improvement vs GMRES (%)', fontsize=14)
         ax2.set_title('PETSc Improvement vs Built-in GMRES',
                       fontsize=13, fontweight='bold')
         ax2.set_xticks(x_positions)
         ax2.set_xticklabels(tick_labels, fontsize=9)
         ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}%'))
-        ax2.legend(fontsize=9)
+        ax2.legend(fontsize=12)
         ax2.grid(True, axis='y', alpha=0.3)
         ax2.spines['top'].set_visible(False)
         ax2.spines['right'].set_visible(False)
 
-# ── Bottom panel ──────────────────────────────────────────────────────────
+# ── Bottom panels ─────────────────────────────────────────────────────────
 ax3 = None
+profile_iterations = {}  # label → (cycles_list, iters_list)
 
 if has_profile:
     # ── Per-cycle timing profile from profile CSVs ─────────────────────
     ax3 = fig.add_subplot(gs[1, :])
 
+    comp_colors = COMPONENT_COLORS[theme.mode]
     component_styles = [
-        ('field_solver_s',     'Field solver',     '#4477AA'),
-        ('particle_mover_s',   'Particle mover',   '#EE6677'),
-        ('moment_gatherer_s',  'Moment gatherer',  '#228833'),
+        ('field_solver_s',     'Field solver',     comp_colors['field']),
+        ('particle_mover_s',   'Particle mover',   comp_colors['mover']),
+        ('moment_gatherer_s',  'Moment gatherer',  comp_colors['moments']),
     ]
-    solver_linestyles = ['-', '--', '-.', ':']
+    solver_linestyles = PROFILE_LINESTYLES
 
     for si, pf in enumerate(profile_files):
         base = os.path.splitext(os.path.basename(pf))[0]
@@ -454,6 +473,18 @@ if has_profile:
 
         cycles_col = [int(r['cycle']) for r in rows]
 
+        # Collect per-cycle iteration counts if available
+        if 'iterations' in rows[0] and any(r.get('iterations', '') for r in rows):
+            iter_cycles = []
+            iter_vals = []
+            for r in rows:
+                v = r.get('iterations', '')
+                if v:
+                    iter_cycles.append(int(r['cycle']))
+                    iter_vals.append(int(v))
+            if iter_vals:
+                profile_iterations[label] = (iter_cycles, iter_vals)
+
         for col, comp_name, color in component_styles:
             if col not in rows[0]:
                 continue
@@ -461,23 +492,32 @@ if has_profile:
             plot_cycles, plot_vals = cycles_col, vals
             if args.profile_smooth and args.profile_smooth > 1:
                 n = args.profile_smooth
-                plot_cycles, plot_vals = [], []
-                for i in range(0, len(vals), n):
-                    plot_vals.append(sum(vals[i:i+n]) / len(vals[i:i+n]))
-                    plot_cycles.append(sum(cycles_col[i:i+n]) / len(cycles_col[i:i+n]))
+                half = n // 2
+                # Faint raw data behind smoothed line
+                ax3.plot(cycles_col, vals, color=color, linestyle=ls,
+                         linewidth=0.5, alpha=0.3)
+                # Centered rolling average (window shrinks at edges)
+                plot_vals = [
+                    sum(vals[max(0, i - half):i + half + 1])
+                    / len(vals[max(0, i - half):i + half + 1])
+                    for i in range(len(vals))
+                ]
             ax3.plot(plot_cycles, plot_vals, color=color, linestyle=ls,
                      linewidth=1.5, alpha=0.85,
                      label=f'{label} \u2014 {comp_name}')
 
     ax3.set_xlabel('Cycle', fontsize=12)
-    ax3.set_ylabel('Time per cycle (s)', fontsize=12)
+    ax3.set_ylabel('Time per cycle (s)', fontsize=14)
     grid_tag = f'{max_grid}\u00d7{max_grid}' if profile_files else ''
     ax3.set_title(f'Per-Cycle Timing Profile  ({grid_tag} grid)',
                   fontsize=13, fontweight='bold')
-    ax3.legend(fontsize=8, ncol=2, loc='upper right')
+    ax3.legend(fontsize=10, ncol=2, loc='upper left')
     ax3.grid(True, alpha=0.3)
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
+    # Tight x-axis: no padding beyond first/last cycle
+    if plot_cycles:
+        ax3.set_xlim(plot_cycles[0], plot_cycles[-1])
 
 elif has_breakdown:
     # ── Component time breakdown (PROFILING build only) ────────────────
@@ -498,20 +538,21 @@ elif has_breakdown:
     bottom_f = fracs_moments
     bottom_p = [m + f for m, f in zip(fracs_moments, fracs_field)]
 
+    comp_colors = COMPONENT_COLORS[theme.mode]
     ax3.bar(x_pos, fracs_moments, bar_w, label='Moments (CalculateMoments)',
-            color='#228833', alpha=0.85, edgecolor='white')
+            color=comp_colors['moments'], alpha=0.85, edgecolor=theme.bar_edge)
     ax3.bar(x_pos, fracs_field,   bar_w, bottom=bottom_f,
             label='Field solver (FieldSolver)',
-            color='#4477AA', alpha=0.85, edgecolor='white')
+            color=comp_colors['field'], alpha=0.85, edgecolor=theme.bar_edge)
     ax3.bar(x_pos, fracs_mover,   bar_w, bottom=bottom_p,
             label='Particle mover (ParticlesMover)',
-            color='#EE6677', alpha=0.85, edgecolor='white')
-    ax3.plot(x_pos, fracs_field, 'o--', color='#004488',
+            color=comp_colors['mover'], alpha=0.85, edgecolor=theme.bar_edge)
+    ax3.plot(x_pos, fracs_field, 'o--', color=comp_colors['field_overlay'],
              linewidth=1.5, markersize=5, zorder=5, label='Field solver fraction')
 
     bd_tick_labels = [f'{g}\u00d7{nzc}' if nzc > 1 else str(g) for g in bd_grids]
     ax3.set_xlabel(grid_label, fontsize=12)
-    ax3.set_ylabel('Fraction of component time', fontsize=12)
+    ax3.set_ylabel('Fraction of component time', fontsize=14)
     ax3.set_title('Time Breakdown by Component  (GMRES baseline)',
                   fontsize=13, fontweight='bold')
     ax3.set_xticks(x_pos)
@@ -523,6 +564,60 @@ elif has_breakdown:
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
 
+# ── Energy drift + iterations panel ───────────────────────────────────────
+ax4 = None
+
+if has_energy:
+    ax4 = fig.add_subplot(gs[2, :], sharex=ax3)
+
+    # Left y-axis: ΔE/E₀ (%) for each solver
+    has_delta = any('delta_energy' in cq for cq in energy_data.values())
+    if has_delta:
+        for label, cq in energy_data.items():
+            if 'delta_energy' not in cq:
+                continue
+            e0 = cq['total_energy'][0]
+            delta_pct = [d / e0 * 100 for d in cq['delta_energy']]
+            s = _style(label)
+            ax4.plot(cq['cycle'], delta_pct,
+                     color=s['color'], linestyle='-', linewidth=1.5,
+                     alpha=0.85, label=f'{label} ΔE/E₀')
+        ax4.set_ylabel('ΔE / E₀ (%)', fontsize=14)
+        ax4.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:.4g}%'))
+
+    # Right y-axis: iteration count per cycle (markers only)
+    if profile_iterations:
+        ax4_iters = ax4.twinx()
+        for label, (iter_cyc, iter_vals) in profile_iterations.items():
+            s = _style(label)
+            ax4_iters.plot(iter_cyc, iter_vals, color=s['color'],
+                           linestyle='--', linewidth=1.2,
+                           alpha=0.4, label=f'{label} iters')
+        ax4_iters.set_ylabel('Iterations per solve', fontsize=12)
+        ax4_iters.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax4_iters.spines['top'].set_visible(False)
+
+    ax4.set_xlabel('Cycle', fontsize=12)
+    grid_tag = f'{max_grid}\u00d7{max_grid}' if profile_files else ''
+    ax4.set_title(r'Energy Drift ($\Delta E / E_0$) & Iterations' + f'  ({grid_tag} grid)',
+                  fontsize=13, fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.spines['top'].set_visible(False)
+    ax4.spines['right'].set_visible(False)
+    # Tight x-axis: no padding beyond first/last cycle
+    for cq in energy_data.values():
+        if cq.get('cycle'):
+            ax4.set_xlim(cq['cycle'][0], cq['cycle'][-1])
+            break
+
+    # Combined legend
+    handles, labels_leg = ax4.get_legend_handles_labels()
+    if profile_iterations:
+        h2, l2 = ax4_iters.get_legend_handles_labels()
+        handles += h2
+        labels_leg += l2
+    ax4.legend(handles, labels_leg, fontsize=10, ncol=2, loc='upper left')
+
 # ── Summary annotation ────────────────────────────────────────────────────
 if args.sort and avg_improvements:
     grid_dim = f'N × N × {nzc}' if nzc > 1 else 'N × N'
@@ -530,22 +625,23 @@ if args.sort and avg_improvements:
         f'{i+1} = {tick_labels[i]}' for i in range(len(grids)))
     ax2.text(0.5, -0.12, run_legend, ha='center', va='top',
              transform=ax2.transAxes, fontsize=9, fontfamily='monospace',
-             bbox=dict(boxstyle='round,pad=0.3', facecolor='#f8f8f8',
-                       edgecolor='#cccccc', alpha=0.9))
+             bbox=dict(boxstyle='round,pad=0.3', facecolor=theme.box_face,
+                       edgecolor=theme.box_edge, alpha=theme.box_alpha))
 
 if avg_improvements:
     # Sort by descending average improvement
     sorted_avg = sorted(avg_improvements.items(), key=lambda x: x[1], reverse=True)
-    # Build colored summary using fig.text for the label, then ax.annotate per solver
     import matplotlib.transforms as mtransforms
-    summary_y = -0.05
-    fig.text(0.5, summary_y, '', ha='center', va='top')  # anchor point
-    # Use a single-line approach with colored text segments via fig.transFigure
-    from matplotlib.offsetbox import AnchoredText, HPacker, TextArea
-    text_areas = [TextArea('Avg improvement:  ', textprops=dict(
-        fontsize=11, fontfamily='monospace', fontweight='bold', color='#333333'))]
+    # Place between row 0 and row 1 (in figure coordinates)
+    row_bottoms, row_tops, _, _ = gs.get_grid_positions(fig)
+    row0_bottom = row_bottoms[0]  # bottom of top row
+    row1_top = row_tops[1] if n_rows > 1 else row0_bottom - 0.05
+    summary_y = 0.5 * (row0_bottom + row1_top) + 0.015
+    from matplotlib.offsetbox import HPacker, TextArea
+    text_areas = [TextArea('Average improvement:  ', textprops=dict(
+        fontsize=11, fontfamily='monospace', fontweight='bold', color=theme.text_color))]
     for i, (lbl, avg) in enumerate(sorted_avg):
-        s = styles.get(lbl, default_style)
+        s = _style(lbl)
         sep = '    ' if i < len(sorted_avg) - 1 else ''
         text_areas.append(TextArea(f'{lbl}: {avg:+.1f}%{sep}', textprops=dict(
             fontsize=11, fontfamily='monospace', fontweight='bold', color=s["color"])))
@@ -556,9 +652,9 @@ if avg_improvements:
         pad=0.4, borderpad=0.4,
         prop=dict(size=11))
     ab.patch.set_boxstyle('round,pad=0.4')
-    ab.patch.set_facecolor('#f0f0f0')
-    ab.patch.set_edgecolor('#cccccc')
-    ab.patch.set_alpha(0.9)
+    ab.patch.set_facecolor(theme.box_face)
+    ab.patch.set_edgecolor(theme.box_edge)
+    ab.patch.set_alpha(theme.box_alpha)
     fig.add_artist(ab)
 
 # ── Save ───────────────────────────────────────────────────────────────────
@@ -568,7 +664,7 @@ if not single_row:
     ax1.xaxis.set_major_formatter(x_fmt)
     if args.loglog:
         ax1.yaxis.set_major_formatter(plain_fmt)
-axes_to_rotate = [ax1, ax2] + ([ax3] if ax3 is not None else [])
+axes_to_rotate = [ax1, ax2] + ([ax3] if ax3 is not None else []) + ([ax4] if ax4 is not None else [])
 if tick_rotation:
     for ax in axes_to_rotate:
         for lbl in ax.get_xticklabels():
