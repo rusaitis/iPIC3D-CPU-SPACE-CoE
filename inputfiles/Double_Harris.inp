@@ -63,8 +63,8 @@ ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS              #
 nparam                         = 2
 custom_parameters              = 0.4        0.25
 
-#* custom_parameter 1 --> Amplitude of initial perturbation
-#* custom_parameter 2 --> Half-thickness of current sheet
+#* custom_parameter 1 --> Amplitude of initial perturbation (0.4 × B0; GEM standard is 0.1)
+#* custom_parameter 2 --> Half-thickness of current sheet (δ = 0.25 d_i ≈ 0.83 cells at 100×100)
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                         ELECTRIC and MAGNETIC FIELD                        %
@@ -77,10 +77,21 @@ B0z                            = 0.0                                            
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                     TIME                                   %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+#
+# Timescale reference (B0x = 0.097 ≈ v_A; all times in ω_pi⁻¹):
+#   Ion cyclotron period T_ci ≈ 65       Alfvén transit (box) L/v_A ≈ 309
+#   Current sheet transit δ/v_A ≈ 2.6    Tearing e-fold ≈ 20–100
+#
+#   Phase                    Time         Cycles   What to expect
+#   Initial transient        0–25         0–200    Perturbation adjustment
+#   X-point formation        50–100       400–800  Reconnected flux, outflow jets
+#   Peak reconnection        100–250      800–2000 Dramatic island growth
+#   Saturation / merging     300–600      2400–5000 Coalescence
+#
 
 dt                             = 0.125	                                       # Time-step size
-ncycles                        = 200                                           # Number of time steps
-th                             = 0.5                                           # Decentering parameter
+ncycles                        = 2000                                          # Number of time steps (~250 ω_pi⁻¹; visible reconnection at ~100 ω_pi⁻¹)
+th                             = 0.5                                           # Decentering parameter (Crank-Nicolson for ECSIM energy conservation)
 c                              = 1.0                                           # Speed of light 
 GMREStol                       = 1E-15                                         # GMRES tolerance (must be <= 1e-15 for exact energy conservation)
 
@@ -100,7 +111,7 @@ Lx                             = 30.0                                          #
 Ly                             = 30.0                                          # Simulation box length along Y
 Lz                             = 1.0                                           # Simulation box length along Z
 
-nxc                            = 100                                            # Number of cells along X
+nxc                            = 100                                            # Number of cells along X (Δx = 0.3 d_i; for resolved δ use ≥250)
 nyc                            = 100                                            # Number of cells along Y
 nzc                            = 1                                              # Number of cells along Z
 

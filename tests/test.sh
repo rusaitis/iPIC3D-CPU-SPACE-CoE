@@ -68,6 +68,7 @@ ALL_SOLVERS=false
 NAME_TAG=""
 FIELD_OUTPUT=""
 PARTICLE_OUTPUT=""
+DIAG_OUTPUT=""
 OUTPUT_DIR=""
 WRITE_METHOD="phdf5"
 MAKE_MOVIE=false
@@ -205,6 +206,10 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "Error: --particle-output requires a non-negative integer" >&2; exit 2; }
             validate_nonneg_int "--particle-output" "$2"
             PARTICLE_OUTPUT="$2"; shift 2 ;;
+        --diag-output)
+            [[ $# -ge 2 ]] || { echo "Error: --diag-output requires a non-negative integer" >&2; exit 2; }
+            validate_nonneg_int "--diag-output" "$2"
+            DIAG_OUTPUT="$2"; shift 2 ;;
         --output-dir)
             [[ $# -ge 2 ]] || { echo "Error: --output-dir requires a path" >&2; exit 2; }
             OUTPUT_DIR="$2"; shift 2 ;;
@@ -251,6 +256,7 @@ Options:
   --name TAG           Output dir suffix: test_output_TAG/
   --field-output N     Save field data every N cycles (default: CYCLES in single-grid, off in scaling)
   --particle-output N  Save particle data every N cycles (0 = off)
+  --diag-output N      Save energy diagnostics every N cycles (default: 5)
   --movie              Generate mp4 movie of field comparison across cycles (requires ffmpeg)
   --baseline           Add a second GMRES run (baseline for floating-point comparison)
   --output-dir DIR     Override output directory (default: tests/test_output/)
@@ -334,6 +340,8 @@ fi
 if [[ "$SCALING_MODE" != true && -z "$FIELD_OUTPUT" ]]; then
     FIELD_OUTPUT="$CYCLES"
 fi
+
+DIAG_OUTPUT="${DIAG_OUTPUT:-5}"
 
 # ZLEN defaults to 1 (2D)
 ZLEN="${ZLEN:-1}"
@@ -629,7 +637,7 @@ make_input() {
         -e "s|^FieldOutputCycle.*=.*|FieldOutputCycle               = $field_out|"
         -e "s|^ParticlesOutputCycle.*=.*|ParticlesOutputCycle           = $particle_out|"
         -e "s|^RestartOutputCycle.*=.*|RestartOutputCycle             = 0|"
-        -e "s|^DiagnosticsOutputCycle.*=.*|DiagnosticsOutputCycle         = 1|"
+        -e "s|^DiagnosticsOutputCycle.*=.*|DiagnosticsOutputCycle         = $DIAG_OUTPUT|"
         -e "s|^WriteMethod.*=.*|WriteMethod                    = $WRITE_METHOD|"
     )
     sed "${sed_args[@]}" "$INPUT_FILE" > "$inp" || { echo "ERROR: Failed to create test input from $INPUT_FILE" >&2; return 1; }
@@ -1047,13 +1055,14 @@ extract_convergence() {
 # Uses globals: CONFIGS, NUM_SOLVERS, t_sweep_start, SCALING_MODE
 show_eta() {
     local t1="$1" g0="$2"
-    export _C_BOLD="$BOLD" _C_RESET="$RESET"
+    export _C_BOLD="$BOLD" _C_RESET="$RESET" _C_YELLOW="$YELLOW"
     "$PYTHON" - "$t1" "$g0" "$NUM_SOLVERS" "$t_sweep_start" "$SCALING_MODE" "${CONFIGS[*]}" <<'PYETA' || true
 import os, sys, time
 from datetime import datetime, timedelta
 
-_bold  = os.environ.get('_C_BOLD', '')
-_reset = os.environ.get('_C_RESET', '')
+_bold   = os.environ.get('_C_BOLD', '')
+_reset  = os.environ.get('_C_RESET', '')
+_yellow = os.environ.get('_C_YELLOW', '')
 
 t1        = float(sys.argv[1])
 g0        = float(sys.argv[2])
@@ -1082,7 +1091,7 @@ def fmt(s):
     return f'{s//3600}h{(s%3600)//60:02d}m'
 
 eta = datetime.now() + timedelta(seconds=remaining_est)
-print(f'  {_bold}ETA{_reset}  ~{fmt(total_est)} total  |  ~{fmt(remaining_est)} remaining  |  done by {eta:%H:%M}')
+print(f'  {_yellow}{_bold}ETA{_reset}  {_yellow}~{fmt(total_est)} total  |  ~{fmt(remaining_est)} remaining  |  done by {eta:%H:%M}{_reset}')
 PYETA
 }
 
@@ -1175,27 +1184,10 @@ done
 [[ "$VERBOSE" == false ]] && box_lines+=("  Output: quiet mode")
 [[ "$DRY_RUN" == true ]] && box_lines+=("  ${YELLOW}*** DRY-RUN MODE — no simulations will be executed ***${RESET}")
 
-# Strip ANSI escape codes (handles compound codes like \033[1;31m)
-_strip_ansi() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
-
-# Compute box width: max of title and all content lines, plus 2 for padding
-BOX_W=$(( ${#box_title} + 4 ))  # title + margins
+section "$box_title"
 for line in "${box_lines[@]}"; do
-    local_plain=$(_strip_ansi "$line")
-    (( ${#local_plain} + 2 > BOX_W )) && BOX_W=$(( ${#local_plain} + 2 ))
+    echo "   ${line#  }"
 done
-
-printf -v box_border '%*s' "$BOX_W" ''; box_border=${box_border// /-}
-box_pad=$(( (BOX_W - ${#box_title}) / 2 ))
-echo "+${box_border}+"
-printf "|%*s${BOLD}%-*s${RESET}|\n" $box_pad "" $((BOX_W - box_pad)) "$box_title"
-echo "+${box_border}+"
-for line in "${box_lines[@]}"; do
-    local_plain=$(_strip_ansi "$line")
-    local_pad=$(( BOX_W - ${#local_plain} ))
-    printf "|%s%*s|\n" "$line" "$local_pad" ""
-done
-echo "+${box_border}+"
 echo ""
 
 # ========================= Section 10: Main loop ==========================
@@ -1788,7 +1780,7 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
         if [[ "$MAKE_MOVIE" == true ]]; then
             if command -v ffmpeg &>/dev/null; then
                 echo "  ${ARROW} Generating movie ${DOT} ${v_config_tag}"
-                bash "$SCRIPT_DIR/make_petsc_movie.sh" \
+                bash "$SCRIPT_DIR/make_movie.sh" \
                     --ref "$ref_dir" "${test_args[@]}" || \
                     echo "  ${YELLOW}WARNING:${RESET} Movie generation failed for ${v_config_tag}."
             else

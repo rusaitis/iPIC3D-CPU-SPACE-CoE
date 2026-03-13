@@ -238,6 +238,11 @@ def load_results_csv(csv_path):
 
 # ── Rendering utilities ──────────────────────────────────────────────────
 
+def bar_label_fontsize(n_bars: int) -> int:
+    """Scale bar-label font size down when bars are crowded."""
+    return max(8, min(20, 60 // max(n_bars, 1)))
+
+
 def darken_color(color, factor=0.45):
     """Return a darker version of a matplotlib color."""
     import matplotlib.colors as mcolors
@@ -307,6 +312,8 @@ def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
         n_runs    = len(grids)
         group_gap = 1.5
         bar_width = 0.95
+        n_bars    = len(sorted_labels) * len(grids)
+        label_fs  = bar_label_fontsize(n_bars)
 
         for gi, label in enumerate(sorted_labels):
             pcts        = solver_pcts[label]
@@ -320,7 +327,7 @@ def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
                 if abs(pct) > 0.5:
                     ax.text(bar.get_x() + bar.get_width()/2, pct / 2,
                             f'{pct:.0f}%', ha='center', va='center',
-                            fontsize=20, fontweight='heavy',
+                            fontsize=label_fs, fontweight='heavy',
                             color=darken_color(s["color"]))
 
         # Major ticks: solver names centered under each group
@@ -358,6 +365,8 @@ def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
         # ── Default mode: group bars by grid size ────────────────────
         x_positions = list(range(len(grids)))
         bar_width   = 0.7 / len(comparison_labels)
+        n_bars      = len(comparison_labels) * len(grids)
+        label_fs    = bar_label_fontsize(n_bars)
 
         for j, label in enumerate(comparison_labels):
             pcts    = solver_pcts[label]
@@ -371,7 +380,7 @@ def render_improvement_bars(ax, data, solver_pcts, avg_improvements,
                 if abs(pct) > 0.5:
                     ax.text(bar.get_x() + bar.get_width()/2, pct / 2,
                             f'{pct:.0f}%', ha='center', va='center',
-                            fontsize=20, fontweight='heavy',
+                            fontsize=label_fs, fontweight='heavy',
                             color=darken_color(s["color"]))
 
         ax.axhline(y=0, color=theme.zero_line_color, linestyle='--',
@@ -458,13 +467,23 @@ def apply_tick_rotation(axes, grids):
 # ── I/O path resolution ─────────────────────────────────────────────────
 
 def resolve_csv_path(args):
-    """Resolve the CSV path from CLI args or env vars."""
+    """Resolve the CSV path from CLI args or env vars.
+
+    Fallback order: CLI arg → CSV_FILE env → tests/results.csv → tests/test_output/results.csv.
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     if getattr(args, 'csv', None) is not None:
         return args.csv
     elif "CSV_FILE" in os.environ:
         return os.environ["CSV_FILE"]
-    return os.path.join(script_dir, "results.csv")
+    # Prefer results.csv next to script; fall back to test_output/
+    default = os.path.join(script_dir, "results.csv")
+    if os.path.isfile(default):
+        return default
+    alt = os.path.join(script_dir, "test_output", "results.csv")
+    if os.path.isfile(alt):
+        return alt
+    return default  # return original path so error message makes sense
 
 
 def resolve_plot_path(args, csv_path):

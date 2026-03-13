@@ -34,7 +34,7 @@ from plot_theme import (add_theme_arg, apply_theme, get_solver_style,
                         COMPONENT_COLORS, PROFILE_LINESTYLES)
 from plot_timing_common import (
     ResultsData, load_results_csv, resolve_csv_path, resolve_plot_path,
-    darken_color, auto_time_unit, compute_improvements,
+    bar_label_fontsize, darken_color, auto_time_unit, compute_improvements,
     render_improvement_bars, render_summary_annotation, apply_tick_rotation,
 )
 
@@ -90,11 +90,12 @@ def main(data, args, theme, plot_path):
                    edgecolor=theme.bar_edge, linewidth=0.5,
                    yerr=bar_errs if any(e > 0 for e in bar_errs) else None,
                    capsize=5)
+    timing_fs = bar_label_fontsize(len(data.solver_labels))
     for bar, val, col in zip(bars, bar_vals, bar_colors):
         if val > 0:
             ax1.text(bar.get_x() + bar.get_width()/2, val / 2,
                      f'{val:.1f}', ha='center', va='center',
-                     fontsize=20, fontweight='heavy', color=darken_color(col))
+                     fontsize=timing_fs, fontweight='heavy', color=darken_color(col))
 
     ax1.set_xticks(bar_x)
     ax1.set_xticklabels(data.solver_labels, fontsize=10)

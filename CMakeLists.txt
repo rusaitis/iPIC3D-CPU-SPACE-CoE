@@ -83,6 +83,13 @@ if (USE_HDF5)
         set(HDF5_USE_STATIC_LIBRARIES ON)
     endif()
 
+    # Conda-forge h5pcc hardcodes build-time compiler paths that don't exist;
+    # override with the actual C compiler so the wrapper test succeeds
+    if(DEFINED ENV{CONDA_PREFIX})
+        set(ENV{HDF5_CC} "${CMAKE_C_COMPILER}")
+        set(ENV{HDF5_CLINKER} "${CMAKE_C_COMPILER}")
+    endif()
+
     find_package(HDF5 REQUIRED COMPONENTS C HL)
 
     # Parallel-HDF5 detection (Better than relying on CMake's HDF5 discovery)

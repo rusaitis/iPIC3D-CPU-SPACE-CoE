@@ -161,6 +161,7 @@ pixi run plot-timing                 # solver timing comparison
 pixi run plot-fields                 # 2D field heatmaps with difference panels
 pixi run plot-energy                 # energy conservation
 pixi run plot-l2                     # L2 error accumulation over cycles
+pixi run movie                       # stitch comparison into mp4 (requires ffmpeg)
 ```
 
 All plotting commands accept `--light` for a light theme (default is dark). Pass extra arguments after `--`:
@@ -174,6 +175,23 @@ Or run the scripts directly:
 ```shell
 python3 tests/plot_timing.py tests/test_output/timing_results.csv
 python3 tests/plot_energy.py tests/test_output/timing_results.csv --light
+```
+
+### Movie generation
+
+Generate mp4 movies of field evolution across cycles. Requires `ffmpeg` and test data with field output (`--field-output N`).
+
+```shell
+# Via test.sh (generates movie at the end):
+pixi run test -- --cycles 50 --field-output 5 --movie
+
+# Standalone (after test data exists):
+pixi run movie
+pixi run movie -- --fields Bx,By,Ez --fps 10 --light
+
+# Explicit directories:
+bash tests/make_movie.sh --ref tests/test_output/GMRES_20x20x1 \
+    --test tests/test_output/PETSc_gmres_20x20x1
 ```
 
 ## Python postprocessing

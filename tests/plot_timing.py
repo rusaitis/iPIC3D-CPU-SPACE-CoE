@@ -17,6 +17,7 @@ for backward compatibility when called from the test script.
 """
 
 import argparse
+import os
 import sys
 
 try:
@@ -55,6 +56,19 @@ def main(argv=None):
     theme = apply_theme(args)
 
     csv_path = resolve_csv_path(args)
+
+    # Auto-aggregate profile CSVs if results.csv doesn't exist yet
+    if not os.path.isfile(csv_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        output_dir = os.path.join(script_dir, "test_output")
+        if os.path.isdir(output_dir):
+            from plot_utils import aggregate_profiles_to_csv
+            try:
+                csv_path = aggregate_profiles_to_csv(output_dir)
+                print(f"  Auto-aggregated profiles → {csv_path}")
+            except FileNotFoundError:
+                pass  # no profiles either — let load_results_csv report the error
+
     plot_path = resolve_plot_path(args, csv_path)
     data = load_results_csv(csv_path)
 

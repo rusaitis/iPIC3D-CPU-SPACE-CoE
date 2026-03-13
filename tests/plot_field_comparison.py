@@ -21,7 +21,8 @@ import re
 import sys
 
 from plot_utils import (require_imports, discover_cycles, solver_label,
-                        load_field, find_common_cycles, parse_field_specs)
+                        load_field, find_common_cycles, parse_field_specs,
+                        discover_run_groups)
 
 require_imports("numpy", "matplotlib", "h5py")
 
@@ -262,6 +263,9 @@ def main(argv=None):
                         help='Print vmax bounds for all fields and exit (no plot)')
     parser.add_argument('--output-dir', default=None,
                         help='Directory for output PNGs (default: next to reference directory)')
+    parser.add_argument('--dir', default=None,
+                        help='Output directory to auto-discover run dirs from '
+                             '(default: tests/test_output)')
     add_theme_arg(parser)
 
     args = parser.parse_args(argv)
@@ -298,68 +302,24 @@ def main(argv=None):
         fixed_vmax[("E", "z", "pct_diff")] = args.vmax_Ez_pct
 
     # ── Auto-discovery ────────────────────────────────────────────────────
-    output_dir = os.path.join(script_dir, "test_output")
+    output_dir = args.dir or os.path.join(script_dir, "test_output")
 
-    if args.ref is None:
-        # Read ref_solver.txt if present, otherwise pick the first solver dir
-        ref_prefix = None
-        ref_solver_file = os.path.join(output_dir, "ref_solver.txt")
-        if os.path.isfile(ref_solver_file):
-            with open(ref_solver_file) as f:
-                ref_prefix = f.read().strip()
-
-        if ref_prefix:
-            candidates = sorted(glob.glob(
-                os.path.join(output_dir, f"{ref_prefix}_*")))
-        else:
-            candidates = sorted(glob.glob(os.path.join(output_dir, "GMRES_*")))
-        candidates = [c for c in candidates if os.path.isdir(c)]
-        if not candidates:
-            # Fallback: pick the first solver directory alphabetically
-            all_dirs_fb = sorted(glob.glob(os.path.join(output_dir, "*")))
-            candidates = [d for d in all_dirs_fb
-                          if os.path.isdir(d)
-                          and re.search(r'_\d+x\d+', os.path.basename(d))]
-        if not candidates:
-            print("  ERROR: No reference directory found in test_output/. "
-                  "Use --ref to specify.")
-            sys.exit(1)
-        args.ref = candidates[0]
-        print(f"  Auto-discovered ref dir: {args.ref}")
-
-    if args.test is None:
-        # Discover all non-reference solver directories
-        all_dirs = sorted(glob.glob(os.path.join(output_dir, "*")))
-        candidates = [d for d in all_dirs
-                      if os.path.isdir(d) and d != args.ref
-                      and re.search(r'_\d+x\d+', os.path.basename(d))]
-        if not candidates:
-            print("  ERROR: No test directories found in test_output/. "
-                  "Use --test to specify.")
-            sys.exit(1)
-        args.test = candidates
-        solver_names = [solver_label(d) for d in args.test]
-        print(f"  Found {len(args.test)} solver(s): {', '.join(solver_names)}")
-
-    # ── Find common cycles ───────────────────────────────────────────────
-    all_dirs = [args.ref] + args.test
-    all_cycle_sets = [set(discover_cycles(d)) for d in all_dirs]
-    common_cycles = sorted(set.intersection(*all_cycle_sets))
-
-    if not common_cycles:
-        print("  ERROR: No common output cycles found across run directories.")
-        sys.exit(1)
-
-    if args.cycle == -1:
-        cycle = common_cycles[-1]
-    elif args.cycle in common_cycles:
-        cycle = args.cycle
+    if args.ref is not None or args.test is not None:
+        # Explicit --ref/--test: single group, original behavior
+        if args.ref is None or args.test is None:
+            parser.error("--ref and --test must both be specified, "
+                         "or both omitted for auto-discovery.")
+        run_groups = [('explicit', args.ref, args.test)]
     else:
-        print(f"  ERROR: Requested cycle {args.cycle} not found. "
-              f"Available common cycles: {common_cycles}")
-        sys.exit(1)
-
-    print(f"  Comparing cycle {cycle:05d}")
+        run_groups = discover_run_groups(output_dir, require_fields=True)
+        if not run_groups:
+            print("  ERROR: No run directories with field output found in "
+                  f"{output_dir}. Use --ref/--test to specify manually.")
+            sys.exit(1)
+        for tag, ref_dir, test_dirs in run_groups:
+            names = [solver_label(d) for d in test_dirs]
+            print(f"  Grid {tag}: ref={solver_label(ref_dir)}, "
+                  f"test={', '.join(names)}")
 
     # ── Fields to compare ────────────────────────────────────────────────
     fields = parse_field_specs(args.fields)
@@ -367,122 +327,153 @@ def main(argv=None):
         print("  ERROR: No valid fields specified.")
         sys.exit(1)
 
-    # ── Load data ────────────────────────────────────────────────────────
-    ref_label = solver_label(args.ref)
-    ref_data = {}
-    for ftype, comp, _ in fields:
-        ref_data[(ftype, comp)] = load_field(args.ref, cycle, ftype, comp,
-                                             z_slice=0)
+    # ── Process each grid group ──────────────────────────────────────────
+    for grid_tag, ref_dir, test_dirs in run_groups:
+        print(f"\n  ── {grid_tag} ──")
 
-    # ── Print-bounds mode ────────────────────────────────────────────────
-    if args.print_bounds:
-        bound_names = {("B", "x"): "Bx", ("E", "z"): "Ez"}
-        for ftype, comp, _ in fields:
-            name = bound_names[(ftype, comp)]
-            rdata = ref_data[(ftype, comp)]
-            peak_ref = np.max(np.abs(rdata))
-            vmax_field = peak_ref
-            vmax_diff = 0.0
-            vmax_pct = 0.0
-            for test_dir in args.test:
-                try:
-                    tdata = load_field(test_dir, cycle, ftype, comp, z_slice=0)
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"  WARNING: Could not load {ftype}{comp} from "
-                          f"{solver_label(test_dir)}: {e}")
-                    continue
-                vmax_field = max(vmax_field, np.max(np.abs(tdata)))
-                abs_diff = np.max(np.abs(tdata - rdata))
-                vmax_diff = max(vmax_diff, abs_diff)
-                if peak_ref > 0:
-                    vmax_pct = max(vmax_pct, abs_diff / peak_ref * 100.0)
-            vmax_field = max(vmax_field, 1e-30)
-            vmax_diff = max(vmax_diff, 1e-30)
-            print(f"vmax_{name}={vmax_field:.6e}")
-            print(f"vmax_{name}_diff={vmax_diff:.6e}")
-            print(f"vmax_{name}_pct={vmax_pct:.6e}")
-        sys.exit(0)
+        all_dirs = [ref_dir] + test_dirs
+        all_cycle_sets = [set(discover_cycles(d)) for d in all_dirs]
+        common_cycles = sorted(set.intersection(*all_cycle_sets))
 
-    # ── All-cycles mode: two-pass with consistent colorbars ──────────────
-    if args.all_cycles:
-        print(f"  All-cycles mode: {len(common_cycles)} cycles to process")
+        if not common_cycles:
+            print(f"  WARNING: No common output cycles for {grid_tag}, skipping.")
+            continue
 
-        # Pass 1: scan all cycles to find global peak_ref and max pct_diff per field
-        global_peak_ref = {}   # (ftype, comp) -> float
-        global_vmax_pct = {}   # (ftype, comp) -> float
-        global_vmax_field = {} # (ftype, comp) -> float
+        if args.cycle == -1:
+            cycle = common_cycles[-1]
+        elif args.cycle in common_cycles:
+            cycle = args.cycle
+        else:
+            print(f"  WARNING: Requested cycle {args.cycle} not found for "
+                  f"{grid_tag}. Available: {common_cycles}. Skipping.")
+            continue
 
-        for c in common_cycles:
-            ref_cache = {}
+        ref_label = solver_label(ref_dir)
+
+        # ── Print-bounds mode ────────────────────────────────────────────
+        if args.print_bounds:
+            print(f"  Comparing cycle {cycle:05d}")
+            ref_data = {}
             for ftype, comp, _ in fields:
-                ref_cache[(ftype, comp)] = load_field(args.ref, c, ftype, comp,
-                                                      z_slice=0)
-                peak = np.max(np.abs(ref_cache[(ftype, comp)]))
-                global_peak_ref[(ftype, comp)] = max(
-                    global_peak_ref.get((ftype, comp), 0.0), peak)
-                global_vmax_field[(ftype, comp)] = max(
-                    global_vmax_field.get((ftype, comp), 0.0), peak)
-
-            for test_dir in args.test:
-                for ftype, comp, _ in fields:
+                ref_data[(ftype, comp)] = load_field(ref_dir, cycle, ftype,
+                                                     comp, z_slice=0)
+            bound_names = {("B", "x"): "Bx", ("E", "z"): "Ez"}
+            for ftype, comp, _ in fields:
+                name = bound_names.get((ftype, comp), f"{ftype}{comp}")
+                rdata = ref_data[(ftype, comp)]
+                peak_ref = np.max(np.abs(rdata))
+                vmax_field = peak_ref
+                vmax_diff = 0.0
+                vmax_pct = 0.0
+                for test_dir in test_dirs:
                     try:
-                        tdata = load_field(test_dir, c, ftype, comp, z_slice=0)
+                        tdata = load_field(test_dir, cycle, ftype, comp,
+                                           z_slice=0)
                     except (FileNotFoundError, KeyError) as e:
-                        print(f"  WARNING: Could not load {ftype}{comp} cycle {c} "
-                              f"from {solver_label(test_dir)}: {e}")
+                        print(f"  WARNING: Could not load {ftype}{comp} from "
+                              f"{solver_label(test_dir)}: {e}")
                         continue
-                    global_vmax_field[(ftype, comp)] = max(
-                        global_vmax_field[(ftype, comp)], np.max(np.abs(tdata)))
-                    diff = tdata - ref_cache[(ftype, comp)]
-                    peak_ref = global_peak_ref[(ftype, comp)]
+                    vmax_field = max(vmax_field, np.max(np.abs(tdata)))
+                    abs_diff = np.max(np.abs(tdata - rdata))
+                    vmax_diff = max(vmax_diff, abs_diff)
                     if peak_ref > 0:
-                        max_pct = np.max(np.abs(diff)) / peak_ref * 100.0
-                        global_vmax_pct[(ftype, comp)] = max(
-                            global_vmax_pct.get((ftype, comp), 0.0), max_pct)
+                        vmax_pct = max(vmax_pct, abs_diff / peak_ref * 100.0)
+                vmax_field = max(vmax_field, 1e-30)
+                vmax_diff = max(vmax_diff, 1e-30)
+                print(f"vmax_{name}={vmax_field:.6e}")
+                print(f"vmax_{name}_diff={vmax_diff:.6e}")
+                print(f"vmax_{name}_pct={vmax_pct:.6e}")
+            continue
 
-        # Inject global bounds into fixed_vmax (CLI overrides take precedence)
-        for ftype, comp, _ in fields:
-            if (ftype, comp, "field") not in fixed_vmax:
-                fixed_vmax[(ftype, comp, "field")] = max(
-                    global_vmax_field.get((ftype, comp), 1e-30), 1e-30)
-            fixed_vmax[(ftype, comp, "peak_ref")] = max(
-                global_peak_ref.get((ftype, comp), 1e-30), 1e-30)
-            if (ftype, comp, "pct_diff") not in fixed_vmax:
-                fixed_vmax[(ftype, comp, "pct_diff")] = max(
-                    global_vmax_pct.get((ftype, comp), 1e-30), 1e-30)
-            if (ftype, comp, "diff") not in fixed_vmax:
-                # For absolute mode within all-cycles, also provide stable bounds
-                fixed_vmax[(ftype, comp, "diff")] = max(
-                    global_vmax_pct.get((ftype, comp), 0.0)
-                    * global_peak_ref.get((ftype, comp), 1e-30) / 100.0, 1e-30)
+        # ── All-cycles mode: two-pass with consistent colorbars ──────────
+        grid_fixed = dict(fixed_vmax)  # copy so per-grid bounds don't leak
 
-        print("  Global bounds (pass 1):")
-        bound_names = {("B", "x"): "Bx", ("E", "z"): "Ez"}
-        for ftype, comp, _ in fields:
-            name = bound_names[(ftype, comp)]
-            print(f"    {name}: peak_ref={fixed_vmax[(ftype, comp, 'peak_ref')]:.6e}  "
-                  f"vmax_pct={fixed_vmax[(ftype, comp, 'pct_diff')]:.6e}%")
+        if args.all_cycles:
+            print(f"  All-cycles mode: {len(common_cycles)} cycles to process")
 
-        # Pass 2: render each cycle
-        for c in common_cycles:
-            print(f"  Comparing cycle {c:05d}")
-            ref_cache = {}
+            global_peak_ref = {}
+            global_vmax_pct = {}
+            global_vmax_field = {}
+
+            for c in common_cycles:
+                ref_cache = {}
+                for ftype, comp, _ in fields:
+                    ref_cache[(ftype, comp)] = load_field(
+                        ref_dir, c, ftype, comp, z_slice=0)
+                    peak = np.max(np.abs(ref_cache[(ftype, comp)]))
+                    global_peak_ref[(ftype, comp)] = max(
+                        global_peak_ref.get((ftype, comp), 0.0), peak)
+                    global_vmax_field[(ftype, comp)] = max(
+                        global_vmax_field.get((ftype, comp), 0.0), peak)
+
+                for test_dir in test_dirs:
+                    for ftype, comp, _ in fields:
+                        try:
+                            tdata = load_field(test_dir, c, ftype, comp,
+                                               z_slice=0)
+                        except (FileNotFoundError, KeyError) as e:
+                            print(f"  WARNING: Could not load {ftype}{comp} "
+                                  f"cycle {c} from "
+                                  f"{solver_label(test_dir)}: {e}")
+                            continue
+                        global_vmax_field[(ftype, comp)] = max(
+                            global_vmax_field[(ftype, comp)],
+                            np.max(np.abs(tdata)))
+                        diff = tdata - ref_cache[(ftype, comp)]
+                        peak_ref = global_peak_ref[(ftype, comp)]
+                        if peak_ref > 0:
+                            max_pct = (np.max(np.abs(diff))
+                                       / peak_ref * 100.0)
+                            global_vmax_pct[(ftype, comp)] = max(
+                                global_vmax_pct.get((ftype, comp), 0.0),
+                                max_pct)
+
             for ftype, comp, _ in fields:
-                ref_cache[(ftype, comp)] = load_field(args.ref, c, ftype, comp,
-                                                      z_slice=0)
-            for test_dir in args.test:
-                generate_comparison(c, test_dir, ref_cache, fields,
-                                    fixed_vmax, args.diff_mode,
-                                    args.ref, ref_label, theme=theme,
-                                    output_dir=args.output_dir)
+                if (ftype, comp, "field") not in grid_fixed:
+                    grid_fixed[(ftype, comp, "field")] = max(
+                        global_vmax_field.get((ftype, comp), 1e-30), 1e-30)
+                grid_fixed[(ftype, comp, "peak_ref")] = max(
+                    global_peak_ref.get((ftype, comp), 1e-30), 1e-30)
+                if (ftype, comp, "pct_diff") not in grid_fixed:
+                    grid_fixed[(ftype, comp, "pct_diff")] = max(
+                        global_vmax_pct.get((ftype, comp), 1e-30), 1e-30)
+                if (ftype, comp, "diff") not in grid_fixed:
+                    grid_fixed[(ftype, comp, "diff")] = max(
+                        global_vmax_pct.get((ftype, comp), 0.0)
+                        * global_peak_ref.get((ftype, comp), 1e-30)
+                        / 100.0, 1e-30)
 
-    else:
-        # ── Single-cycle mode (original behavior) ────────────────────────
-        for test_dir in args.test:
-            generate_comparison(cycle, test_dir, ref_data, fields,
-                                fixed_vmax, args.diff_mode,
-                                args.ref, ref_label, theme=theme,
-                                output_dir=args.output_dir)
+            print("  Global bounds (pass 1):")
+            for ftype, comp, _ in fields:
+                name = f"{ftype}{comp}"
+                print(f"    {name}: peak_ref="
+                      f"{grid_fixed[(ftype, comp, 'peak_ref')]:.6e}  "
+                      f"vmax_pct="
+                      f"{grid_fixed[(ftype, comp, 'pct_diff')]:.6e}%")
+
+            for c in common_cycles:
+                print(f"  Comparing cycle {c:05d}")
+                ref_cache = {}
+                for ftype, comp, _ in fields:
+                    ref_cache[(ftype, comp)] = load_field(
+                        ref_dir, c, ftype, comp, z_slice=0)
+                for test_dir in test_dirs:
+                    generate_comparison(c, test_dir, ref_cache, fields,
+                                        grid_fixed, args.diff_mode,
+                                        ref_dir, ref_label, theme=theme,
+                                        output_dir=args.output_dir)
+
+        else:
+            print(f"  Comparing cycle {cycle:05d}")
+            ref_data = {}
+            for ftype, comp, _ in fields:
+                ref_data[(ftype, comp)] = load_field(
+                    ref_dir, cycle, ftype, comp, z_slice=0)
+            for test_dir in test_dirs:
+                generate_comparison(cycle, test_dir, ref_data, fields,
+                                    grid_fixed, args.diff_mode,
+                                    ref_dir, ref_label, theme=theme,
+                                    output_dir=args.output_dir)
 
 
 if __name__ == "__main__":
