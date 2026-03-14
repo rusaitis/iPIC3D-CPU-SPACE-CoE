@@ -156,6 +156,7 @@ void Collective::ReadInput(string inputfile)
         PoissonMArho                = config.read<double>   ("PoissonMArho", 0.01);
         GMREStol                    = config.read<double>   ("GMREStol", 1e-8);
         SolverType                  = config.read<string>   ("SolverType", "GMRES");
+        PrecMatrix                  = config.read<bool>     ("PrecMatrix", false);
         NiterMover                  = config.read<int>      ("NiterMover", 3);
         Vinj                        = config.read<double>   ("Vinj", 0.0);
         SaveHeatFluxTensor          = config.read<bool>     ("SaveHeatFluxTensor", false);

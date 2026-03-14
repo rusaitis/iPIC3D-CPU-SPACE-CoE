@@ -99,8 +99,66 @@ PETSc GMRES and FGMRES perform almost identically (without a preconditioner, fle
 
 PETSc GMRES gives a real but modest ~10-15% speedup. Next step: preconditioning? (e.g., multigrid or ILU via PETSc -pc_type).
 
+## Block-Diagonal Preconditioner Matrix
+
+### What it is
+
+An optional explicit matrix `P` passed to PETSc as `KSPSetOperators(ksp, A_shell, P)`.
+The operator `A` stays matrix-free (MatShell); PETSc builds preconditioners from `P`.
+
+### What's in P
+
+Each interior node (i,j,k) contributes a 3x3 diagonal block:
+
+```
+P[i][j][k] = I_3x3
+  + (c·th·dt)² · diag(+0.5/dy²+0.5/dz², +0.5/dx²+0.5/dz², +0.5/dx²+0.5/dy²)
+  + dt·th·4π·invVOL · M_center_3x3[i][j][k]
+```
+
+- **Identity** — from the `tempX[i][j][k]` self-term in MaxwellImage
+- **Curl-curl diagonal** — self-coupling from composed curlN2C→curlC2N (positive, +0.5/h²)
+- **Mass matrix center block** — the g=0 stencil entry (3x3, varies per node and per cycle)
+
+**Omitted:** off-diagonal stencil entries (neighbors), energy-conserving smoothing filter.
+
+### How to enable
+
+In the input file:
+```
+SolverType = PETSc
+PrecMatrix = true
+```
+
+Default is `PrecMatrix = false` (current behavior, PCNONE).
+
+### How to test different preconditioners
+
+```bash
+# Default (PETSc chooses based on P matrix type)
+mpirun -np 8 build/iPIC3D inputfiles/Double_Harris_PETSc_prec.inp -ksp_monitor
+
+# Jacobi (diagonal of P)
+mpirun -np 8 build/iPIC3D inputfiles/Double_Harris_PETSc_prec.inp -pc_type jacobi -ksp_monitor
+
+# Block Jacobi with ILU on each block
+mpirun -np 8 build/iPIC3D inputfiles/Double_Harris_PETSc_prec.inp -pc_type bjacobi -sub_pc_type ilu -ksp_monitor
+```
+
+### Code paths
+
+- `PrecMatrix = false`: `KSPSetOperators(ksp, A, A)` — MatShell only, PCNONE (existing behavior)
+- `PrecMatrix = true`: `KSPSetOperators(ksp, A, P)` — MatShell operator + explicit P for preconditioner.
+  **Default PC is PCNONE** (set programmatically) because P omits the smoothing filter
+  applied 4× in `MaxwellImage`, making ILU(P) a poor preconditioner that increases iterations.
+  Users opt in to AMG via runtime `-pc_type gamg` flags (`KSPSetFromOptions` overrides the default).
+- `assembleP()` is called in the constructor (unconditionally, since `-pc_type` isn't known yet)
+  and again before each `KSPSolve` — but **only when the active PC is not PCNONE** (checked via
+  `PetscObjectTypeCompare`), avoiding the expensive 27-block assembly when it won't be used.
+- P is MATMPIAIJ with block size 3, preallocated for up to 81 nonzeros per row (27 blocks × 3 DOFs)
+
 ## Future Improvements
 
 - Make GMRES restart configurable from input file (e.g. `GMRESRestart = 20`)
 - Add `const` to `MaxwellImage`'s input parameter to eliminate `const_cast`
-- Consider preconditioners
+- Full sparse matrix (27-point stencil + full mass matrix) for GAMG/HYPRE preconditioners

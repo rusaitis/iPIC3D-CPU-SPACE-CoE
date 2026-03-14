@@ -179,6 +179,7 @@ class Collective
     double getVinj()                    const{ return (Vinj); }
     double getGMREStol()                const{ return (GMREStol); }
     string getSolverType()              const{ return (SolverType); }
+    bool getPrecMatrix()                const{ return (PrecMatrix); }
     int getLast_cycle()                 const{ return (last_cycle); }
     int getNiterMover()                 const{ return (NiterMover); }
     int getFieldOutputCycle()           const{ return (FieldOutputCycle); }
@@ -408,6 +409,9 @@ class Collective
 
     //* Field solver type: "GMRES" (default) or "PETSc"
     string SolverType;
+
+    //* Use explicit preconditioner matrix for PETSc solver
+    bool PrecMatrix;
 
     //* mover predictor correction iteration (not needed for ECSIM)
     int NiterMover;

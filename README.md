@@ -2,7 +2,7 @@
 
 iPIC3D is an implicit particle-in-cell (PIC) code for 3D plasma simulations. This version includes the energy-conserving semi-implicit method (ECSIM).
 
-**This branch (`with-petsc`)** adds optional PETSc support as an alternative field solver to the built-in GMRES, selectable at runtime via the `-solver PETSc` flag.
+**This branch (`with-petsc-matrix`)** extends the PETSc field solver with an explicit preconditioner matrix. Starting from a block-diagonal approximation, the preconditioner evolved through a full 27-point stencil incorporating curl-curl coupling and near-null space information, followed by benchmarking against the unpreconditioned solver. Code review confirmed MPI/HPC correctness; systematic testing across preconditioner types (Jacobi, SOR, ASM, AMG) is the next step.
 
 ## Quickstart (pixi)
 

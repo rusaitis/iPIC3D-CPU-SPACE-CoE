@@ -518,6 +518,32 @@ public: // accessors
     const Grid& get_grid()const{return _grid;};
     const VirtualTopology3D& get_vct()const{return _vct;}
 
+#ifdef USE_PETSC
+    // Mass matrix components (for PETSc preconditioner assembly)
+    const_arr4_double getMxx() const { return Mxx; }
+    const_arr4_double getMxy() const { return Mxy; }
+    const_arr4_double getMxz() const { return Mxz; }
+    const_arr4_double getMyx() const { return Myx; }
+    const_arr4_double getMyy() const { return Myy; }
+    const_arr4_double getMyz() const { return Myz; }
+    const_arr4_double getMzx() const { return Mzx; }
+    const_arr4_double getMzy() const { return Mzy; }
+    const_arr4_double getMzz() const { return Mzz; }
+
+    // Grid dimensions and physics constants (for PETSc preconditioner)
+    int    get_nxn()    const { return nxn; }
+    int    get_nyn()    const { return nyn; }
+    int    get_nzn()    const { return nzn; }
+    double get_dx()     const { return dx; }
+    double get_dy()     const { return dy; }
+    double get_dz()     const { return dz; }
+    double get_c()      const { return c; }
+    double get_th()     const { return th; }
+    double get_dt()     const { return dt; }
+    double get_FourPI() const { return FourPI; }
+    double get_invVOL() const { return invVOL; }
+#endif
+
     //* ********************************* VARIABLES ********************************* *//
     
 private:

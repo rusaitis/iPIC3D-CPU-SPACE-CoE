@@ -262,7 +262,7 @@ int c_Solver::Init(int argc, char **argv)
 #ifdef USE_PETSC
     if (col->getSolverType() == "PETSc") {
         int localSize = 3 * (grid->getNXN() - 2) * (grid->getNYN() - 2) * (grid->getNZN() - 2);
-        petscSolver = new PetscSolver(localSize, EMf, col->getGMREStol());
+        petscSolver = new PetscSolver(localSize, EMf, vct, col->getGMREStol(), col->getPrecMatrix());
         EMf->setPetscSolver(petscSolver);
         if (myrank == 0)
             cout << "PETSc solver enabled for E-field computation" << endl;
