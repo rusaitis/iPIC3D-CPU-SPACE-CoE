@@ -30,6 +30,12 @@ from pathlib import Path
 
 import numpy as np
 
+__all__ = [
+    "compute_reference_frequencies",
+    "compute_power_spectrum", "compute_all_spectra",
+    "plot_timeseries", "plot_spectra", "plot_plane_snapshot",
+]
+
 # Ensure project root paths are importable
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -55,6 +61,8 @@ def compute_reference_frequencies(timeseries, mass_ratio, B0x):
       - wpi = sqrt(n0)                           (ion plasma)
       - wce = wci * mass_ratio                   (electron cyclotron)
       - wlh = 1/sqrt(1/(wce*wci) + 1/wpi^2)     (lower hybrid)
+      - wpe = wpi * sqrt(mass_ratio)             (electron plasma)
+      - wuh = sqrt(wce^2 + wpe^2)                (upper hybrid)
 
     Parameters
     ----------
@@ -68,18 +76,22 @@ def compute_reference_frequencies(timeseries, mass_ratio, B0x):
     Returns
     -------
     freqs : dict
-        Keys: 'wci', 'wpi', 'wce', 'wlh' (angular frequencies).
+        Keys: 'wci', 'wpi', 'wce', 'wpe', 'wlh', 'wuh' (angular frequencies).
     """
-    # Charge density -> number density proxy
-    # rho_e < 0 (electron charge), rho_i > 0
+    # iPIC3D stores charge density as rho = sign(q)*n/(4π) — see units.txt.
+    # Multiply by 4π to recover n, subtract species to get n_i + n_e, /2 for average.
     n0 = (timeseries["rho_i"][0] - timeseries["rho_e"][0]) * 4 * np.pi / 2
 
-    wci = B0x
-    wpi = np.sqrt(max(n0, 1e-30))
-    wce = wci * mass_ratio
+    wci = B0x                        # ion cyclotron frequency (= B0 in normalized units)
+    wpi = np.sqrt(max(n0, 1e-30))    # ion plasma frequency
+    wce = wci * mass_ratio           # electron cyclotron frequency
+    wpe = wpi * np.sqrt(mass_ratio)  # electron plasma frequency
+    # Lower hybrid: standard approximation 1/ωlh² = 1/(ωce·ωci) + 1/ωpi²
+    # (drops ωci² correction; valid for mi >> me)
     wlh = 1.0 / np.sqrt(1.0 / max(wce * wci, 1e-30) + 1.0 / max(wpi**2, 1e-30))
+    wuh = np.sqrt(wce**2 + wpe**2)   # upper hybrid frequency
 
-    return {"wci": wci, "wpi": wpi, "wce": wce, "wlh": wlh}
+    return {"wci": wci, "wpi": wpi, "wce": wce, "wpe": wpe, "wlh": wlh, "wuh": wuh}
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +101,9 @@ def compute_reference_frequencies(timeseries, mass_ratio, B0x):
 def compute_power_spectrum(signal, dt, istart=0, istop=None):
     """Compute the one-sided amplitude spectrum of a real signal.
 
-    Equivalent to FFTW fftw_plan_dft_r2c_1d with rectangular window.
+    No windowing (rectangular window) — fine for identifying dominant modes,
+    but expect spectral leakage for broadband signals. Peak-normalized to
+    match the C++ postprocessing convention.
 
     Parameters
     ----------
@@ -153,6 +167,16 @@ def _import_plotting():
     return plt, add_theme_arg, apply_theme
 
 
+def _save_or_show(fig, output):
+    """Save figure to file or show interactively."""
+    import matplotlib.pyplot as plt
+    if output:
+        fig.savefig(output, dpi=150, bbox_inches="tight")
+        print(f"Saved: {output}")
+    else:
+        plt.show()
+
+
 def plot_timeseries(timeseries, fields=None, output=None, B0x=None):
     """Multi-panel stacked time series plot.
 
@@ -173,9 +197,10 @@ def plot_timeseries(timeseries, fields=None, output=None, B0x=None):
         fields = [
             ["Bx", "By", "Bz"],
             ["Ex", "Ey", "Ez"],
-            ["Vxe", "Vye", "Vze"],
-            ["Vxi", "Vyi", "Vzi"],
+            ["Vx_e", "Vy_e", "Vz_e"],
+            ["Vx_i", "Vy_i", "Vz_i"],
             ["rho_e", "rho_i"],
+            ["Ep_e", "Ep_i"],  # non-ideal E field (frozen-in violation)
         ]
         # Only include panels whose fields are present
         fields = [
@@ -215,16 +240,11 @@ def plot_timeseries(timeseries, fields=None, output=None, B0x=None):
         )
 
     fig.tight_layout()
-
-    if output:
-        fig.savefig(output, dpi=150, bbox_inches="tight")
-        print(f"Saved: {output}")
-    else:
-        plt.show()
+    _save_or_show(fig, output)
 
 
 def plot_spectra(spectra, ref_freqs=None, fields=None, output=None,
-                 log_y=True):
+                 log_y=True, sat_xyz=None):
     """Power spectrum plot with optional reference frequency lines.
 
     Parameters
@@ -233,6 +253,8 @@ def plot_spectra(spectra, ref_freqs=None, fields=None, output=None,
         From compute_all_spectra(). Keys -> (freq_rad, amplitude).
     ref_freqs : dict or None
         From compute_reference_frequencies(). Draws vertical lines.
+    sat_xyz : array-like or None
+        (x, y, z) of the satellite, used in the title.
     fields : list of str or None
         Which spectra to plot. If None, plots Bx, By, Bz, Ex, Ey, Ez.
     output : str or None
@@ -266,30 +288,50 @@ def plot_spectra(spectra, ref_freqs=None, fields=None, output=None,
     ax.set_ylabel("Normalized amplitude")
     ax.legend(fontsize=9)
 
-    # Reference frequency lines
+    # Reference frequency lines — distinct colors and text labels.
+    # Only draw lines that fall within the data's Nyquist range;
+    # clip x-axis to just past the highest visible reference line.
     if ref_freqs:
         wci = ref_freqs.get("wci", 0)
-        line_style = {"ls": "--", "alpha": 0.6, "linewidth": 1.0}
+        ref_styles = [
+            (r"$\omega_{ci}$", "wci",  "#e06c75", "-.",  1.2),
+            (r"$\omega_{pi}$", "wpi",  "#e5c07b", "--",  1.2),
+            (r"$\omega_{lh}$", "wlh",  "#98c379", ":",   1.2),
+            (r"$\omega_{pe}$", "wpe",  "#c678dd", "-.",  1.2),
+            (r"$\omega_{ce}$", "wce",  "#56b6c2", "--",  1.2),
+            (r"$\omega_{uh}$", "wuh",  "#d19a66", ":",   1.2),
+        ]
         if wci > 0:
-            for label, key in [
-                (r"$\omega_{ci}$", "wci"),
-                (r"$\omega_{pi}$", "wpi"),
-                (r"$\omega_{ce}$", "wce"),
-                (r"$\omega_{lh}$", "wlh"),
-            ]:
+            # Determine max frequency in the data
+            max_freq_norm = max(
+                (spectra[f][0][-1] / wci) for f in fields if f in spectra
+            )
+            drawn_xmax = 0
+            yhi = 0.95
+            for label, key, color, ls, lw in ref_styles:
                 if key in ref_freqs and ref_freqs[key] > 0:
                     x = ref_freqs[key] / wci
-                    ax.axvline(x, label=label, **line_style)
+                    if x > max_freq_norm:
+                        continue  # beyond Nyquist — skip
+                    ax.axvline(x, color=color, ls=ls, linewidth=lw, alpha=0.7)
+                    ax.text(x, yhi, f" {label}", color=color, fontsize=11,
+                            transform=ax.get_xaxis_transform(),
+                            va="top", ha="left", rotation=90)
+                    yhi -= 0.12
+                    drawn_xmax = max(drawn_xmax, x)
+            # Clip x-axis to ~20% past the highest drawn reference line,
+            # but only if at least one line was drawn.  When no lines are
+            # visible (all above Nyquist, or no --B0x), show the full range.
+            if drawn_xmax > 0:
+                ax.set_xlim(0, drawn_xmax * 1.2)
             ax.legend(fontsize=9)
 
-    ax.set_title("Power spectrum")
-    fig.tight_layout()
-
-    if output:
-        fig.savefig(output, dpi=150, bbox_inches="tight")
-        print(f"Saved: {output}")
+    if sat_xyz is not None:
+        ax.set_title(f"Power spectrum at ({sat_xyz[0]:.1f}, {sat_xyz[1]:.1f}, {sat_xyz[2]:.1f})")
     else:
-        plt.show()
+        ax.set_title("Power spectrum")
+    fig.tight_layout()
+    _save_or_show(fig, output)
 
 
 def plot_plane_snapshot(plane_data, field_name, cycle_idx=0, output=None):
@@ -347,12 +389,7 @@ def plot_plane_snapshot(plane_data, field_name, cycle_idx=0, output=None):
     )
     ax.set_aspect("equal")
     fig.tight_layout()
-
-    if output:
-        fig.savefig(output, dpi=150, bbox_inches="tight")
-        print(f"Saved: {output}")
-    else:
-        plt.show()
+    _save_or_show(fig, output)
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +438,7 @@ def main():
 
     # Load data
     print("Reading satellite data...")
-    coords, cycles, data, fmap = read_all_satellites(args.sat_dir)
+    coords, cycles, data, _ = read_all_satellites(args.sat_dir)
     print(f"  {len(coords)} satellites, {len(cycles)} timesteps")
 
     # Apply theme (lazy import to avoid matplotlib dependency for non-plot use)
@@ -410,8 +447,7 @@ def main():
 
     if args.mode == "plane":
         if args.plane_coord is None:
-            print("ERROR: --plane-coord required for --mode plane")
-            sys.exit(1)
+            parser.error("--plane-coord required for --mode plane")
         if fields is None:
             fields = ["Bz"]
 
@@ -431,8 +467,7 @@ def main():
 
     # Point-based modes need --target
     if args.target is None:
-        print("ERROR: --target X Y Z required for timeseries/fft modes")
-        sys.exit(1)
+        parser.error("--target X Y Z required for timeseries/fft modes")
 
     ts = extract_point_timeseries(coords, data, cycles, args.target, dt=args.dt)
     ts = compute_derived_quantities(ts, dt=args.dt)
@@ -459,7 +494,7 @@ def main():
                 print(f"    {k} = {v:.6f}")
 
         plot_spectra(spectra, ref_freqs=ref_freqs, fields=fields,
-                     output=args.output)
+                     output=args.output, sat_xyz=xyz)
 
 
 if __name__ == "__main__":

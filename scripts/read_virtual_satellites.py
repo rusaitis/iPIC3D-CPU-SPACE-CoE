@@ -14,6 +14,14 @@ from pathlib import Path
 
 import numpy as np
 
+__all__ = [
+    "FIELD_NAMES", "DERIVED_NAMES", "FIELD_TO_HDF5",
+    "read_satellite_file", "read_all_satellites",
+    "find_nearest_satellite", "extract_point_timeseries",
+    "compute_derived_quantities", "extract_plane_timeseries",
+    "check_probe_files",
+]
+
 # Columns in the 16-float binary record
 _RAW_COLS = [
     "cycle", "sat_idx",
@@ -25,12 +33,24 @@ _RAW_COLS = [
 # Field columns (indices 2–15 in the raw record, i.e. 0–13 after stripping cycle/sat_idx)
 FIELD_NAMES = _RAW_COLS[2:]
 
-# Derived quantity names (computed from raw fields)
+# Derived quantity names (computed from raw fields).
+# Convention: underscore separates component from species (Vx_e, ax_i, etc.)
 DERIVED_NAMES = [
-    "Vxe", "Vye", "Vze", "Vxi", "Vyi", "Vzi",
-    "Bmag", "Emag", "Ve_mag", "Vi_mag",
-    "axe", "aye", "aze", "axi", "ayi", "azi",
-    "ae_mag", "ai_mag",
+    # Bulk velocity (V = J/rho)
+    "Vx_e", "Vy_e", "Vz_e", "Vx_i", "Vy_i", "Vz_i",
+    # Field and speed magnitudes
+    "B_mag", "E_mag", "V_e", "V_i",
+    # Eulerian acceleration at fixed probe
+    "ax_e", "ay_e", "az_e", "ax_i", "ay_i", "az_i", "a_e", "a_i",
+    # Total current density (identifies current sheets)
+    "Jx_tot", "Jy_tot", "Jz_tot", "J_tot",
+    # ExB drift (species-independent MHD drift)
+    "VExB_x", "VExB_y", "VExB_z", "VExB",
+    # Non-ideal E field: E + V×B (zero when frozen-in)
+    "Epx_e", "Epy_e", "Epz_e", "Ep_e",
+    "Epx_i", "Epy_i", "Epz_i", "Ep_i",
+    # Number density and Alfvén speed
+    "n_e", "n_i", "V_A",
 ]
 
 # Map from field name to HDF5 dataset name
@@ -190,9 +210,12 @@ def extract_point_timeseries(coords, data, cycles, target_xyz, dt=0.1):
 
 
 def compute_derived_quantities(timeseries, dt=0.1):
-    """Compute velocities, magnitudes, and accelerations from raw fields.
+    """Compute derived plasma quantities from raw satellite fields.
 
-    Ported from process-virtual-sat-point.cpp (A.E. Vapirev, 2011).
+    Quantities: bulk velocity, field magnitudes, Eulerian acceleration,
+    total current, ExB drift, non-ideal E field, number density, Alfvén speed.
+
+    Inspired by process-virtual-sat-point.cpp (A.E. Vapirev, 2011).
 
     Parameters
     ----------
@@ -208,53 +231,101 @@ def compute_derived_quantities(timeseries, dt=0.1):
     """
     eps = 1e-30  # guard against rho ~ 0
 
-    # Bulk velocities V = J / rho
+    # Bulk velocity V = J/rho (charge factors cancel: J = qnV, rho = qn)
     for comp in ("x", "y", "z"):
         for s, rho_key in [("e", "rho_e"), ("i", "rho_i")]:
             J = timeseries[f"J{comp}{s}"]
             rho = timeseries[rho_key]
-            timeseries[f"V{comp}{s}"] = np.where(
+            timeseries[f"V{comp}_{s}"] = np.where(
                 np.abs(rho) > eps, J / rho, 0.0
             )
 
     # Field magnitudes
-    timeseries["Bmag"] = np.sqrt(
+    timeseries["B_mag"] = np.sqrt(
         timeseries["Bx"]**2 + timeseries["By"]**2 + timeseries["Bz"]**2
     )
-    timeseries["Emag"] = np.sqrt(
+    timeseries["E_mag"] = np.sqrt(
         timeseries["Ex"]**2 + timeseries["Ey"]**2 + timeseries["Ez"]**2
     )
 
-    # Velocity magnitudes
+    # Speed (velocity magnitude) per species
     for s in ("e", "i"):
-        timeseries[f"V{s}_mag"] = np.sqrt(
-            timeseries[f"Vx{s}"]**2
-            + timeseries[f"Vy{s}"]**2
-            + timeseries[f"Vz{s}"]**2
+        timeseries[f"V_{s}"] = np.sqrt(
+            timeseries[f"Vx_{s}"]**2
+            + timeseries[f"Vy_{s}"]**2
+            + timeseries[f"Vz_{s}"]**2
         )
 
-    # Accelerations: backward difference, 0 at t=0 (matches C++ convention)
+    # Eulerian ∂V/∂t at fixed probe (not material derivative — no spatial gradients)
     for comp in ("x", "y", "z"):
         for s in ("e", "i"):
-            V = timeseries[f"V{comp}{s}"]
+            V = timeseries[f"V{comp}_{s}"]
             a = np.empty_like(V)
             a[0] = 0.0
             a[1:] = (V[1:] - V[:-1]) / dt
-            timeseries[f"a{comp}{s}"] = a
+            timeseries[f"a{comp}_{s}"] = a
 
     for s in ("e", "i"):
-        timeseries[f"a{s}_mag"] = np.sqrt(
-            timeseries[f"ax{s}"]**2
-            + timeseries[f"ay{s}"]**2
-            + timeseries[f"az{s}"]**2
+        timeseries[f"a_{s}"] = np.sqrt(
+            timeseries[f"ax_{s}"]**2
+            + timeseries[f"ay_{s}"]**2
+            + timeseries[f"az_{s}"]**2
         )
+
+    # Total current density (identifies current sheets via Ampère's law)
+    for comp in ("x", "y", "z"):
+        timeseries[f"J{comp}_tot"] = timeseries[f"J{comp}e"] + timeseries[f"J{comp}i"]
+    timeseries["J_tot"] = np.sqrt(
+        timeseries["Jx_tot"]**2
+        + timeseries["Jy_tot"]**2
+        + timeseries["Jz_tot"]**2
+    )
+
+    # ExB drift: V_ExB = (E × B) / B² — species-independent MHD drift
+    B2 = timeseries["B_mag"]**2
+    B2_safe = np.where(B2 > eps, B2, eps)  # guard null points
+    Ex, Ey, Ez = timeseries["Ex"], timeseries["Ey"], timeseries["Ez"]
+    Bx, By, Bz = timeseries["Bx"], timeseries["By"], timeseries["Bz"]
+    timeseries["VExB_x"] = (Ey * Bz - Ez * By) / B2_safe
+    timeseries["VExB_y"] = (Ez * Bx - Ex * Bz) / B2_safe
+    timeseries["VExB_z"] = (Ex * By - Ey * Bx) / B2_safe
+    timeseries["VExB"] = np.sqrt(
+        timeseries["VExB_x"]**2
+        + timeseries["VExB_y"]**2
+        + timeseries["VExB_z"]**2
+    )
+
+    # Non-ideal E field: E' = E + V×B. Zero in ideal MHD (frozen-in condition).
+    # |Ep_e| > 0 marks the electron diffusion region;
+    # |Ep_i| > 0 marks the ion diffusion region.
+    for s in ("e", "i"):
+        Vx = timeseries[f"Vx_{s}"]
+        Vy = timeseries[f"Vy_{s}"]
+        Vz = timeseries[f"Vz_{s}"]
+        timeseries[f"Epx_{s}"] = Ex + Vy * Bz - Vz * By
+        timeseries[f"Epy_{s}"] = Ey + Vz * Bx - Vx * Bz
+        timeseries[f"Epz_{s}"] = Ez + Vx * By - Vy * Bx
+        timeseries[f"Ep_{s}"] = np.sqrt(
+            timeseries[f"Epx_{s}"]**2
+            + timeseries[f"Epy_{s}"]**2
+            + timeseries[f"Epz_{s}"]**2
+        )
+
+    # Number density: undo rho = sign(q)*n/(4π) storage convention
+    timeseries["n_i"] = timeseries["rho_i"] * 4 * np.pi      # rho_i > 0
+    timeseries["n_e"] = -timeseries["rho_e"] * 4 * np.pi     # rho_e < 0
+
+    # Alfvén speed: V_A = B/√n (= B₀ at background density; see units.txt §4)
+    n_avg = (timeseries["n_i"] + timeseries["n_e"]) / 2
+    n_safe = np.where(n_avg > eps, n_avg, eps)
+    timeseries["V_A"] = timeseries["B_mag"] / np.sqrt(n_safe)
 
     return timeseries
 
 
 def extract_plane_timeseries(coords, data, cycles, plane, plane_coord,
                              tolerance=None, dt=0.1):
-    """Extract all satellites in a 2D plane from the full dataset.
+    """Select a 2D cross-section through the satellite grid.
 
     Parameters
     ----------
@@ -326,18 +397,18 @@ def check_probe_files(directory):
     report = []
     for p in probes:
         lines = p.read_text().strip().splitlines()
-        header_lines = sum(1 for l in lines if l.startswith("#"))
+        header_lines = sum(1 for line in lines if line.startswith("#"))
         data_lines = len(lines) - header_lines
 
         # Parse location from header
         x = y = z = None
-        for l in lines:
-            if "x =" in l:
-                x = float(l.split("=")[1])
-            elif "y =" in l:
-                y = float(l.split("=")[1])
-            elif "z =" in l:
-                z = float(l.split("=")[1])
+        for line in lines:
+            if "x =" in line:
+                x = float(line.split("=")[1])
+            elif "y =" in line:
+                y = float(line.split("=")[1])
+            elif "z =" in line:
+                z = float(line.split("=")[1])
 
         report.append({
             "filename": p.name,

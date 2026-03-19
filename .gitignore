@@ -20,6 +20,9 @@ tests/*.png
 tests/*.csv
 tests/test_output*/
 
+# Script output
+scripts/output/
+
 # Python
 __pycache__/
 *.py[cod]
