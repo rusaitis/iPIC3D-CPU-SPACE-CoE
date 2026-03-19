@@ -53,3 +53,4 @@ reconnection-hires = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D 
 bench-pc-sweep   = { cmd = "bash tests/bench_preconditioners.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --sweep", depends-on = ["build"], description = "Preconditioner comparison: GAMG, HYPRE, FieldSplit, etc. at 100×100" }
 bench-pc-scaling = { cmd = "bash tests/bench_preconditioners.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --scaling", depends-on = ["build"], description = "Mesh scaling study: GAMG vs unpreconditioned (50→300)" }
 bench-pc         = { cmd = "bash tests/bench_preconditioners.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], description = "Full preconditioner benchmark (sweep + scaling)" }
+analyze-sat      = { cmd = "python scripts/analyze_satellites.py", description = "Virtual satellite analysis (time series, FFT, heatmaps)" }

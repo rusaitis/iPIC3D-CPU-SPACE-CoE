@@ -4,6 +4,9 @@ Debug*/
 Release*/
 data*/
 
+# Example files
+examples/
+
 # Local build and notes
 PLAN.md
 NOTES.md
@@ -90,3 +93,11 @@ copilot-instructions.md
 *.hdf5
 *.dat
 *.log
+
+# Images and plots (top-level generated output; Documentation/ is tracked)
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.svg
+/*.mp4
