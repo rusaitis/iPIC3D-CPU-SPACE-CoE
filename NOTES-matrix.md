@@ -99,8 +99,8 @@ It's the simplest non-trivial preconditioner to implement and verify. The diagon
 
 | File | Change |
 |------|--------|
-| `solvers/PETSC.cpp` | `assembleP()` method: builds `MATMPIBAIJ` (block size 3) with one diagonal block per node. Called in constructor and before each `KSPSolve` (mass matrix is cycle-dependent). `solve()` calls `assembleP()` when `usePrecMatrix_=true`. |
-| `include/PETSC.h` | New members: `usePrecMatrix_`, `P_`, `emf_`, `globalRowOffset_`, cached grid/physics constants. Constructor takes `bool usePrecMatrix`. |
+| `solvers/PETSC.cpp` | `assembleP()` method: builds `MATMPIAIJ` (block size 3) with 27-point stencil per node. Called in constructor and before each `KSPSolve` (mass matrix is cycle-dependent). `solve()` calls `assembleP()` when `usePrecMatrix_=true`. |
+| `include/PETSC.h` | New members: `usePrecMatrix_`, `P_`, `emf_`, `globalBlockOffset_`, cached grid/physics constants. Constructor takes `bool usePrecMatrix`. |
 | `include/Collective.h` | `bool PrecMatrix` member + `getPrecMatrix()` getter |
 | `main/Collective.cpp` | Parse `PrecMatrix = true/false` from input file (default: false) |
 | `include/EMfields3D.h` | 9 mass matrix getters (`getMxx()` etc.) + 8 physics parameter getters (`get_dx()` etc.), all `#ifdef USE_PETSC` guarded |

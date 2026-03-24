@@ -469,21 +469,16 @@ def apply_tick_rotation(axes, grids):
 def resolve_csv_path(args):
     """Resolve the CSV path from CLI args or env vars.
 
-    Fallback order: CLI arg → CSV_FILE env → tests/results.csv → tests/test_output/results.csv.
+    Fallback order: CLI arg → CSV_FILE env → tests/test_output/results.csv.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_dir = os.path.dirname(script_dir)
     if getattr(args, 'csv', None) is not None:
         return args.csv
     elif "CSV_FILE" in os.environ:
         return os.environ["CSV_FILE"]
-    # Prefer results.csv next to script; fall back to test_output/
-    default = os.path.join(script_dir, "results.csv")
-    if os.path.isfile(default):
-        return default
-    alt = os.path.join(script_dir, "test_output", "results.csv")
-    if os.path.isfile(alt):
-        return alt
-    return default  # return original path so error message makes sense
+    default = os.path.join(project_dir, "tests", "test_output", "results.csv")
+    return default
 
 
 def resolve_plot_path(args, csv_path):

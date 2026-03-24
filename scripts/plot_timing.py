@@ -60,7 +60,7 @@ def main(argv=None):
     # Auto-aggregate profile CSVs if results.csv doesn't exist yet
     if not os.path.isfile(csv_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(script_dir, "test_output")
+        output_dir = os.path.join(os.path.dirname(script_dir), "tests", "test_output")
         if os.path.isdir(output_dir):
             from plot_utils import aggregate_profiles_to_csv
             try:

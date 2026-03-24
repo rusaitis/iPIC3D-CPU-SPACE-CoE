@@ -180,6 +180,7 @@ class Collective
     double getGMREStol()                const{ return (GMREStol); }
     string getSolverType()              const{ return (SolverType); }
     bool getPrecMatrix()                const{ return (PrecMatrix); }
+    bool getPrecDiagnostics()           const{ return (PrecDiagnostics); }
     int getLast_cycle()                 const{ return (last_cycle); }
     int getNiterMover()                 const{ return (NiterMover); }
     int getFieldOutputCycle()           const{ return (FieldOutputCycle); }
@@ -412,6 +413,9 @@ class Collective
 
     //* Use explicit preconditioner matrix for PETSc solver
     bool PrecMatrix;
+
+    //* Print preconditioner diagnostics and dump matrix to file
+    bool PrecDiagnostics;
 
     //* mover predictor correction iteration (not needed for ECSIM)
     int NiterMover;

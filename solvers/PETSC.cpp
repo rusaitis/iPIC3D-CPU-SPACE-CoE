@@ -19,6 +19,7 @@
 #include <cassert>
 #include <cstring>
 #include <cmath>
+#include <filesystem>
 
 /*  Matrix-free A*x callback: computes y = A*x.
  *  PETSc calls this whenever the KSP solver needs a matrix-vector product.
@@ -57,9 +58,12 @@ PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y)
  *  usePrecMatrix — if true, assemble full 27-point mass matrix preconditioner P
  */
 PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct,
-                         double tol, bool usePrecMatrix)
+                         double tol, bool usePrecMatrix, bool diagnostics,
+                         const std::string &simName, const std::string &saveDir)
     : localSize_(localSize), petsc_x_(nullptr), petsc_b_(nullptr),
-      usePrecMatrix_(usePrecMatrix), P_(nullptr), emf_(emf), globalRowOffset_(0),
+      usePrecMatrix_(usePrecMatrix), needsReassembly_(false), diagnostics_(diagnostics),
+      simName_(simName), saveDir_(saveDir),
+      P_(nullptr), emf_(emf), globalBlockOffset_(0),
       nsp_(nullptr),
       vct_(vct), nprocsBlocks_(0),
       nxn_(0), nyn_(0), nzn_(0), niX_(0), niY_(0), niZ_(0),
@@ -143,7 +147,7 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
         int rank;
         MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
         if (rank == 0) offset = 0;
-        globalRowOffset_ = offset * 3;  // store in DOF units for convenience
+        globalBlockOffset_ = offset;
 
         // Create MATMPIAIJ with block size 3 (GAMG/HYPRE require AIJ, not BAIJ)
         // 27-point stencil × 3 DOFs per block = up to 81 scalar nonzeros per row
@@ -162,6 +166,14 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
 
         assembleP();
         setupNearNullSpace();
+        needsReassembly_ = true;  // mass matrix changes every cycle
+
+        if (diagnostics_) {
+            printDiagnostics(0);
+            std::filesystem::create_directories(saveDir_);
+            std::string dumpPath = saveDir_ + "/" + simName_ + "_P_cycle0.bin";
+            dumpP(dumpPath.c_str());
+        }
     }
 
     // KSP solver setup
@@ -220,7 +232,7 @@ PetscInt PetscSolver::nodeToGlobalBlock(int ni, int nj, int nk) const
 {
     // Interior node on this rank — fast path
     if (ni >= 1 && ni <= niX_ && nj >= 1 && nj <= niY_ && nk >= 1 && nk <= niZ_)
-        return globalRowOffset_ / 3 + (ni - 1) * niY_ * niZ_ + (nj - 1) * niZ_ + (nk - 1);
+        return globalBlockOffset_ + (ni - 1) * niY_ * niZ_ + (nj - 1) * niZ_ + (nk - 1);
 
     // Ghost node — determine owning rank and local index there
     int neighborCoords[3] = {coords_[0], coords_[1], coords_[2]};
@@ -431,7 +443,7 @@ void PetscSolver::assembleP()
         for (int j = 1; j <= niY_; j++)
             for (int k = 1; k <= niZ_; k++)
             {
-                PetscInt grow = globalRowOffset_ / 3
+                PetscInt grow = globalBlockOffset_
                               + (i - 1) * niY_ * niZ_ + (j - 1) * niZ_ + (k - 1);
 
                 for (int oi = -1; oi <= 1; oi++)
@@ -456,6 +468,11 @@ void PetscSolver::assembleP()
                             }
 
                             // 3. Mass matrix (from offset→group lookup)
+                            //    block[row*3 + col] layout — matches mass_matrix_times_vector():
+                            //           col:  Ex     Ey     Ez
+                            //    row Ex:     Mxx    Myx    Mzx     [0,1,2]
+                            //    row Ey:     Mxy    Myy    Mzy     [3,4,5]
+                            //    row Ez:     Mxz    Myz    Mzz     [6,7,8]
                             const auto &entry = massGroupLookup_[oi + 1][oj + 1][ok + 1];
                             if (entry.g >= 0) {
                                 int g = entry.g;
@@ -485,20 +502,71 @@ void PetscSolver::assembleP()
     PetscCallAbort(PETSC_COMM_WORLD, MatAssemblyEnd(P_, MAT_FINAL_ASSEMBLY));
 }
 
+/*  Print preconditioner matrix diagnostics: norms, deviation from identity, physics scale factors.  */
+void PetscSolver::printDiagnostics(int cycle) const
+{
+    if (!usePrecMatrix_ || P_ == nullptr) return;
+
+    PetscReal normP;
+    PetscCallAbort(PETSC_COMM_WORLD, MatNorm(P_, NORM_FROBENIUS, &normP));
+
+    // ||P - I||_F: duplicate P, shift diagonal by -1
+    Mat PmI;
+    PetscCallAbort(PETSC_COMM_WORLD, MatDuplicate(P_, MAT_COPY_VALUES, &PmI));
+    PetscCallAbort(PETSC_COMM_WORLD, MatShift(PmI, -1.0));
+    PetscReal normPmI;
+    PetscCallAbort(PETSC_COMM_WORLD, MatNorm(PmI, NORM_FROBENIUS, &normPmI));
+    PetscCallAbort(PETSC_COMM_WORLD, MatDestroy(&PmI));
+
+    // ||I||_F = sqrt(N) for N×N identity
+    PetscInt M, N;
+    PetscCallAbort(PETSC_COMM_WORLD, MatGetSize(P_, &M, &N));
+    PetscReal normI = PetscSqrtReal((PetscReal)M);
+
+    MatInfo info;
+    PetscCallAbort(PETSC_COMM_WORLD, MatGetInfo(P_, MAT_GLOBAL_SUM, &info));
+
+    double cthdt2 = c_ * th_ * dt_ * c_ * th_ * dt_;
+    double scale  = dt_ * th_ * FourPI_ * invVOL_;
+
+    PetscCallAbort(PETSC_COMM_WORLD, PetscPrintf(PETSC_COMM_WORLD,
+        "\n=== Preconditioner P diagnostics (cycle %d) ===\n"
+        "  Matrix size:      %d x %d  (%.0f nonzeros)\n"
+        "  ||P||_F           = %.6e\n"
+        "  ||P - I||_F       = %.6e\n"
+        "  ||P - I|| / ||I|| = %.6e\n"
+        "  Scale factors:\n"
+        "    (c*th*dt)^2     = %.6e   (curl-curl weight)\n"
+        "    dt*th*4pi/V     = %.6e   (mass matrix weight)\n"
+        "================================================\n\n",
+        cycle, (int)M, (int)N, info.nz_used,
+        (double)normP, (double)normPmI, (double)(normPmI / normI),
+        cthdt2, scale));
+}
+
+/*  Dump preconditioner matrix P to PETSc binary file for Python visualization.  */
+void PetscSolver::dumpP(const char *filename) const
+{
+    if (!usePrecMatrix_ || P_ == nullptr) return;
+
+    PetscViewer viewer;
+    PetscCallAbort(PETSC_COMM_WORLD,
+        PetscViewerBinaryOpen(PETSC_COMM_WORLD, filename, FILE_MODE_WRITE, &viewer));
+    PetscCallAbort(PETSC_COMM_WORLD, MatView(P_, viewer));
+    PetscCallAbort(PETSC_COMM_WORLD, PetscViewerDestroy(&viewer));
+
+    PetscCallAbort(PETSC_COMM_WORLD, PetscPrintf(PETSC_COMM_WORLD,
+        "Preconditioner matrix P dumped to %s\n", filename));
+}
+
 /*  Solve  */
-void PetscSolver::solve(double *x, int size, const double *b)
+void PetscSolver::solve(double *x, int size, const double *b, int cycle)
 {
     assert(size == localSize_);
-    // Re-assemble P if a preconditioner actually uses it (skip for PCNONE)
-    if (usePrecMatrix_) {
-        PC pc;
-        PetscCallAbort(PETSC_COMM_WORLD, KSPGetPC(ksp_, &pc));
-        PetscBool isNone;
-        PetscCallAbort(PETSC_COMM_WORLD,
-            PetscObjectTypeCompare((PetscObject)pc, PCNONE, &isNone));
-        if (!isNone)
-            assembleP();
-    }
+    // Re-assemble P if it contains cycle-dependent terms (e.g. mass matrix).
+    // Constant preconditioners (curl-curl only) skip this — assembled once in constructor.
+    if (usePrecMatrix_ && needsReassembly_)
+        assembleP();
 
     // Point the pre-allocated Vecs at the caller's arrays (zero-copy)
     PetscCallAbort(PETSC_COMM_WORLD, VecPlaceArray(petsc_x_, x));
@@ -506,7 +574,7 @@ void PetscSolver::solve(double *x, int size, const double *b)
 
     PetscCallAbort(PETSC_COMM_WORLD, KSPSolve(ksp_, petsc_b_, petsc_x_));
 
-    // Report convergence
+    // Report convergence (structured format for post-processing parser)
     PetscInt iter;
     PetscReal residual;
     PetscCallAbort(PETSC_COMM_WORLD, KSPGetIterationNumber(ksp_, &iter));
@@ -516,12 +584,12 @@ void PetscSolver::solve(double *x, int size, const double *b)
     PetscCallAbort(PETSC_COMM_WORLD, KSPGetConvergedReason(ksp_, &reason));
     if (reason > 0) {
         PetscCallAbort(PETSC_COMM_WORLD,
-            PetscPrintf(PETSC_COMM_WORLD, "PETSc KSP converged in %d iterations, residual = %e\n",
-                        (int)iter, (double)residual));
+            PetscPrintf(PETSC_COMM_WORLD, "PETSc KSP converged: cycle=%d iterations=%d residual=%e\n",
+                        cycle, (int)iter, (double)residual));
     } else {
         PetscCallAbort(PETSC_COMM_WORLD,
-            PetscPrintf(PETSC_COMM_WORLD, "WARNING: PETSc KSP did NOT converge (reason=%d) after %d iterations, residual = %e\n",
-                        (int)reason, (int)iter, (double)residual));
+            PetscPrintf(PETSC_COMM_WORLD, "WARNING: PETSc KSP did NOT converge: cycle=%d reason=%d iterations=%d residual=%e\n",
+                        cycle, (int)reason, (int)iter, (double)residual));
     }
 
     // Release the caller's arrays from the Vecs (does NOT free them)

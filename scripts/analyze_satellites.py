@@ -5,7 +5,7 @@ Inspired by the C++ postprocessing tools written by Alexander E. Vapirev,
 KU Leuven, Afdeling Plasma-astrofysica (2011-2012).
 
 Uses the reader from read_virtual_satellites.py and theming from
-tests/plot_theme.py.
+plot_theme.py (in scripts/).
 
 Examples
 --------
@@ -36,10 +36,6 @@ __all__ = [
     "plot_timeseries", "plot_spectra", "plot_plane_snapshot",
 ]
 
-# Ensure project root paths are importable
-_project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(_project_root / "tests"))
 from read_virtual_satellites import (
     DERIVED_NAMES,
     FIELD_NAMES,

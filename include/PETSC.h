@@ -8,6 +8,7 @@
 
 #include <petscksp.h>
 #include <petscmat.h>
+#include <string>
 #include "Neighbouring_Nodes.h"
 
 class EMfields3D;
@@ -20,12 +21,16 @@ struct PetscSolverContext {
 class PetscSolver {
 public:
     PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct,
-                double tol, bool usePrecMatrix);
+                double tol, bool usePrecMatrix, bool diagnostics = false,
+                const std::string &simName = "",
+                const std::string &saveDir = "output");
     ~PetscSolver();
     PetscSolver(const PetscSolver&) = delete;
     PetscSolver& operator=(const PetscSolver&) = delete;
 
-    void solve(double *x, int size, const double *b);
+    void solve(double *x, int size, const double *b, int cycle = -1);
+    void printDiagnostics(int cycle) const;
+    void dumpP(const char *filename) const;
 
 private:
     void assembleP();
@@ -43,9 +48,13 @@ private:
 
     // Preconditioner matrix (27-point stencil: I + curl-curl + mass matrix)
     bool usePrecMatrix_;
+    bool needsReassembly_;  // true if P contains cycle-dependent terms (e.g. mass matrix)
+    bool diagnostics_;      // print norms and dump matrix to file
+    std::string simName_;   // simulation name for output file prefixes
+    std::string saveDir_;   // output directory (from input file SaveDirName)
     Mat P_;                 // explicit preconditioner matrix (MATMPIAIJ, block size 3)
     EMfields3D *emf_;       // same pointer as ctx_.emf; cached for direct use in assembleP()
-    PetscInt globalRowOffset_;  // local→global index mapping
+    PetscInt globalBlockOffset_;  // local→global block index offset
 
     // Curl-curl stencil: precomputed tensor-product form
     // curlCurlStencil_[eq_comp][in_comp][di+1][dj+1][dk+1]

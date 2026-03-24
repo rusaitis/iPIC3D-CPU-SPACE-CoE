@@ -36,17 +36,18 @@ py         = { features = ["py"], no-default-feature = true }
 
 # ── Tasks ───────────────────────────────────────────────────────────
 [tasks]
+sim         = { cmd = "bash scripts/sim.sh", description = "Run simulation: pixi run sim -- <input.inp|dir> [-np N] [-o dir] [--solver T] [--cycles N] [--dry-run]" }
 configure   = { cmd = "cmake -S . -B $IPIC3D_BUILD_DIR -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DHDF5_ROOT=$CONDA_PREFIX $IPIC3D_CMAKE_EXTRA", description = "Configure CMake build" }
 build       = { cmd = "cmake --build $IPIC3D_BUILD_DIR --parallel", depends-on = ["configure"], description = "Build iPIC3D (with PETSc)" }
 clean       = { cmd = "rm -rf $IPIC3D_BUILD_DIR", description = "Remove build directory" }
 clean-all   = { cmd = "rm -rf build build-petsc", description = "Remove all build directories" }
 test        = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], description = "Solver regression test (GMRES + PETSc comparison)" }
-test-smoke  = { cmd = "mkdir -p /tmp/ipic3d_ci && mpirun --oversubscribe -np 4 $IPIC3D_BUILD_DIR/iPIC3D inputfiles/ci_smoke.inp", depends-on = ["build"], description = "3-cycle GEM2D smoke test (4 procs)" }
-plot-timing = { cmd = "python tests/plot_timing.py", description = "Solver timing comparison (run test first)" }
-plot-fields = { cmd = "python tests/plot_field_comparison.py", description = "Field heatmaps (run test first)" }
-plot-energy = { cmd = "python tests/plot_energy.py", description = "Energy conservation plot (run test first)" }
-plot-l2     = { cmd = "python tests/plot_l2_timeseries.py", description = "L2 error plot (run test first)" }
-aggregate   = { cmd = "python tests/aggregate_profiles.py", description = "Build results.csv from profile CSVs (no re-run needed)" }
+test-smoke  = { cmd = "bash scripts/sim.sh inputfiles/ci_smoke.inp -np 4 --no-build", depends-on = ["build"], description = "3-cycle GEM2D smoke test (4 procs)" }
+plot-timing = { cmd = "python scripts/plot_timing.py", description = "Solver timing comparison (run test first)" }
+plot-fields = { cmd = "python scripts/plot_field_comparison.py", description = "Field heatmaps (run test first)" }
+plot-energy = { cmd = "python scripts/plot_energy.py", description = "Energy conservation plot (run test first)" }
+plot-l2     = { cmd = "python scripts/plot_l2_timeseries.py", description = "L2 error plot (run test first)" }
+aggregate   = { cmd = "python scripts/aggregate_profiles.py", description = "Build results.csv from profile CSVs (no re-run needed)" }
 movie       = { cmd = "bash tests/make_movie.sh", description = "Stitch field comparison into mp4 movie (run test with --field-output first; requires ffmpeg)" }
 reconnection      = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --baseline --cycles 2000 --field-output 10 --diag-output 1 --movie --clean", depends-on = ["build"], description = "Long reconnection run: 2000 cycles (250 ω_pi⁻¹), GMRES vs PETSc + movie" }
 reconnection-hires = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --baseline --cycles 3000 --field-output 15 --diag-output 1 --grid 250 250 --movie --clean", depends-on = ["build"], description = "High-res reconnection: 250×250, 3000 cycles, resolved current sheet" }
@@ -54,3 +55,12 @@ bench-pc-sweep   = { cmd = "bash tests/bench_preconditioners.sh --exe $IPIC3D_BU
 bench-pc-scaling = { cmd = "bash tests/bench_preconditioners.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --scaling", depends-on = ["build"], description = "Mesh scaling study: GAMG vs unpreconditioned (50→300)" }
 bench-pc         = { cmd = "bash tests/bench_preconditioners.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], description = "Full preconditioner benchmark (sweep + scaling)" }
 analyze-sat      = { cmd = "python scripts/analyze_satellites.py", description = "Virtual satellite analysis (time series, FFT, heatmaps)" }
+plot-ksp  = { cmd = "python scripts/plot_ksp_diagnostics.py", description = "KSP convergence from log: pixi run plot-ksp -- <run.log>" }
+plot-prec = { cmd = "python scripts/plot_preconditioner.py", description = "Preconditioner matrix viz: pixi run plot-prec -- <matrix.bin>" }
+validate       = { cmd = "python scripts/validate.py", description = "Validate test output: pixi run validate -- <output_dir>" }
+summarize      = { cmd = "python scripts/summarize.py", description = "CLI run summary: pixi run summarize -- <output_dir>" }
+test-restart   = { cmd = "bash tests/test_restart.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], description = "Verify restart produces identical results" }
+test-ksp-sweep = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --cycles 20 --field-output 10 --add-solver 'PETSc_bcgs:PETSc:-ksp_type bcgs' --add-solver 'PETSc_fgmres:PETSc:-ksp_type fgmres -ksp_gmres_restart 50' --add-solver 'PETSc_jacobi:PETSc:-pc_type jacobi' --clean", depends-on = ["build"], description = "KSP/PC variant correctness: bcgs, fgmres, jacobi vs GMRES baseline" }
+
+[dependencies]
+petsc4py = ">=3.22.2,<4"

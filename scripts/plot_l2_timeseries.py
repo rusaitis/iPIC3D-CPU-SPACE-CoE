@@ -7,9 +7,9 @@ at each output cycle, fits power-law growth models, and generates a diagnostic
 plot with local exponent analysis.
 
 Usage:
-    python3 tests/plot_l2_timeseries.py --ref DIR --test DIR [--test DIR ...]
-    python3 tests/plot_l2_timeseries.py                          # auto-discover
-    python3 tests/plot_l2_timeseries.py --csv --gmrestol 1e-15   # with CSV output
+    python3 scripts/plot_l2_timeseries.py --ref DIR --test DIR [--test DIR ...]
+    python3 scripts/plot_l2_timeseries.py                          # auto-discover
+    python3 scripts/plot_l2_timeseries.py --csv --gmrestol 1e-15   # with CSV output
 
 HDF5 layout (phdf5 global files):
     <run_dir>/Fields_NNNNN/B_NNNNN.h5  →  /Fields/Bx, /Fields/By, /Fields/Bz  (X, Y, Z)

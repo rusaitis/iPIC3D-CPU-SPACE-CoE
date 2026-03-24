@@ -10,6 +10,8 @@ examples/
 # Local build and notes
 PLAN.md
 NOTES.md
+NOTES-preconditioner.md
+NOTES-solve-sequence.md
 plan-*.md
 
 # Pixi
@@ -92,6 +94,7 @@ CLAUDE.local.md
 copilot-instructions.md
 
 # Output and data files (common in simulation codes)
+output*/
 *.h5
 *.hdf5
 *.dat

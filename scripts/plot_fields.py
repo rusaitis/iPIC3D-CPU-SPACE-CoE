@@ -33,7 +33,6 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 from plot_theme import add_theme_arg, apply_theme
 
 

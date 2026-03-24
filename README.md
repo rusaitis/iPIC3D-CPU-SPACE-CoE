@@ -84,14 +84,29 @@ For all available options and manual CMake instructions:
 
 ### 3. Run a simulation
 
+The `pixi run sim` command builds (if needed), runs, and logs automatically:
+
 ```shell
-# np = XLEN x YLEN x ZLEN (set in the input file)
+pixi run sim inputfiles/Double_Harris.inp                    # build + run (np auto-detected)
+pixi run sim inputfiles/Double_Harris.inp --solver PETSc     # PETSc solver
+pixi run sim inputfiles/Double_Harris.inp -np 4 --cycles 50  # override procs and cycles
+pixi run sim inputfiles/Double_Harris.inp -o output/my_run   # custom output dir
+pixi run sim inputfiles/Double_Harris.inp --solver PETSc --diag  # PETSc diagnostics mode
+pixi run sim inputfiles/Double_Harris.inp --dry-run          # show command without running
+```
+
+**Restart** — pass an output directory instead of an input file:
+```shell
+pixi run sim output/data_reconnection                        # restart from checkpoint
+pixi run sim output/data_reconnection --cycles 500           # extend to 500 cycles
+pixi run sim output/data_reconnection -o output/petsc_run --solver PETSc  # restart with different solver
+```
+
+Output is logged to `<output_dir>/run.log` by default (use `--no-log` to disable). After the run, a per-cycle timing profile (`profile_run.csv`) is auto-extracted from the log.
+
+**Direct mpirun** (without sim.sh):
+```shell
 mpirun -np 8 build/iPIC3D inputfiles/Double_Harris.inp
-
-# With PETSc solver (requires PETSc build):
-mpirun -np 8 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc
-
-# PETSc options can be passed directly on the command line:
 mpirun -np 8 build/iPIC3D inputfiles/Double_Harris.inp -solver PETSc \
   -ksp_type bcgs -ksp_max_it 1000 -ksp_monitor
 ```
@@ -106,6 +121,33 @@ PETSc runtime flags are passed through to PETSc automatically. Some useful ones:
 | `-ksp_rtol <tol>` | Relative tolerance |
 | `-ksp_monitor` | Print residual norm at each iteration |
 | `-ksp_view` | Print solver configuration after solve |
+| `-ksp_view_eigenvalues` | Print Ritz eigenvalues after each solve |
+| `-ksp_view_singularvalues` | Print extreme singular values and condition number |
+| `-pc_type <type>` | Preconditioner: `none` (default), `gamg`, `hypre`, `ilu`, `jacobi` |
+
+### Preconditioner diagnostics
+
+The `--diag` flag enables all PETSc diagnostic output in one command:
+
+```bash
+# Run with full PETSc diagnostics (PrecMatrix, KSP monitor, eigenvalues, auto-logged)
+pixi run sim inputfiles/Double_Harris.inp --solver PETSc --diag
+
+# Plot KSP diagnostics (iterations, convergence, Ritz eigenvalues, condition number)
+pixi run plot-ksp -- output/data_reconnection/run.log
+
+# Visualize the preconditioner matrix P (sparsity, block norms, diagonal structure)
+pixi run plot-prec -- output/data_reconnection/Double_Harris_P_cycle0.bin
+```
+
+Input file parameters for preconditioner matrix:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `PrecMatrix` | `false` | Assemble explicit 27-point stencil preconditioner matrix |
+| `PrecDiagnostics` | `false` | Print matrix norms on cycle 0 and dump P to binary file |
+
+Both scripts support `--light` for light theme and `-o FILE` for explicit output path.
 
 ## Testing
 
@@ -173,8 +215,18 @@ pixi run plot-energy -- --output custom_energy.png
 
 Or run the scripts directly:
 ```shell
-python3 tests/plot_timing.py tests/test_output/timing_results.csv
-python3 tests/plot_energy.py tests/test_output/timing_results.csv --light
+python3 scripts/plot_timing.py tests/test_output/results.csv
+python3 scripts/plot_energy.py tests/test_output/results.csv --light
+```
+
+### Validation and run summary
+
+After a simulation or test run, check results programmatically:
+
+```shell
+pixi run validate -- tests/test_output/              # pass/fail: energy, convergence, L2
+pixi run validate -- output/data_reconnection/       # works on sim output too
+pixi run summarize -- output/data_reconnection/      # CLI summary: timing, energy, convergence
 ```
 
 ### Movie generation

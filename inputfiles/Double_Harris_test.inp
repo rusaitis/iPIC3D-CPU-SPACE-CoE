@@ -2,8 +2,8 @@
 
 Case                           = Double_Harris
 SimulationName                 = Double_Harris_test
-SaveDirName                    = data_dh_test
-RestartDirName                 = data_dh_test
+SaveDirName                    = output/data_dh_test
+RestartDirName                 = output/data_dh_test
 
 # ---- OUTPUT ----
 WriteMethod                    = phdf5

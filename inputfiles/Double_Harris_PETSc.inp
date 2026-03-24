@@ -7,8 +7,8 @@
 
 Case                           = Double_Harris                                 # Case
 SimulationName                 = Double_Harris_PETSc                           # Simulation name for output
-SaveDirName                    = data_reconnection                             # Output directory
-RestartDirName                 = data_reconnection                             # Restart directory
+SaveDirName                    = output/data_reconnection                      # Output directory
+RestartDirName                 = output/data_reconnection                      # Restart directory
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                    OUTPUT                                  %

@@ -48,23 +48,21 @@ def main(argv=None):
 
     # ── I/O paths ─────────────────────────────────────────────────────────
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_dir = os.path.dirname(script_dir)
+    test_output = os.path.join(project_dir, "tests", "test_output")
 
     if args.csv is not None:
         csv_path = args.csv
     elif "CSV_FILE" in os.environ:
         csv_path = os.environ["CSV_FILE"]
     else:
-        # Prefer results.csv next to script; fall back to test_output/
-        default = os.path.join(script_dir, "results.csv")
-        if os.path.isfile(default):
-            csv_path = default
-        else:
-            alt = os.path.join(script_dir, "test_output", "results.csv")
-            csv_path = alt if os.path.isfile(alt) else default
+        # Look for results.csv in tests/test_output/
+        default = os.path.join(test_output, "results.csv")
+        csv_path = default
 
     # Auto-aggregate profile CSVs if results.csv doesn't exist yet
     if not os.path.isfile(csv_path):
-        output_dir = os.path.join(script_dir, "test_output")
+        output_dir = test_output
         if os.path.isdir(output_dir):
             from plot_utils import aggregate_profiles_to_csv
             try:
@@ -95,6 +93,12 @@ def main(argv=None):
         cq = parse_conserved_quantities(run_dir)
         if cq:
             energy_data[label] = cq
+
+    # Fallback: try the directory itself (e.g., from a sim.sh run)
+    if not energy_data:
+        cq = parse_conserved_quantities(profile_dir)
+        if cq:
+            energy_data[os.path.basename(profile_dir)] = cq
 
     if not energy_data:
         print("  No energy data found (ConservedQuantities.txt missing from run dirs).")

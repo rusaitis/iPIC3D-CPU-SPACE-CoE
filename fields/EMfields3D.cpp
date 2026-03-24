@@ -2609,7 +2609,8 @@ void EMfields3D::calculateE()
     //? Solve using GMRes or PETSc
 #ifdef USE_PETSC
     if (petscSolver_ != nullptr) {
-        petscSolver_->solve(xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2), bkrylov);
+        petscSolver_->solve(xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2), bkrylov,
+                            col->getCurrentCycle());
     } else
 #endif
     {

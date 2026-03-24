@@ -43,6 +43,7 @@ fi
 # ========================= Section 1: Setup ================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPTS_DIR="${PROJECT_DIR}/scripts"
 source "$SCRIPT_DIR/common.sh"
 
 # ========================= Section 2: Defaults =============================
@@ -78,6 +79,7 @@ SOLVER_FILTER=""
 VERBOSE=true
 WARMUP=0
 NO_PLOT=false
+NO_VALIDATE=false
 NO_COLOR_FLAG=false
 BASELINE=false
 PETSC_OPTIONS=""
@@ -184,6 +186,7 @@ while [[ $# -gt 0 ]]; do
             validate_nonneg_int "--warmup" "$2"
             WARMUP="$2"; shift 2 ;;
         --no-plot)      NO_PLOT=true;       shift ;;
+        --no-validate)  NO_VALIDATE=true;   shift ;;
         --no-color)     NO_COLOR_FLAG=true; shift ;;
         --baseline)     BASELINE=true;     shift ;;
         --petsc-options)
@@ -249,6 +252,7 @@ Options:
   --quiet              Suppress per-run progress lines
   --warmup N           Run N warm-up cycles before timed runs (default: 0)
   --no-plot            Skip matplotlib plotting
+  --no-validate        Skip automated validation checks
   --no-color           Disable colored output (auto-detected when piped)
   --petsc-options STR  Extra PETSc KSP options for all PETSc runs (quoted string)
   --exe PATH           Path to iPIC3D executable (default: build/iPIC3D)
@@ -648,60 +652,7 @@ make_input() {
 # Args: logfile output_csv
 extract_profile() {
     local logfile="$1" outcsv="$2"
-    "$PYTHON" - "$logfile" "$outcsv" <<'PYPROFILE'
-import re, sys, csv
-
-logfile, outcsv = sys.argv[1], sys.argv[2]
-fields = []  # list of (field, mover, moment, write) cumulative tuples
-iterations = []  # per-solve iteration counts
-
-# Convergence pattern registry: (regex, iter_extractor)
-# Each entry tries to match a line; iter_extractor takes the match and returns
-# the iteration count. Patterns are tried in order, first match wins.
-ITER_PATTERNS = [
-    (re.compile(r'GMRES converged at restart (\d+); iteration (\d+) with error:'),
-     lambda m: int(m.group(1)) * 20 + int(m.group(2))),
-    (re.compile(r'GMRES converged without iterations'),
-     lambda m: 0),
-    (re.compile(r'PETSc KSP converged in (\d+) iterations'),
-     lambda m: int(m.group(1))),
-    (re.compile(r'PETSc KSP did NOT converge.*after (\d+) iterations'),
-     lambda m: int(m.group(1))),
-    # Add new solver patterns here:
-    # (re.compile(r'CG converged in (\d+) iterations'), lambda m: int(m.group(1))),
-]
-
-with open(logfile) as f:
-    cur = {}
-    for line in f:
-        # Parse convergence lines for iteration counts
-        for pat, extract in ITER_PATTERNS:
-            m = pat.search(line)
-            if m:
-                iterations.append(extract(m))
-                break
-        else:
-            for key, pat in [('field', r'Field solver\s*:\s*([\d.eE+\-]+)'),
-                             ('mover', r'Particle mover\s*:\s*([\d.eE+\-]+)'),
-                             ('moment', r'Moment gatherer\s*:\s*([\d.eE+\-]+)'),
-                             ('write', r'Write data\s*:\s*([\d.eE+\-]+)')]:
-                m = re.search(pat, line)
-                if m:
-                    cur[key] = float(m.group(1))
-            if len(cur) == 4:
-                fields.append((cur['field'], cur['mover'], cur['moment'], cur['write']))
-                cur = {}
-
-with open(outcsv, 'w', newline='') as out:
-    w = csv.writer(out)
-    w.writerow(['cycle', 'field_solver_s', 'particle_mover_s', 'moment_gatherer_s', 'write_data_s', 'iterations'])
-    prev = (0, 0, 0, 0)
-    for i, vals in enumerate(fields):
-        delta = tuple(v - p for v, p in zip(vals, prev))
-        iters = iterations[i] if i < len(iterations) else ''
-        w.writerow([i + 1] + [f'{d:.6f}' for d in delta] + [iters])
-        prev = vals
-PYPROFILE
+    "$PYTHON" "$SCRIPTS_DIR/extract_profile.py" "$logfile" "$outcsv" 2>/dev/null || true
 }
 
 # Parse convergence info from a log file.
@@ -711,76 +662,35 @@ PYPROFILE
 #   avg_residual: average final residual
 parse_convergence() {
     local logfile="$1"
-    "$PYTHON" - "$logfile" <<'PYCONV'
-import re, sys
+    PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}" "$PYTHON" -c "
+from log_patterns import CONVERGENCE_PATTERNS, GMRES_ZERO_ITER
 
 logfile = sys.argv[1]
-iters_list = []
-residuals = []
-any_failed = False
-
-# Convergence pattern registry:
-# (name, success_regex, fail_regex, success_iter_extractor, success_residual_group,
-#  fail_iter_extractor, fail_residual_group)
-CONVERGENCE_PATTERNS = [
-    ("GMRES",
-     re.compile(r'GMRES converged at restart (\d+); iteration (\d+) with error:\s*([\d.eE+\-]+)'),
-     re.compile(r'GMRES not converged.*Final error:\s*([\d.eE+\-]+)'),
-     lambda m: int(m.group(1)) * 20 + int(m.group(2)),
-     3,     # residual group index in success regex
-     None,  # no iter count for GMRES failure
-     1),    # residual group index in fail regex
-    ("PETSc",
-     re.compile(r'PETSc KSP converged in (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)'),
-     re.compile(r'PETSc KSP did NOT converge.*after (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)'),
-     lambda m: int(m.group(1)),
-     2,
-     lambda m: int(m.group(1)),
-     2),
-    # Add new solver patterns here:
-    # ("CG",
-    #  re.compile(r'CG converged in (\d+) iterations, residual\s*=\s*([\d.eE+\-]+)'),
-    #  re.compile(r'CG did NOT converge.*after (\d+) iterations'),
-    #  lambda m: int(m.group(1)), 2, lambda m: int(m.group(1)), None),
-]
-
-# Special case: "GMRES converged without iterations"
-GMRES_ZERO_ITER = re.compile(r'GMRES converged without iterations')
+iters_list, residuals, any_failed = [], [], False
 
 with open(logfile) as f:
     for line in f:
-        # Check zero-iteration GMRES convergence
         if GMRES_ZERO_ITER.search(line):
-            iters_list.append(0)
-            residuals.append(0.0)
-            continue
-
-        matched = False
+            iters_list.append(0); residuals.append(0.0); continue
         for name, success_re, fail_re, iter_fn, res_grp, fail_iter_fn, fail_res_grp in CONVERGENCE_PATTERNS:
             m = success_re.search(line)
             if m:
-                iters_list.append(iter_fn(m))
-                residuals.append(float(m.group(res_grp)))
-                matched = True
-                break
+                iters_list.append(iter_fn(m)); residuals.append(float(m.group(res_grp))); break
             m = fail_re.search(line)
             if m:
                 any_failed = True
-                if fail_iter_fn is not None:
-                    iters_list.append(fail_iter_fn(m))
-                if fail_res_grp is not None:
-                    residuals.append(float(m.group(fail_res_grp)))
-                matched = True
+                if fail_iter_fn is not None: iters_list.append(fail_iter_fn(m))
+                if fail_res_grp is not None: residuals.append(float(m.group(fail_res_grp)))
                 break
 
 if not iters_list and not residuals:
-    print("NA NA NA")
+    print('NA NA NA')
 else:
     avg_iters = sum(iters_list) / len(iters_list) if iters_list else 0
-    converged = "no" if any_failed else "yes"
+    converged = 'no' if any_failed else 'yes'
     avg_residual = sum(residuals) / len(residuals) if residuals else 0
-    print(f"{avg_iters:.1f} {converged} {avg_residual:.2e}")
-PYCONV
+    print(f'{avg_iters:.1f} {converged} {avg_residual:.2e}')
+" "$logfile"
 }
 
 # Run a short warm-up simulation (WARMUP cycles) to prime caches/JIT.
@@ -886,6 +796,9 @@ run_solver() {
     local config_tag="${nxc}x${nyc}x${nzc}"
     local profile_csv="$PERSISTENT_OUTPUT_DIR/profile_${label}_${config_tag}.csv"
     extract_profile "$logfile" "$profile_csv"
+
+    # Persist log to output dir for post-hoc analysis (KSP diagnostics, etc.)
+    cp "$logfile" "$PERSISTENT_OUTPUT_DIR/${label}_${config_tag}.log"
 
     echo "${field_t} ${moments_t} ${mover_t} ${iters} ${converged} ${residual}"
 }
@@ -1745,8 +1658,8 @@ if [[ "$NO_PLOT" != true ]]; then
     export BD_MOMENTS_LIST="${BD_MOMENTS_arr[*]}"
     export BD_MOVER_LIST="${BD_MOVER_arr[*]}"
 
-    "$PYTHON" "$SCRIPT_DIR/plot_timing.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Plot generation failed (see above)."
-    "$PYTHON" "$SCRIPT_DIR/plot_energy.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Energy plot generation failed."
+    "$PYTHON" "$SCRIPTS_DIR/plot_timing.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Plot generation failed (see above)."
+    "$PYTHON" "$SCRIPTS_DIR/plot_energy.py" "$CSV_FILE" || echo "  ${YELLOW}WARNING:${RESET} Energy plot generation failed."
 else
     echo "  ${ARROW} Plotting skipped (--no-plot)."
 fi
@@ -1769,9 +1682,9 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
 
         [[ -d "$ref_dir" && ${#test_args[@]} -gt 0 ]] || continue
 
-        if [[ -f "$SCRIPT_DIR/plot_field_comparison.py" ]]; then
+        if [[ -f "$SCRIPTS_DIR/plot_field_comparison.py" ]]; then
             echo "  ${ARROW} Visual comparison ${DOT} ${v_config_tag}"
-            "$PYTHON" "$SCRIPT_DIR/plot_field_comparison.py" \
+            "$PYTHON" "$SCRIPTS_DIR/plot_field_comparison.py" \
                 --ref "$ref_dir" "${test_args[@]}" || \
                 echo "  ${YELLOW}WARNING:${RESET} Visual comparison failed for ${v_config_tag}."
         fi
@@ -1789,7 +1702,7 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
         fi
 
         # ---- L2 time-series plot ----
-        if [[ -f "$SCRIPT_DIR/plot_l2_timeseries.py" ]]; then
+        if [[ -f "$SCRIPTS_DIR/plot_l2_timeseries.py" ]]; then
             l2_test_args=()
             for ((si=0; si<NUM_SOLVERS; si++)); do
                 [[ $si -eq $REF_SOLVER_IDX ]] && continue
@@ -1798,12 +1711,26 @@ if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" && "$DRY_RUN" != true ]]; the
             done
             if [[ ${#l2_test_args[@]} -gt 0 ]]; then
                 echo "  ${ARROW} L2 time-series plot ${DOT} ${v_config_tag}"
-                "$PYTHON" "$SCRIPT_DIR/plot_l2_timeseries.py" \
+                "$PYTHON" "$SCRIPTS_DIR/plot_l2_timeseries.py" \
                     --ref "$ref_dir" "${l2_test_args[@]}" || \
                     echo "  ${YELLOW}WARNING:${RESET} L2 time-series plot failed for ${v_config_tag}."
             fi
         fi
     done
+fi
+
+# ---- Validation ----
+if [[ "$NO_VALIDATE" != true && "$DRY_RUN" != true ]]; then
+    echo ""
+    echo "  ${ARROW} Running validation checks..."
+    VALIDATE_ARGS=()
+    if [[ -n "$FIELD_OUTPUT" && "$FIELD_OUTPUT" != "0" ]]; then
+        VALIDATE_ARGS+=(--strict)
+    fi
+    if ! "$PYTHON" "$SCRIPTS_DIR/validate.py" "$PERSISTENT_OUTPUT_DIR" "${VALIDATE_ARGS[@]}"; then
+        echo "  ${RED}${CROSS}${RESET} Validation FAILED"
+        exit 1
+    fi
 fi
 
 echo ""

@@ -7,8 +7,8 @@
 
 Case                           = Double_Harris                                 # Case
 SimulationName                 = Double_Harris_PETSc_prec                      # Simulation name for output
-SaveDirName                    = data_reconnection                             # Output directory
-RestartDirName                 = data_reconnection                             # Restart directory
+SaveDirName                    = output/data_reconnection                      # Output directory
+RestartDirName                 = output/data_reconnection                      # Restart directory
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                    OUTPUT                                  %
@@ -61,6 +61,7 @@ c                              = 1.0                                           #
 GMREStol                       = 1E-15                                         # Solver tolerance (must be <= 1e-15 for exact energy conservation)
 SolverType                     = PETSc                                         # Field solver type: GMRES (default) or PETSc
 PrecMatrix                     = true                                          # Assemble explicit preconditioner matrix (27-point stencil for AMG)
+PrecDiagnostics                = true                                          # Print P matrix diagnostics and dump P_cycle0.bin
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                   SMOOTHING                                %
