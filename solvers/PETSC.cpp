@@ -21,6 +21,10 @@
 #include <cmath>
 #include <filesystem>
 
+// Free functions defined in EMfields3D.cpp (no header declaration)
+void solver2phys(arr3_double, arr3_double, arr3_double, double*, int, int, int);
+void phys2solver(double*, const arr3_double, const arr3_double, const arr3_double, int, int, int);
+
 /*  Matrix-free A*x callback: computes y = A*x.
  *  PETSc calls this whenever the KSP solver needs a matrix-vector product.
  *
@@ -55,20 +59,23 @@ PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y)
  *  emf           — the EMfields3D object whose MaxwellImage() provides the A*x product
  *  vct           — MPI Cartesian topology (for ghost→global index mapping in preconditioner)
  *  tol           — relative convergence tolerance (same GMREStol used by the built-in GMRES)
- *  usePrecMatrix — if true, assemble full 27-point mass matrix preconditioner P
+ *  precType      — "None", "Matrix" (explicit P for AMG), or "Smooth" (PCShell with smoothing)
  */
 PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct,
-                         double tol, bool usePrecMatrix, bool diagnostics,
+                         double tol, const std::string &precType, bool diagnostics,
                          const std::string &simName, const std::string &saveDir)
     : localSize_(localSize), petsc_x_(nullptr), petsc_b_(nullptr),
-      usePrecMatrix_(usePrecMatrix), needsReassembly_(false), diagnostics_(diagnostics),
+      usePrecMatrix_(precType == "Matrix"), needsReassembly_(false), diagnostics_(diagnostics),
       simName_(simName), saveDir_(saveDir),
       P_(nullptr), emf_(emf), globalBlockOffset_(0),
       nsp_(nullptr),
       vct_(vct), nprocsBlocks_(0),
       nxn_(0), nyn_(0), nzn_(0), niX_(0), niY_(0), niZ_(0),
       dx_(0), dy_(0), dz_(0),
-      c_(0), th_(0), dt_(0), FourPI_(0), invVOL_(0)
+      c_(0), th_(0), dt_(0), FourPI_(0), invVOL_(0),
+      useSmoothPC_(precType == "Smooth"),
+      pcWorkX_(nullptr), pcWorkY_(nullptr), pcWorkZ_(nullptr),
+      diagInv_(nullptr)
 {
     coords_[0] = coords_[1] = coords_[2] = 0;
     dims_[0] = dims_[1] = dims_[2] = 0;
@@ -81,9 +88,8 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
                        PETSC_DETERMINE, PETSC_DETERMINE, &ctx_, &A_));
     MatShellSetOperation(A_, MATOP_MULT, (void(*)(void))PetscMaxwellMatMult);
 
-    // Optional preconditioner matrix (full 27-point stencil)
-    if (usePrecMatrix_) {
-        // Cache physics parameters from EMfields3D
+    // Cache physics parameters (needed by both Matrix and Smooth preconditioner paths)
+    if (usePrecMatrix_ || useSmoothPC_) {
         nxn_ = emf->get_nxn();
         nyn_ = emf->get_nyn();
         nzn_ = emf->get_nzn();
@@ -100,7 +106,7 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
         niX_ = nxn_ - 2;
         niY_ = nyn_ - 2;
         niZ_ = nzn_ - 2;
-        nprocsBlocks_ = niX_ * niY_ * niZ_;  // uniform decomposition: same on all ranks
+        nprocsBlocks_ = niX_ * niY_ * niZ_;
         for (int d = 0; d < 3; d++)
             coords_[d] = vct_->getCoordinates(d);
         dims_[0] = vct_->getXLEN();
@@ -110,7 +116,7 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
         periodic_[1] = vct_->getPERIODICY();
         periodic_[2] = vct_->getPERIODICZ();
 
-        // Precompute curl-curl stencil and mass-group lookup table
+        // Precompute curl-curl stencil (needed by both Matrix assembly and Smooth diagonal blocks)
         computeCurlCurlStencil();
         buildMassGroupLookup();
 
@@ -119,15 +125,12 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
             const double invdx2 = 1.0 / (dx_ * dx_);
             const double invdy2 = 1.0 / (dy_ * dy_);
             const double invdz2 = 1.0 / (dz_ * dz_);
-            // Diagonal must match old ccDiagEx/Ey/Ez (before cthdt² scaling)
             assert(std::abs(curlCurlStencil_[0][0][1][1][1] - 0.5 * (invdy2 + invdz2)) < 1e-12);
             assert(std::abs(curlCurlStencil_[1][1][1][1][1] - 0.5 * (invdx2 + invdz2)) < 1e-12);
             assert(std::abs(curlCurlStencil_[2][2][1][1][1] - 0.5 * (invdx2 + invdy2)) < 1e-12);
-            // Cross-component self-coupling is zero (w_der[1] = 0)
             for (int a = 0; a < 3; a++)
                 for (int b = 0; b < 3; b++)
                     if (a != b) assert(curlCurlStencil_[a][b][1][1][1] == 0.0);
-            // Row sums are zero (curl-curl of constant = 0)
             for (int a = 0; a < 3; a++)
                 for (int b = 0; b < 3; b++) {
                     double sum = 0.0;
@@ -138,19 +141,20 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
                     assert(std::abs(sum) < 1e-12);
                 }
         }
+    }
 
+    // Explicit preconditioner matrix P (for AMG-type preconditioners)
+    if (usePrecMatrix_) {
         // Compute global row offset via MPI_Exscan (prefix sum of local sizes)
         PetscInt localBlockCount = localSize_ / 3;
         PetscInt offset = 0;
         MPI_Exscan(&localBlockCount, &offset, 1, MPIU_INT, MPI_SUM, PETSC_COMM_WORLD);
-        // MPI_Exscan leaves rank 0's output undefined
         int rank;
         MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
         if (rank == 0) offset = 0;
         globalBlockOffset_ = offset;
 
-        // Create MATMPIAIJ with block size 3 (GAMG/HYPRE require AIJ, not BAIJ)
-        // 27-point stencil × 3 DOFs per block = up to 81 scalar nonzeros per row
+        // Create MATMPIAIJ with block size 3
         PetscCallAbort(PETSC_COMM_WORLD,
             MatCreate(PETSC_COMM_WORLD, &P_));
         PetscCallAbort(PETSC_COMM_WORLD,
@@ -166,7 +170,7 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
 
         assembleP();
         setupNearNullSpace();
-        needsReassembly_ = true;  // mass matrix changes every cycle
+        needsReassembly_ = true;
 
         if (diagnostics_) {
             printDiagnostics(0);
@@ -185,12 +189,12 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
 
     if (usePrecMatrix_) {
         PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(ksp_, A_, P_));
-        // Default to PCNONE: P omits the smoothing filter applied 4× in
-        // MaxwellImage, so ILU(P) hurts convergence.  Users opt in to AMG
-        // via runtime -pc_type flags (KSPSetFromOptions overrides this).
         PC pc;
         PetscCallAbort(PETSC_COMM_WORLD, KSPGetPC(ksp_, &pc));
         PetscCallAbort(PETSC_COMM_WORLD, PCSetType(pc, PCNONE));
+    } else if (useSmoothPC_) {
+        PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(ksp_, A_, A_));
+        setupSmoothPC();
     } else {
         PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(ksp_, A_, A_));
     }
@@ -217,6 +221,12 @@ PetscSolver::~PetscSolver()
     if (usePrecMatrix_) {
         PetscCallAbort(PETSC_COMM_WORLD, MatNullSpaceDestroy(&nsp_));
         PetscCallAbort(PETSC_COMM_WORLD, MatDestroy(&P_));
+    }
+    if (useSmoothPC_) {
+        delete pcWorkX_;
+        delete pcWorkY_;
+        delete pcWorkZ_;
+        delete[] diagInv_;
     }
 }
 
@@ -559,14 +569,183 @@ void PetscSolver::dumpP(const char *filename) const
         "Preconditioner matrix P dumped to %s\n", filename));
 }
 
+/*  Analytically invert a 3×3 matrix stored in row-major order.
+ *  Uses the cofactor (adjugate) method: Dinv = adj(D) / det(D).
+ */
+void PetscSolver::invert3x3(const double D[9], double Dinv[9])
+{
+    // Cofactors
+    double c00 = D[4]*D[8] - D[5]*D[7];
+    double c01 = D[5]*D[6] - D[3]*D[8];
+    double c02 = D[3]*D[7] - D[4]*D[6];
+    double c10 = D[2]*D[7] - D[1]*D[8];
+    double c11 = D[0]*D[8] - D[2]*D[6];
+    double c12 = D[1]*D[6] - D[0]*D[7];
+    double c20 = D[1]*D[5] - D[2]*D[4];
+    double c21 = D[2]*D[3] - D[0]*D[5];
+    double c22 = D[0]*D[4] - D[1]*D[3];
+
+    double det = D[0]*c00 + D[1]*c01 + D[2]*c02;
+    double invdet = 1.0 / det;
+
+    Dinv[0] = c00 * invdet;  Dinv[1] = c10 * invdet;  Dinv[2] = c20 * invdet;
+    Dinv[3] = c01 * invdet;  Dinv[4] = c11 * invdet;  Dinv[5] = c21 * invdet;
+    Dinv[6] = c02 * invdet;  Dinv[7] = c12 * invdet;  Dinv[8] = c22 * invdet;
+}
+
+/*  Precompute D⁻¹ at every interior node.
+ *  D(i,j,k) = I + cthdt² * diag(CC) + scale * M[g=0](i,j,k)
+ *  where CC_diag is the curl-curl self-coupling (diagonal only, cross-component = 0).
+ */
+void PetscSolver::updateDiagInv()
+{
+    const double cthdt2 = c_ * th_ * dt_ * c_ * th_ * dt_;
+    const double scale  = dt_ * th_ * FourPI_ * invVOL_;
+
+    const_arr4_double Mxx = emf_->getMxx();
+    const_arr4_double Mxy = emf_->getMxy();
+    const_arr4_double Mxz = emf_->getMxz();
+    const_arr4_double Myx = emf_->getMyx();
+    const_arr4_double Myy = emf_->getMyy();
+    const_arr4_double Myz = emf_->getMyz();
+    const_arr4_double Mzx = emf_->getMzx();
+    const_arr4_double Mzy = emf_->getMzy();
+    const_arr4_double Mzz = emf_->getMzz();
+
+    for (int i = 1; i < nxn_ - 1; i++)
+        for (int j = 1; j < nyn_ - 1; j++)
+            for (int k = 1; k < nzn_ - 1; k++)
+            {
+                int idx = i * nyn_ * nzn_ + j * nzn_ + k;
+                double D[9];
+
+                // Diagonal: I + cthdt² * CC_diag (cross-component CC diag is zero)
+                D[0] = 1.0 + cthdt2 * ccDiag_[0] + scale * Mxx.get(0, i, j, k);
+                D[1] =                              scale * Myx.get(0, i, j, k);
+                D[2] =                              scale * Mzx.get(0, i, j, k);
+                D[3] =                              scale * Mxy.get(0, i, j, k);
+                D[4] = 1.0 + cthdt2 * ccDiag_[1] + scale * Myy.get(0, i, j, k);
+                D[5] =                              scale * Mzy.get(0, i, j, k);
+                D[6] =                              scale * Mxz.get(0, i, j, k);
+                D[7] =                              scale * Myz.get(0, i, j, k);
+                D[8] = 1.0 + cthdt2 * ccDiag_[2] + scale * Mzz.get(0, i, j, k);
+
+                invert3x3(D, &diagInv_[idx * 9]);
+            }
+}
+
+/*  Set up the PCShell preconditioner: allocate work arrays, precompute D⁻¹,
+ *  register the PCApply callback, and switch KSP to FGMRES (flexible GMRES
+ *  is required because the preconditioner involves MPI communication).
+ */
+void PetscSolver::setupSmoothPC()
+{
+    // Allocate work arrays for PCApply (cannot reuse EMfields3D's temp arrays)
+    pcWorkX_ = new array3_double(nxn_, nyn_, nzn_);
+    pcWorkY_ = new array3_double(nxn_, nyn_, nzn_);
+    pcWorkZ_ = new array3_double(nxn_, nyn_, nzn_);
+
+    // Cache curl-curl diagonal entries (per E-component)
+    ccDiag_[0] = curlCurlStencil_[0][0][1][1][1];  // 0.5*(1/dy² + 1/dz²)
+    ccDiag_[1] = curlCurlStencil_[1][1][1][1][1];  // 0.5*(1/dx² + 1/dz²)
+    ccDiag_[2] = curlCurlStencil_[2][2][1][1][1];  // 0.5*(1/dx² + 1/dy²)
+
+    // Allocate and compute D⁻¹
+    diagInv_ = new double[nxn_ * nyn_ * nzn_ * 9]();
+    updateDiagInv();
+
+    // Switch to FGMRES (PCShell involves MPI comms, making it "variable")
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetType(ksp_, KSPFGMRES));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGMRESSetRestart(ksp_, 20));
+
+    // Register PCShell
+    PC pc;
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGetPC(ksp_, &pc));
+    PetscCallAbort(PETSC_COMM_WORLD, PCSetType(pc, PCSHELL));
+    PetscCallAbort(PETSC_COMM_WORLD, PCShellSetContext(pc, this));
+    PetscCallAbort(PETSC_COMM_WORLD, PCShellSetApply(pc, PetscSmoothPCApply));
+
+    int rank;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    if (rank == 0)
+        printf("PCShell with smoothing preconditioner enabled (FGMRES + S·D⁻¹·S)\n");
+}
+
+/*  PCShell apply callback: y = D⁻¹ · x
+ *
+ *  D⁻¹ = pre-inverted 3×3 block-diagonal of A at each node.
+ *  D captures the identity, curl-curl diagonal, and center mass block.
+ *
+ *  ─── How to experiment with new preconditioners ───
+ *  This function is the place to modify.  It receives a PETSc Vec x (the
+ *  residual) and must write the preconditioned result to Vec y.  The pattern is:
+ *    1. solver2phys() to unpack interleaved Krylov vector → 3 separate 3D fields
+ *    2. Apply your preconditioner to the 3D fields
+ *    3. phys2solver() to pack back → interleaved Krylov vector
+ *
+ *  Available tools:
+ *    - emf->energy_conserve_smooth_direction(field, nx, ny, nz, dir) — 4-pass 27-pt filter
+ *    - diagInv_[] — pre-inverted 3×3 blocks at each node (updated every cycle)
+ *    - emf->mass_matrix_times_vector() — full 27-point mass matrix multiply
+ *    - Work arrays pcWorkX_/Y_/Z_ — allocated, same size as E-field arrays
+ */
+PetscErrorCode PetscSmoothPCApply(PC pc, Vec x, Vec y)
+{
+    PetscFunctionBeginUser;
+
+    void *ctx;
+    PetscCall(PCShellGetContext(pc, &ctx));
+    auto *solver = static_cast<PetscSolver*>(ctx);
+
+    EMfields3D *emf = solver->emf_;
+    int nxn = solver->nxn_, nyn = solver->nyn_, nzn = solver->nzn_;
+
+    // Get raw arrays from PETSc Vecs
+    const double *xarr;
+    double *yarr;
+    PetscCall(VecGetArrayRead(x, &xarr));
+    PetscCall(VecGetArray(y, &yarr));
+
+    // Unpack from interleaved Krylov vector to 3 separate 3D fields
+    array3_double &wX = *solver->pcWorkX_;
+    array3_double &wY = *solver->pcWorkY_;
+    array3_double &wZ = *solver->pcWorkZ_;
+    solver2phys(wX, wY, wZ, const_cast<double*>(xarr), nxn, nyn, nzn);
+
+    // Apply block-diagonal D⁻¹ at each interior node
+    // D = I + cthdt²·CC_diag + scale·M[g=0] captures the local operator structure
+    for (int i = 1; i < nxn - 1; i++)
+        for (int j = 1; j < nyn - 1; j++)
+            for (int k = 1; k < nzn - 1; k++)
+            {
+                int idx = i * nyn * nzn + j * nzn + k;
+                const double *Dinv = &solver->diagInv_[idx * 9];
+                double ex = wX[i][j][k], ey = wY[i][j][k], ez = wZ[i][j][k];
+
+                wX[i][j][k] = Dinv[0]*ex + Dinv[1]*ey + Dinv[2]*ez;
+                wY[i][j][k] = Dinv[3]*ex + Dinv[4]*ey + Dinv[5]*ez;
+                wZ[i][j][k] = Dinv[6]*ex + Dinv[7]*ey + Dinv[8]*ez;
+            }
+
+    // Pack back to interleaved Krylov vector
+    phys2solver(yarr, wX, wY, wZ, nxn, nyn, nzn);
+
+    PetscCall(VecRestoreArrayRead(x, &xarr));
+    PetscCall(VecRestoreArray(y, &yarr));
+
+    PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 /*  Solve  */
 void PetscSolver::solve(double *x, int size, const double *b, int cycle)
 {
     assert(size == localSize_);
     // Re-assemble P if it contains cycle-dependent terms (e.g. mass matrix).
-    // Constant preconditioners (curl-curl only) skip this — assembled once in constructor.
     if (usePrecMatrix_ && needsReassembly_)
         assembleP();
+    // Update block-diagonal D⁻¹ for PCShell (mass matrix changes every cycle)
+    if (useSmoothPC_)
+        updateDiagInv();
 
     // Point the pre-allocated Vecs at the caller's arrays (zero-copy)
     PetscCallAbort(PETSC_COMM_WORLD, VecPlaceArray(petsc_x_, x));

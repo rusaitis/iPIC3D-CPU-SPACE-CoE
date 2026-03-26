@@ -10,6 +10,7 @@
 #include <petscmat.h>
 #include <string>
 #include "Neighbouring_Nodes.h"
+#include "arraysfwd.h"
 
 class EMfields3D;
 class VCtopology3D;
@@ -19,9 +20,10 @@ struct PetscSolverContext {
 };
 
 class PetscSolver {
+    friend PetscErrorCode PetscSmoothPCApply(PC pc, Vec x, Vec y);
 public:
     PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct,
-                double tol, bool usePrecMatrix, bool diagnostics = false,
+                double tol, const std::string &precType, bool diagnostics = false,
                 const std::string &simName = "",
                 const std::string &saveDir = "output");
     ~PetscSolver();
@@ -83,9 +85,37 @@ private:
     int nxn_, nyn_, nzn_;
     double dx_, dy_, dz_;
     double c_, th_, dt_, FourPI_, invVOL_;
+
+    // ── Experimental PCShell preconditioner ──────────────────────────────
+    //
+    // Activated by input parameter PrecType = Smooth (default: None).
+    // Uses FGMRES with a matrix-free PCApply callback.
+    //
+    // Current implementation: block-diagonal D⁻¹ at each node, where
+    //   D(i,j,k) = I + (cθdt)²·CC_diag + dt·θ·4π·invVOL · M[g=0](i,j,k)
+    //
+    // This captures the local mass + curl-curl structure but NOT the 27-point
+    // off-diagonal coupling. Tested approaches and results (see plan-preconditioners.md):
+    //   - S(D⁻¹(S(r))): over-smooths, stalls at residual ~0.12
+    //   - D⁻¹ only:      1.6–2× more iterations than PCNONE
+    //
+    // To experiment with new preconditioners:
+    //   1. Modify PetscSmoothPCApply() in PETSC.cpp — that's the PCApply callback
+    //   2. updateDiagInv() runs each cycle to refresh D⁻¹ from the current mass matrix
+    //   3. energy_conserve_smooth_direction() is available for smoothing (public in EMfields3D)
+    //   4. FGMRES calls PCApply and MatMult sequentially — no MPI re-entrancy issues
+    //
+    bool useSmoothPC_;
+    void setupSmoothPC();
+    void updateDiagInv();
+    static void invert3x3(const double D[9], double Dinv[9]);
+    array3_double *pcWorkX_, *pcWorkY_, *pcWorkZ_;  // work arrays for PCApply
+    double ccDiag_[3];       // curl-curl diagonal per E-component
+    double *diagInv_;        // pre-inverted 3×3 blocks, nxn*nyn*nzn*9 doubles
 };
 
 PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y);
+PetscErrorCode PetscSmoothPCApply(PC pc, Vec x, Vec y);
 
 #endif // USE_PETSC
 #endif // PETSC_H

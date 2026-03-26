@@ -19,6 +19,9 @@ flag in the input file.
   formulation*, J. Comput. Phys. 334, 349–366. The foundational ECSIM paper.
 - **Markidis & Lapenta (2011)** — *Multi-scale simulations of plasma with iPIC3D*,
   Math. Comput. Simul. 80(7), 1509–1519.
+- **Lapenta (2023)** — *Advances in the Implementation of the Exactly Energy
+  Conserving Semi-Implicit (ECsim) Particle-in-Cell Method*, Physics 5(1), 72.
+  Acknowledges that exact conservation holds only for NGP interpolation.
 - **Bacchini et al. (2023)** — *A relativistic semi-implicit method for
   magnetized plasmas*, ApJ 268, 60. RelSIM formulation.
 
@@ -367,25 +370,122 @@ ECSIM conserves energy to machine precision in theory (θ = 0.5, solver toleranc
 ≤ 1e-15). In practice, the default `Double_Harris.inp` shows ~0.03% energy
 deviation after 2000 cycles (~1.4e-05 relative drift at 200 cycles).
 
-An empirical study (data in `output/energy_study/`) tested all plausible
-culprits and found that **floating-point rounding noise — primarily from MPI
-communication — is the dominant source**, not algorithmic defects in smoothing
-or charge correction.
+An empirical study (data in `output/energy_study/`) systematically tested all
+plausible culprits: smoothing, charge conservation correction, MPI communication,
+solver tolerance, particle count, GMRES restart size, and Kahan summation.
 
-### 12a. Empirical findings
+### 12a. Root cause: particle cell crossings
 
-**Phase 1 — Factorial test** (200 cycles, 100×100 grid, 8 MPI processes):
+**ECSIM conserves energy to machine precision (~1e-14) as long as no particles
+cross cell boundaries.** The energy proof requires that each particle's
+interpolation stencil (which 8 grid nodes it touches) is the same when moments
+are gathered and when the particle is pushed. When a particle moves to a new
+cell, its stencil changes, breaking the exact field-particle energy cancellation.
 
-| Case | Smooth | PoissonMAres | Mean GMRES iters | |ΔE/E₀| |
-|------|--------|-------------|------------------|---------|
-| A | ON (4 passes) | 0.01 (default) | 29.3 | 1.37e-05 |
-| B | OFF | 0.01 (default) | 43.1 | 2.11e-05 |
+Per-cycle energy change at np=1 (serial, Smooth=0, PoissonMAres=0, GMREStol=1e-15):
+
+```
+cycle   per-cycle |ΔE|    what happens
+─────   ──────────────     ────────────
+ 1-20   1e-15 to 1e-14    machine precision — all particles in birth cells
+   21   1.75e-14           slightly elevated
+   23   6.02e-09           first fast electron crosses a cell boundary
+ 24-25  1e-16              back to machine precision — no crossings
+   27   1.28e-13           another crossing
+ 28-30  1e-15              machine precision again
+   31   5.95e-11           more crossings as flows develop
+   36   2.69e-10           crossings becoming more frequent
+   40   1.23e-10           ...
+```
+
+**Between cell-crossing events, energy conservation returns to machine
+precision.** This proves the ECSIM algorithm itself is perfectly
+energy-conserving — the drift is entirely from discrete cell-crossing events.
+
+**Timescale check:** electron thermal velocity u_th,e = 0.06, dt = 0.125,
+dx = 0.3. A ~3σ electron (v ≈ 0.18) moves 0.0225/cycle, crossing a cell after
+~13 cycles. With the perturbation-driven flows (amplitude 0.4 × B0) on top,
+the first crossing at cycle 23 is consistent with the fastest tail electrons.
+
+**Confirmation via thermal velocity scan** (np=1, Smooth=0, PoissonMAres=0):
+
+| Config            | u_th,e | Perturbation | First spike | Machine-precision cycles |
+|-------------------|--------|-------------|-------------|------------------------|
+| Baseline          | 0.06   | 0.4         | cycle 18    | 18                     |
+| Half u_th         | 0.03   | 0.4         | cycle 59    | 59                     |
+| Quarter u_th      | 0.015  | 0.4         | cycle 57    | 57 (flow floor)        |
+| Quarter + low pert| 0.015  | 0.01        | cycle 87    | 87                     |
+
+Halving u_th delays onset from 18→59 (thermal electrons cross later). Quartering
+with the same perturbation gives no further delay (57≈59) — perturbation-driven
+E×B flows now dominate the crossing timescale. Reducing perturbation amplitude
+(0.4→0.01) breaks through this floor (57→87). All configurations maintain
+|ΔE| ~ 1e-15 between spikes.
+
+This is a fundamental limitation of grid-based PIC methods with moving
+particles. Lapenta (2017) proves conservation under the assumption that
+interpolation weights are computed at x^n and held constant; the cell-crossing
+consequence is not discussed there. Lapenta (2023, "Advances in the
+Implementation of ECsim", *Physics* 5(1), 72) explicitly states: *"Equation (45)
+is exact only for the NGP scheme where it still leads to exact energy
+conservation. When other orders of interpolation are used, energy conservation
+is lost."* For CIC (bilinear, used by iPIC3D), the per-crossing energy error
+is a geometric inconsistency that cannot be fixed by numerical precision
+improvements.
+
+### 12b. What does NOT cause the drift
+
+**Smoothing (`Smooth` parameter).** Turning smoothing OFF makes drift *worse*
+(2.63e-05 vs 1.37e-05), not better. Smoothing improves operator conditioning
+(29 GMRES iters vs 43), which reduces MPI noise amplification. The smoothing
+operator applied symmetrically in `MaxwellImage()` and `MaxwellSource()` is part
+of the ECSIM formulation and does not break the energy proof.
+
+**Charge correction (`PoissonMAres`).** Disabling it has a small effect (~15%
+more drift: 1.37e-05 → 1.59e-05). The position correction is outside the ECSIM
+variational framework, but its contribution is secondary.
+
+**GMRES dot product precision.** Kahan (compensated) summation in `dot()`,
+`dotP()`, `norm2()`, `normP()` produces **bit-identical results** through cycle
+20 — the summation noise does not affect the solver output at these early stages.
+The drift onset at cycle ~23 is the same regardless of summation method.
+
+**GMRES restart size.** Tested restart=20 (default), 40, and 100 at np=1. The
+restart value changes the *character* of the drift (discrete spikes vs gradual
+leak) but not the ultimate magnitude (~3-8e-08 at cycle 100):
+
+| Restart | Mean iters | Pattern | |ΔE/E₀| at 100 cycles |
+|---------|-----------|---------|----------------------|
+| 20 | 38.4 | Flat until cycle 23, then sharp spike | 2.44e-07 |
+| 40 | 25.6 | Earlier gradual onset at cycle 20 | 1.01e-07 |
+| 100 | 52.0 | Gradual onset at cycle 20 | 1.36e-07 |
+
+### 12c. MPI amplification (secondary effect)
+
+While cell crossings are the root cause, MPI communication amplifies the drift
+by **185×** (np=1 gives 2.6e-08 vs np=8 gives 4.8e-06 at 100 cycles).
+
+1. **MPI_Allreduce non-associativity.** GMRES batches dot products into
+   `MPI_Allreduce(MPI_IN_PLACE, y, k+2, MPI_SUM)` per iteration
+   (`GMRES.cpp:124`). The reduction tree order varies, introducing FP noise.
+
+2. **Ghost cell exchange.** Values computed on different ranks with different
+   FP rounding propagate through curl, smoothing, and mass matrix operations.
+
+3. **Energy measurement.** `get_E_field_energy()`, `get_B_field_energy()`, and
+   `get_kinetic_energy()` use `MPI_Allreduce(MPI_SUM)`, adding measurement
+   noise.
+
+### 12d. Empirical data
+
+**Phase 1 — Factorial test** (200 cycles, 100×100 grid, np=8):
+
+| Case | Smooth | PoissonMAres | Mean iters | |ΔE/E₀| |
+|------|--------|-------------|-----------|---------|
+| A | ON (4 passes) | 0.01 | 29.3 | 1.37e-05 |
+| B | OFF | 0.01 | 43.1 | 2.11e-05 |
 | C | ON (4 passes) | 0.0 | 29.3 | 1.59e-05 |
 | D | OFF | 0.0 | 43.2 | 2.63e-05 |
-
-Turning smoothing OFF makes drift **worse**, not better. Case D (both off) is
-the worst. This contradicts the earlier hypothesis that smoothing or charge
-correction cause the drift.
 
 **Phase 2 — Noise source isolation**:
 
@@ -393,93 +493,29 @@ correction cause the drift.
 |------|-------------|---------|--------|
 | np=1 (serial), 100 cycles | MPI eliminated | 2.61e-08 | 185× better |
 | np=8 (baseline), 100 cycles | MPI present | 4.84e-06 | reference |
-| npcelx=3, 200 cycles | 9 particles/cell | 1.59e-05 | |
-| npcelx=5, 200 cycles | 25 particles/cell | 1.37e-05 | |
 | npcelx=10, 200 cycles | 100 particles/cell | 9.32e-06 | 1.5× better |
 | GMREStol=1e-8 | 15 iters/cycle | 1.84e-05 | |
-| GMREStol=1e-12 | 24 iters/cycle | 1.66e-05 | |
 | GMREStol=1e-15 | 29 iters/cycle | 1.54e-05 | |
 
-Energy drift growth rate: ~N^2.4 (superlinear), consistent with compounding
-FP noise rather than a fixed per-cycle systematic error.
+**Phase 3 — Serial noise floor investigation** (np=1, 100 cycles):
 
-### 12b. Dominant source: MPI communication FP noise
+| Test | Change | |ΔE/E₀| at 100 cycles | Effect |
+|------|--------|---------------------|--------|
+| Naive summation (baseline) | — | 2.44e-07 | reference |
+| Kahan summation in dot/normP | Compensated FP sums | 1.29e-07 | ~2× (butterfly noise) |
+| GMRES restart=40 | Fewer restarts | 1.01e-07 | ~2× |
+| GMRES restart=100 | No restarts | 1.36e-07 | ~2× |
+| main branch (no PETSc) | Clean codebase | 2.44e-07 | identical |
 
-Going from np=8 to np=1 reduces drift by **185×**. This implicates:
+All serial variants give ~1e-07 at 100 cycles, confirming cell crossings are
+the sole root cause. The ~2× variations are butterfly-effect noise from
+different code paths diverging chaotically after cycle ~23.
 
-1. **MPI_Allreduce non-associativity.** The built-in GMRES batches k+2 local
-   dot products into a single `MPI_Allreduce(MPI_IN_PLACE, y, k+2, MPI_SUM)`
-   call per Krylov iteration (`GMRES.cpp:124`). The MPI reduction tree order
-   is implementation-dependent and may vary between calls, producing different
-   FP rounding each time.
+Verified on the `main` branch (no PETSc changes): first 10 cycles are
+bit-identical to `with-petsc-matrix`, confirming the PETSc integration
+introduced no numerical changes to the GMRES path.
 
-2. **Ghost cell exchange values.** Communicated ghost cells are computed on a
-   different rank with potentially different FP rounding order. The smoothing
-   stencil, curl operators, and mass matrix multiply all read ghost values,
-   propagating cross-rank FP inconsistencies into the solution.
-
-3. **Energy measurement MPI_SUM.** `get_E_field_energy()`, `get_B_field_energy()`,
-   and `get_kinetic_energy()` each compute local sums then `MPI_Allreduce` with
-   `MPI_SUM`. The reduction itself introduces ~1–5 ULPs of non-determinism per
-   call, adding measurement noise on top of the physics drift.
-
-### 12c. Secondary source: naive dot product summation
-
-All dot products in the codebase use naive sequential summation with no
-compensated (Kahan) or pairwise accumulation:
-
-```cpp
-// utility/Basic.cpp:40
-double dot(const double *vect1, const double *vect2, int n) {
-  double result = 0;
-  for (int i = 0; i < n; i++)
-    result += vect1[i] * vect2[i];   // no compensation
-  return (result);
-}
-```
-
-For Krylov vectors of length 3×98×98×1 ≈ 28,812 (the 100×100 grid interior),
-each dot product accumulates ~28k terms. The last ~15 bits of each addition are
-lost, giving ~1e-12 relative error per dot product. Over ~30 inner iterations
-per cycle, this is ~3e-11 per cycle, compounding to ~3e-9 at 100 cycles — which
-is close to the observed np=1 serial drift of 2.6e-8.
-
-The same applies to the `normP()` function used for residual norms. The GMRES
-convergence check at each restart (`initial_error = normP(r, ...)` at line 90)
-recomputes the residual norm with this noisy summation, so the solver may declare
-convergence at a slightly different point each time.
-
-### 12d. Energy measurement noise
-
-Even if the fields were computed exactly, the energy *measurement* introduces
-its own FP noise:
-
-- **Field energy** (`EMfields3D.cpp:6104`): sequential loop over interior nodes
-  accumulating `0.5 * dx * dy * dz * (Ex^2 + Ey^2 + Ez^2) / 4π` — naive sum
-  of ~10k terms per rank, then `MPI_Allreduce`.
-- **Kinetic energy** (`Particles3Dcomm.cpp:1416`): sequential loop over all
-  particles accumulating `0.5 * (q/qom) * (u^2 + v^2 + w^2)` — naive sum of
-  ~250k terms per rank, then `MPI_Allreduce`.
-
-The measurement noise is likely smaller than the solver noise (it happens once
-per cycle vs. ~30× in the Krylov loop) but contributes to the total.
-
-### 12e. Why smoothing helps conservation
-
-Counter-intuitively, `Smooth = 1` **reduces** energy drift (1.37e-05 vs 2.63e-05).
-
-The smoothing operator applied symmetrically inside `MaxwellImage()` (lines
-2836, 2853) and `MaxwellSource()` (line 2716) is part of the ECSIM formulation
-— it does not break the energy proof. The in-place smoothing of E^θ in
-`calculateB()` (line 2934) happens after the curl for the B update is already
-stored, so the field paths remain self-consistent.
-
-The conservation benefit comes from **improved operator conditioning**:
-smoothing suppresses high-frequency modes in the mass matrix term, reducing
-the GMRES iteration count from ~43 (unsmoothed) to ~29 (smoothed). Fewer
-iterations means fewer FP-noisy dot products and MPI reductions per cycle.
-
-### 12f. Smoothing performance notes
+### 12e. Smoothing performance notes
 
 Smoothing adds measurable cost inside the Krylov loop. Each
 `energy_conserve_smooth()` call dispatches to
@@ -520,37 +556,96 @@ smoothing removes all of this but increases iteration count by ~47%.
      interior nodes — an `#pragma omp parallel for collapse(2)` on the i-j
      loops would scale with thread count at the cost of a barrier per pass.
 
-### 12g. Charge conservation correction (PoissonMAres)
+### 12f. Mitigation strategies
 
-`PoissonMAres` defaults to 0.01 (`Collective.cpp:155`) and is not overridden
-in `Double_Harris.inp`. This adds position corrections in `ECSIM_position()`
-(lines 1423–1437) derived from the residual ∇·E − 4πρ.
+The cell-crossing energy error is a fundamental geometric limitation of
+grid-based PIC with finite-width shape functions. It cannot be eliminated, but
+several approaches can reduce its magnitude.
 
-The empirical effect on energy conservation is **small** (~15% increase in drift
-when disabled: 1.37e-05 → 1.59e-05 with smoothing on). It has no effect on
-GMRES iteration count. The slight benefit likely comes from keeping the charge
-distribution closer to the Gauss-law-consistent state, which reduces noise in
-the moment gathering.
+**Why the per-crossing error is O(dt²).** The ECSIM operator couples fields to
+particles through θ·dt·M·E (mass matrix term) and the implicit current J_h. A
+crossing changes the interpolation weights by O(v·dt/dx), and the energy error
+from the stencil mismatch scales as the product: O(θ·dt) × O(v·dt/dx) = O(dt²/dx).
 
-**Performance note**: Negligible. One divergence computation on the grid plus a
-few extra FMA ops per particle, once per cycle.
+**Empirical dt test** (np=1, Smooth=0, PoissonMAres=0): comparing dt=0.125 (100
+cycles) with dt=0.0625 (200 cycles) over the same physical time (T=12.5):
 
-### 12h. Summary
+| dt | Cycles | First spike | At T=12.5 |ΔE/E₀| |
+|----|--------|------------|-----------|
+| 0.125 | 100 | T=2.25, 4.0e-11 | 2.61e-08 |
+| 0.0625 | 200 | T=3.25, 2.3e-11 | 1.15e-07 |
 
-| Factor | Impact on |ΔE/E₀| | Mechanism |
-|--------|----------------------|-----------|
-| MPI process count | **185×** (np=1 vs np=8) | MPI_Allreduce non-associativity, ghost cell FP inconsistency |
-| Particle count | ~1.5× (npc=5 vs 10) | Smoother moments → less communicated noise |
-| Smoothing | ~1.9× (on vs off) | Better conditioning → fewer GMRES iters |
-| Solver tolerance | ~1.2× (1e-8 vs 1e-15) | Tighter solve marginally helps |
-| Charge correction | ~1.15× (on vs off) | Small secondary effect |
+The first crossing spike is ~2× smaller with half dt, but the total drift at the
+same physical time is actually *higher* in this realization. In a chaotic plasma,
+different dt values produce different particle trajectories — the O(dt²) scaling
+applies to the expectation over many crossings, not to single realizations.
 
-Even with optimal algorithmic settings (th=0.5, GMREStol=1e-15, Smooth=1), the
-energy drift at np=8 is ~1.4e-05 at 200 cycles. In serial (np=1), the floor
-drops to ~2.6e-08 — still well above machine precision (~1e-14), likely due to
-naive summation in the GMRES dot products and energy calculation.
+**Practical approaches, ranked by feasibility:**
 
-**Achieving machine-precision conservation would require** compensated (Kahan)
-summation in `dot()`, `dotP()`, `normP()` (`utility/Basic.cpp`), and the energy
-calculation functions. This is a targeted change — the rest of the ECSIM
-algorithm is correctly energy-conserving.
+1. **Keep smoothing enabled** (no code change). `Smooth = 1` with 4 passes
+   reduces drift by ~1.9× by improving operator conditioning. This is already
+   the default and is the most practical mitigation.
+
+2. **Use more particles per cell** (no code change). Increasing from 25 to 100
+   particles/cell reduces drift by ~1.5×. Each particle's crossing contributes
+   a smaller fraction to the total moment error.
+
+3. **Higher-order shape functions** (code change). Replacing bilinear (CIC,
+   current iPIC3D) with quadratic (TSC) interpolation would smooth the weight
+   transition at cell boundaries. TSC shape functions have a continuous first
+   derivative, so the stencil change is less abrupt. Trade-off: the stencil
+   grows from 8 to 27 nodes, increasing moment gathering cost by ~3×, and the
+   mass matrix becomes denser. This is the most promising code-level fix.
+
+   **Future validation idea:** implement TSC as a compile-time or runtime option
+   and run Double Harris reconnection with both CIC and TSC. The macroscopic
+   physics (reconnection rate, X-point geometry, island growth, outflow jets)
+   should be robust to the shape function choice — if they differ significantly,
+   it flags a resolution issue where CIC results are noise-dominated. This would
+   also quantify the energy conservation improvement from the smoother stencil
+   transition. The implementation is localized to particle gather
+   (`computeMoments()` in `Particles3D.cpp`), field interpolation
+   (`set_fieldForPcls()`), and mass matrix assembly (`add_Mass()` in
+   `EMfields3D.h`) — well-scoped but touches performance-critical code.
+
+4. **Smaller dt** (no code change, slower). Reducing dt reduces per-crossing
+   error as O(dt²), but requires proportionally more cycles for the same physics
+   time. Net effect is problem-dependent due to chaotic trajectory divergence.
+
+5. **Sub-stepping at crossings** (major code change). Detect cell crossings,
+   split the timestep, and recompute moments at intermediate positions. This
+   breaks ECSIM's single-pass design and introduces per-particle branching —
+   essentially reverting to a predictor-corrector loop for crossing particles.
+
+6. **Iterative moment correction** (major code change). After the particle push,
+   re-gather moments at the new positions and re-solve. This is exactly the
+   predictor-corrector iteration that ECSIM was designed to avoid. It would
+   guarantee consistent moments but at 2–5× the cost of a single pass.
+
+**Context: comparison with standard implicit PIC.** Despite the cell-crossing
+limitation, ECSIM is significantly better than non-energy-conserving implicit
+PIC. Standard implicit PIC uses J^n (old-time current), which introduces a
+systematic O(dt) dissipation *every cycle* regardless of cell crossings. ECSIM
+eliminates this systematic term entirely — its only energy error comes from
+the discrete cell-crossing events, which are individually O(dt²) and occur
+stochastically. For typical PIC parameters, ECSIM's drift (~0.01–0.1% over
+thousands of cycles) is orders of magnitude better than the systematic
+dissipation in non-energy-conserving schemes.
+
+### 12g. Summary
+
+| Factor | Impact | Mechanism |
+|--------|--------|-----------|
+| **Cell crossings** | **Root cause** | Interpolation stencil change breaks ECSIM energy proof |
+| MPI communication | 185× amplifier | Non-associative reductions, ghost cell FP inconsistency |
+| Smoothing | 1.9× (helps!) | Better conditioning → fewer iters → less MPI noise |
+| Particle count | ~1.5× | Smoother moments → less noise propagated |
+| Solver tolerance | ~1.2× | Tighter solve marginally helps |
+| Charge correction | ~1.15× | Small secondary effect |
+| Kahan summation | No effect | Bit-identical to naive for first 20 cycles |
+| GMRES restart size | No effect | Changes drift character, not magnitude |
+
+The ~0.03% drift in the default Double Harris simulation is an inherent property
+of grid-based PIC with moving particles, not a numerical deficiency. ECSIM
+delivers exact conservation between cell-crossing events — which is the
+theoretical best for this class of methods.

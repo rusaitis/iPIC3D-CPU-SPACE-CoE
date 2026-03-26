@@ -158,6 +158,10 @@ void Collective::ReadInput(string inputfile)
         SolverType                  = config.read<string>   ("SolverType", "GMRES");
         PrecMatrix                  = config.read<bool>     ("PrecMatrix", false);
         PrecDiagnostics             = config.read<bool>     ("PrecDiagnostics", false);
+        PrecType                    = config.read<string>   ("PrecType", "None");
+        // Backward compat: PrecMatrix=true implies PrecType=Matrix if not explicitly set
+        if (PrecMatrix && PrecType == "None")
+            PrecType = "Matrix";
         NiterMover                  = config.read<int>      ("NiterMover", 3);
         Vinj                        = config.read<double>   ("Vinj", 0.0);
         SaveHeatFluxTensor          = config.read<bool>     ("SaveHeatFluxTensor", false);

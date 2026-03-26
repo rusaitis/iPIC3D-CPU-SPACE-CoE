@@ -181,6 +181,7 @@ class Collective
     string getSolverType()              const{ return (SolverType); }
     bool getPrecMatrix()                const{ return (PrecMatrix); }
     bool getPrecDiagnostics()           const{ return (PrecDiagnostics); }
+    string getPrecType()                const{ return (PrecType); }
     int getLast_cycle()                 const{ return (last_cycle); }
     int getNiterMover()                 const{ return (NiterMover); }
     int getFieldOutputCycle()           const{ return (FieldOutputCycle); }
@@ -416,6 +417,9 @@ class Collective
 
     //* Print preconditioner diagnostics and dump matrix to file
     bool PrecDiagnostics;
+
+    //* Preconditioner type: "None" (default), "Matrix" (explicit P), "Smooth" (PCShell with smoothing)
+    string PrecType;
 
     //* mover predictor correction iteration (not needed for ECSIM)
     int NiterMover;

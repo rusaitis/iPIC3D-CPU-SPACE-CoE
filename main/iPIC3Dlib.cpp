@@ -262,20 +262,20 @@ int c_Solver::Init(int argc, char **argv)
 #ifdef USE_PETSC
     if (col->getSolverType() == "PETSc") {
         int localSize = 3 * (grid->getNXN() - 2) * (grid->getNYN() - 2) * (grid->getNZN() - 2);
-        petscSolver = new PetscSolver(localSize, EMf, vct, col->getGMREStol(), col->getPrecMatrix(), col->getPrecDiagnostics(), col->getSimName(), col->getSaveDirName());
+        petscSolver = new PetscSolver(localSize, EMf, vct, col->getGMREStol(), col->getPrecType(), col->getPrecDiagnostics(), col->getSimName(), col->getSaveDirName());
         EMf->setPetscSolver(petscSolver);
         if (myrank == 0)
             cout << "PETSc solver enabled for E-field computation" << endl;
     }
-    if (col->getPrecDiagnostics() && !col->getPrecMatrix() && myrank == 0)
-        cout << "Warning: PrecDiagnostics=true but PrecMatrix=false — no diagnostics will be produced" << endl;
-    if (col->getPrecMatrix() && col->getSolverType() != "PETSc" && myrank == 0)
-        cout << "Warning: PrecMatrix=true but SolverType is not PETSc — matrix will not be built" << endl;
+    if (col->getPrecDiagnostics() && col->getPrecType() == "None" && myrank == 0)
+        cout << "Warning: PrecDiagnostics=true but PrecType=None — no diagnostics will be produced" << endl;
+    if (col->getPrecType() != "None" && col->getSolverType() != "PETSc" && myrank == 0)
+        cout << "Warning: PrecType=" << col->getPrecType() << " but SolverType is not PETSc — preconditioner will not be used" << endl;
 #else
     if (col->getPrecDiagnostics() && myrank == 0)
         cout << "Warning: PrecDiagnostics=true but iPIC3D was built without PETSc — no diagnostics will be produced" << endl;
-    if (col->getPrecMatrix() && myrank == 0)
-        cout << "Warning: PrecMatrix=true but iPIC3D was built without PETSc — matrix will not be built" << endl;
+    if (col->getPrecType() != "None" && myrank == 0)
+        cout << "Warning: PrecType=" << col->getPrecType() << " but iPIC3D was built without PETSc — preconditioner will not be used" << endl;
 #endif
 
     //! ======================= Initial Particle Distribution (if NOT starting from RESTART) ======================= !//
