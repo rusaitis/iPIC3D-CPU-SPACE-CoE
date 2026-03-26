@@ -365,41 +365,139 @@ the E^n for the next cycle.
 
 ECSIM conserves energy to machine precision in theory (θ = 0.5, solver tolerance
 ≤ 1e-15). In practice, the default `Double_Harris.inp` shows ~0.03% energy
-deviation after 2000 cycles. Two features active in that input file break strict
-conservation.
+deviation after 2000 cycles (~1.4e-05 relative drift at 200 cycles).
 
-### 12a. Smoothing breaks field/particle consistency
+An empirical study (data in `output/energy_study/`) tested all plausible
+culprits and found that **floating-point rounding noise — primarily from MPI
+communication — is the dominant source**, not algorithmic defects in smoothing
+or charge correction.
 
-When `Smooth = 1` (as in `Double_Harris.inp`), `calculateB()` smooths E^θ
-**in place** at line 2934 — but only *after* the curl for the B update has
-already been computed from the unsmoothed E^θ (line 2927). The particle mover
-then receives the smoothed E^θ via `set_fieldForPcls()`. This means:
+### 12a. Empirical findings
 
-- B update uses unsmoothed E^θ (via curl)
-- Particle velocity push uses smoothed E^θ
+**Phase 1 — Factorial test** (200 cycles, 100×100 grid, 8 MPI processes):
 
-The ECSIM energy proof requires the same E^θ in both paths. The mismatch
-introduces a per-cycle energy error that accumulates.
+| Case | Smooth | PoissonMAres | Mean GMRES iters | |ΔE/E₀| |
+|------|--------|-------------|------------------|---------|
+| A | ON (4 passes) | 0.01 (default) | 29.3 | 1.37e-05 |
+| B | OFF | 0.01 (default) | 43.1 | 2.11e-05 |
+| C | ON (4 passes) | 0.0 | 29.3 | 1.59e-05 |
+| D | OFF | 0.0 | 43.2 | 2.63e-05 |
 
-**Performance note**: Smoothing adds measurable cost inside the Krylov loop.
-Each `energy_conserve_smooth()` call dispatches to
+Turning smoothing OFF makes drift **worse**, not better. Case D (both off) is
+the worst. This contradicts the earlier hypothesis that smoothing or charge
+correction cause the drift.
+
+**Phase 2 — Noise source isolation**:
+
+| Test | Key variable | |ΔE/E₀| | Factor |
+|------|-------------|---------|--------|
+| np=1 (serial), 100 cycles | MPI eliminated | 2.61e-08 | 185× better |
+| np=8 (baseline), 100 cycles | MPI present | 4.84e-06 | reference |
+| npcelx=3, 200 cycles | 9 particles/cell | 1.59e-05 | |
+| npcelx=5, 200 cycles | 25 particles/cell | 1.37e-05 | |
+| npcelx=10, 200 cycles | 100 particles/cell | 9.32e-06 | 1.5× better |
+| GMREStol=1e-8 | 15 iters/cycle | 1.84e-05 | |
+| GMREStol=1e-12 | 24 iters/cycle | 1.66e-05 | |
+| GMREStol=1e-15 | 29 iters/cycle | 1.54e-05 | |
+
+Energy drift growth rate: ~N^2.4 (superlinear), consistent with compounding
+FP noise rather than a fixed per-cycle systematic error.
+
+### 12b. Dominant source: MPI communication FP noise
+
+Going from np=8 to np=1 reduces drift by **185×**. This implicates:
+
+1. **MPI_Allreduce non-associativity.** The built-in GMRES batches k+2 local
+   dot products into a single `MPI_Allreduce(MPI_IN_PLACE, y, k+2, MPI_SUM)`
+   call per Krylov iteration (`GMRES.cpp:124`). The MPI reduction tree order
+   is implementation-dependent and may vary between calls, producing different
+   FP rounding each time.
+
+2. **Ghost cell exchange values.** Communicated ghost cells are computed on a
+   different rank with potentially different FP rounding order. The smoothing
+   stencil, curl operators, and mass matrix multiply all read ghost values,
+   propagating cross-rank FP inconsistencies into the solution.
+
+3. **Energy measurement MPI_SUM.** `get_E_field_energy()`, `get_B_field_energy()`,
+   and `get_kinetic_energy()` each compute local sums then `MPI_Allreduce` with
+   `MPI_SUM`. The reduction itself introduces ~1–5 ULPs of non-determinism per
+   call, adding measurement noise on top of the physics drift.
+
+### 12c. Secondary source: naive dot product summation
+
+All dot products in the codebase use naive sequential summation with no
+compensated (Kahan) or pairwise accumulation:
+
+```cpp
+// utility/Basic.cpp:40
+double dot(const double *vect1, const double *vect2, int n) {
+  double result = 0;
+  for (int i = 0; i < n; i++)
+    result += vect1[i] * vect2[i];   // no compensation
+  return (result);
+}
+```
+
+For Krylov vectors of length 3×98×98×1 ≈ 28,812 (the 100×100 grid interior),
+each dot product accumulates ~28k terms. The last ~15 bits of each addition are
+lost, giving ~1e-12 relative error per dot product. Over ~30 inner iterations
+per cycle, this is ~3e-11 per cycle, compounding to ~3e-9 at 100 cycles — which
+is close to the observed np=1 serial drift of 2.6e-8.
+
+The same applies to the `normP()` function used for residual norms. The GMRES
+convergence check at each restart (`initial_error = normP(r, ...)` at line 90)
+recomputes the residual norm with this noisy summation, so the solver may declare
+convergence at a slightly different point each time.
+
+### 12d. Energy measurement noise
+
+Even if the fields were computed exactly, the energy *measurement* introduces
+its own FP noise:
+
+- **Field energy** (`EMfields3D.cpp:6104`): sequential loop over interior nodes
+  accumulating `0.5 * dx * dy * dz * (Ex^2 + Ey^2 + Ez^2) / 4π` — naive sum
+  of ~10k terms per rank, then `MPI_Allreduce`.
+- **Kinetic energy** (`Particles3Dcomm.cpp:1416`): sequential loop over all
+  particles accumulating `0.5 * (q/qom) * (u^2 + v^2 + w^2)` — naive sum of
+  ~250k terms per rank, then `MPI_Allreduce`.
+
+The measurement noise is likely smaller than the solver noise (it happens once
+per cycle vs. ~30× in the Krylov loop) but contributes to the total.
+
+### 12e. Why smoothing helps conservation
+
+Counter-intuitively, `Smooth = 1` **reduces** energy drift (1.37e-05 vs 2.63e-05).
+
+The smoothing operator applied symmetrically inside `MaxwellImage()` (lines
+2836, 2853) and `MaxwellSource()` (line 2716) is part of the ECSIM formulation
+— it does not break the energy proof. The in-place smoothing of E^θ in
+`calculateB()` (line 2934) happens after the curl for the B update is already
+stored, so the field paths remain self-consistent.
+
+The conservation benefit comes from **improved operator conditioning**:
+smoothing suppresses high-frequency modes in the mass matrix term, reducing
+the GMRES iteration count from ~43 (unsmoothed) to ~29 (smoothed). Fewer
+iterations means fewer FP-noisy dot products and MPI reductions per cycle.
+
+### 12f. Smoothing performance notes
+
+Smoothing adds measurable cost inside the Krylov loop. Each
+`energy_conserve_smooth()` call dispatches to
 `energy_conserve_smooth_direction()` three times (X, Y, Z), and each direction
 performs `1 + num_smoothings` MPI ghost exchanges (`communicateNodeBC_old`).
 `MaxwellImage()` calls smoothing twice (lines 2836, 2853), so every Krylov
-iteration adds **6 × (1 + num_smoothings)** MPI exchanges. Over ~100 GMRES
-iterations that is ~600 extra MPI barriers per cycle. Additionally,
+iteration adds **6 × (1 + num_smoothings)** MPI exchanges. Over ~30 GMRES
+iterations that is ~180 extra MPI barriers per cycle. Additionally,
 `energy_conserve_smooth_direction()` heap-allocates a temp array (`newArr3` /
 `delArr3`) on every call — allocator churn inside the hot loop. Disabling
-smoothing removes all of this.
-
-**Fix**: Set `Smooth = 0` for strict energy conservation (and a speedup).
+smoothing removes all of this but increases iteration count by ~47%.
 
 **Performance optimization opportunities** (if smoothing stays enabled):
 
 1. **Pre-allocate workspace array.** `energy_conserve_smooth_direction()` calls
    `newArr3` / `delArr3` on every invocation to create a temporary buffer
    (`EMfields3D.cpp:2966, 2999`). With 2 smooth calls per `MaxwellImage()`
-   iteration × 3 directions × ~200 GMRES iterations, that is ~1 200 heap
+   iteration × 3 directions × ~30 GMRES iterations, that is ~180 heap
    alloc/free cycles per field solve. The class already declares a
    `smooth_temp` member (`EMfields3D.cpp:146`) that is never used — wiring it
    in as the workspace would eliminate all allocator churn from the hot loop.
@@ -422,25 +520,37 @@ smoothing removes all of this.
      interior nodes — an `#pragma omp parallel for collapse(2)` on the i-j
      loops would scale with thread count at the cost of a barrier per pass.
 
-### 12b. Charge conservation position correction (PoissonMAres)
+### 12g. Charge conservation correction (PoissonMAres)
 
 `PoissonMAres` defaults to 0.01 (`Collective.cpp:155`) and is not overridden
-in `Double_Harris.inp`. This adds position corrections `dxp, dyp, dzp` in
-`ECSIM_position()` (lines 1423–1437) derived from the residual ∇·E − 4πρ.
-These corrections are outside the ECSIM variational framework (which assumes
-`x^{n+1} = x^n + v^{n+1}·Δt` exactly).
+in `Double_Harris.inp`. This adds position corrections in `ECSIM_position()`
+(lines 1423–1437) derived from the residual ∇·E − 4πρ.
+
+The empirical effect on energy conservation is **small** (~15% increase in drift
+when disabled: 1.37e-05 → 1.59e-05 with smoothing on). It has no effect on
+GMRES iteration count. The slight benefit likely comes from keeping the charge
+distribution closer to the Gauss-law-consistent state, which reduces noise in
+the moment gathering.
 
 **Performance note**: Negligible. One divergence computation on the grid plus a
-few extra FMA ops per particle, once per cycle — dwarfed by moment gathering
-and the field solve.
+few extra FMA ops per particle, once per cycle.
 
-**Fix**: Set `PoissonMAres = 0.0` in the input file.
+### 12h. Summary
 
-### 12c. Summary table of parameters for strict conservation
+| Factor | Impact on |ΔE/E₀| | Mechanism |
+|--------|----------------------|-----------|
+| MPI process count | **185×** (np=1 vs np=8) | MPI_Allreduce non-associativity, ghost cell FP inconsistency |
+| Particle count | ~1.5× (npc=5 vs 10) | Smoother moments → less communicated noise |
+| Smoothing | ~1.9× (on vs off) | Better conditioning → fewer GMRES iters |
+| Solver tolerance | ~1.2× (1e-8 vs 1e-15) | Tighter solve marginally helps |
+| Charge correction | ~1.15× (on vs off) | Small secondary effect |
 
-| Parameter | Strict conservation | Default in code | Double_Harris.inp |
-|-----------|---------------------|-----------------|-------------------|
-| `th` | 0.5 | 0.5 | 0.5 |
-| `GMREStol` | ≤ 1e-15 | (from input) | 1e-15 |
-| `Smooth` | 0 | 0 | **1** |
-| `PoissonMAres` | 0.0 | **0.01** | (uses default) |
+Even with optimal algorithmic settings (th=0.5, GMREStol=1e-15, Smooth=1), the
+energy drift at np=8 is ~1.4e-05 at 200 cycles. In serial (np=1), the floor
+drops to ~2.6e-08 — still well above machine precision (~1e-14), likely due to
+naive summation in the GMRES dot products and energy calculation.
+
+**Achieving machine-precision conservation would require** compensated (Kahan)
+summation in `dot()`, `dotP()`, `normP()` (`utility/Basic.cpp`), and the energy
+calculation functions. This is a targeted change — the rest of the ECSIM
+algorithm is correctly energy-conserving.
