@@ -20,10 +20,24 @@
 
 #include "Com3DNonblk.h"
 
+//* Forward declaration of the n_ghost > 1 helper (definition further down).
+static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
+                                const VirtualTopology3D * vct, EMfields3D *EMf,
+                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle);
+
 //! isCenterFlag: 1 = communicateCenter; 0 = communicateNode
 void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, EMfields3D *EMf,
                         bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle)
 {
+    //* Phase A.3b: dispatch wider ghost-slab exchanges to the loop-based helper.
+    //  For n_ghost == 1 we fall through to the legacy fast path below, which
+    //  uses merged edge/corner MPI datatypes and remains byte-identical.
+    if (EMf->getNGhost() > 1) {
+        NBDerivedHaloCommN(nx, ny, nz, vector, vct, EMf,
+                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle);
+        return;
+    }
+
     const MPI_Comm comm       = isParticle ?vct->getParticleComm()      :vct->getFieldComm();
     #ifdef DEBUG
 	    MPI_Errhandler_set(comm,MPI_ERRORS_RETURN);
@@ -515,6 +529,346 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 }
 
 
+//! ================================================================================
+//  NBDerivedHaloCommN: wider ghost-slab variant of NBDerivedHaloComm.
+//
+//  Phase A.3b helper used only when grid->getNGhost() > 1. Instead of relying
+//  on the merged MPI edge/corner datatypes (which hard-code an n_ghost == 1
+//  outermost-only geometry), each layer of the n_ghost-thick ghost slab is
+//  exchanged via its own MPI call in a loop over layer offsets. The per-layer
+//  face/edge types come from EMfields3D.cpp; those were already widened in
+//  Phase A.2 so that one layer contains (n - 2*n_ghost)^2 doubles stripped of
+//  the inner y/z ghost corners.
+//
+//  Notes:
+//  - Corners fall back to scalar (MPI_DOUBLE) sends since there is no
+//    precomputed corner-cube datatype. For n_ghost == 2 that is 8 corners *
+//    n_ghost^3 = 64 doubles per X-direction per phase; acceptable as a first
+//    implementation.
+//  - Periodic-self buffer copies use a "constant extension" fallback that
+//    matches the legacy behaviour at n_ghost == 1 and is a safe starting
+//    point at n_ghost > 1. Strict periodic wrapping can be refined in Phase B
+//    if a periodic single-rank n_ghost > 1 run is added to the regression set.
+//  - The 4D legacy moment path (communicateInterp_old / communicateNode_P_old
+//    via ComParser3D) is NOT widened here; for n_ghost > 1 the per-species
+//    moment halo sum will be incorrect. Phase B adds that path, or routes it
+//    through the 3D modern exchange on each species slice.
+//! ================================================================================
+static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
+                                const VirtualTopology3D * vct, EMfields3D *EMf,
+                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle)
+{
+    const int n_ghost_ = EMf->getNGhost();
+
+    const MPI_Comm comm = isParticle ? vct->getParticleComm() : vct->getFieldComm();
+    #ifdef DEBUG
+        MPI_Errhandler_set(comm, MPI_ERRORS_RETURN);
+    #endif
+
+    //* Upper bound on in-flight messages per phase. Sized conservatively for
+    //  n_ghost up to 3 (the grid constructor currently asserts <= 2).
+    static const int MAX_REQS = 512;
+    MPI_Status  stat[MAX_REQS];
+    MPI_Request reqList[MAX_REQS];
+    int communicationCnt[6] = {0,0,0,0,0,0};
+    int recvcnt = 0, sendcnt = 0;
+
+    const int tag_XL=1,tag_YL=2,tag_ZL=3,tag_XR=4,tag_YR=5,tag_ZR=6;
+    const int myrank = vct->getCartesian_rank();
+    const int right_neighborX = isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
+    const int left_neighborX  = isParticle ? vct->getXleft_neighbor_P()  : vct->getXleft_neighbor();
+    const int right_neighborY = isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
+    const int left_neighborY  = isParticle ? vct->getYleft_neighbor_P()  : vct->getYleft_neighbor();
+    const int right_neighborZ = isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
+    const int left_neighborZ  = isParticle ? vct->getZleft_neighbor_P()  : vct->getZleft_neighbor();
+
+    const bool isCenterDim = (isCenterFlag && !needInterp);
+
+    const MPI_Datatype yzFacetype = EMf->getYZFacetype(isCenterDim);
+    const MPI_Datatype xzFacetype = EMf->getXZFacetype(isCenterDim);
+    const MPI_Datatype xyFacetype = EMf->getXYFacetype(isCenterDim);
+    const MPI_Datatype xEdgetype  = EMf->getXEdgetype(isCenterDim);
+    const MPI_Datatype yEdgetype  = EMf->getYEdgetype(isCenterDim);
+    const MPI_Datatype zEdgetype  = EMf->getZEdgetype(isCenterDim);
+
+    if (left_neighborX  != MPI_PROC_NULL && left_neighborX  != myrank) communicationCnt[0] = 1;
+    if (right_neighborX != MPI_PROC_NULL && right_neighborX != myrank) communicationCnt[1] = 1;
+    if (left_neighborY  != MPI_PROC_NULL && left_neighborY  != myrank) communicationCnt[2] = 1;
+    if (right_neighborY != MPI_PROC_NULL && right_neighborY != myrank) communicationCnt[3] = 1;
+    if (left_neighborZ  != MPI_PROC_NULL && left_neighborZ  != myrank) communicationCnt[4] = 1;
+    if (right_neighborZ != MPI_PROC_NULL && right_neighborZ != myrank) communicationCnt[5] = 1;
+
+    //* Interior/boundary offset: centers use offset = 0 (no shared node); nodes
+    //  use offset = 1 (ghost receives "one node deeper" than the boundary-shared
+    //  node, so the send source is one step further into the interior).
+    const int offset = (isCenterFlag ? 0 : 1);
+
+    //! ============================================================
+    //  FACE PHASE
+    //  Each of the 6 face directions exchanges n_ghost slab layers.
+    //! ============================================================
+    for (int g = 0; g < n_ghost_; g++) {
+        if (communicationCnt[0])
+            MPI_Irecv(&vector[g][n_ghost_][n_ghost_],       1, yzFacetype, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+        if (communicationCnt[1])
+            MPI_Irecv(&vector[nx-1-g][n_ghost_][n_ghost_],  1, yzFacetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+        if (communicationCnt[2])
+            MPI_Irecv(&vector[n_ghost_][g][n_ghost_],       1, xzFacetype, left_neighborY,  tag_YR, comm, &reqList[recvcnt++]);
+        if (communicationCnt[3])
+            MPI_Irecv(&vector[n_ghost_][ny-1-g][n_ghost_],  1, xzFacetype, right_neighborY, tag_YL, comm, &reqList[recvcnt++]);
+        if (communicationCnt[4])
+            MPI_Irecv(&vector[n_ghost_][n_ghost_][g],       1, xyFacetype, left_neighborZ,  tag_ZR, comm, &reqList[recvcnt++]);
+        if (communicationCnt[5])
+            MPI_Irecv(&vector[n_ghost_][n_ghost_][nz-1-g],  1, xyFacetype, right_neighborZ, tag_ZL, comm, &reqList[recvcnt++]);
+    }
+    sendcnt = recvcnt;
+    for (int g = 0; g < n_ghost_; g++) {
+        if (communicationCnt[0])
+            MPI_Isend(&vector[n_ghost_+offset+g][n_ghost_][n_ghost_],       1, yzFacetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+        if (communicationCnt[1])
+            MPI_Isend(&vector[nx-1-n_ghost_-offset-g][n_ghost_][n_ghost_],  1, yzFacetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+        if (communicationCnt[2])
+            MPI_Isend(&vector[n_ghost_][n_ghost_+offset+g][n_ghost_],       1, xzFacetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
+        if (communicationCnt[3])
+            MPI_Isend(&vector[n_ghost_][ny-1-n_ghost_-offset-g][n_ghost_],  1, xzFacetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
+        if (communicationCnt[4])
+            MPI_Isend(&vector[n_ghost_][n_ghost_][n_ghost_+offset+g],       1, xyFacetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
+        if (communicationCnt[5])
+            MPI_Isend(&vector[n_ghost_][n_ghost_][nz-1-n_ghost_-offset-g],  1, xyFacetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+    }
+    assert_eq(recvcnt, sendcnt - recvcnt);
+    assert_le(sendcnt, MAX_REQS);
+
+    //* Periodic single-rank self-copies (X/Y/Z). Constant-extension fallback
+    //  consistent with the legacy n_ghost == 1 behaviour; Phase B may tighten
+    //  this if strict periodic wrapping for n_ghost > 1 is required.
+    if (right_neighborX == myrank && left_neighborX == myrank) {
+        for (int g = n_ghost_ - 1; g >= 0; g--)
+            for (int iy = n_ghost_; iy < ny - n_ghost_; iy++)
+                for (int iz = n_ghost_; iz < nz - n_ghost_; iz++) {
+                    vector[g][iy][iz]      = vector[nx-2-g][iy][iz];
+                    vector[nx-1-g][iy][iz] = vector[1+g][iy][iz];
+                }
+    }
+    if (right_neighborY == myrank && left_neighborY == myrank) {
+        for (int g = n_ghost_ - 1; g >= 0; g--)
+            for (int ix = n_ghost_; ix < nx - n_ghost_; ix++)
+                for (int iz = n_ghost_; iz < nz - n_ghost_; iz++) {
+                    vector[ix][g][iz]      = vector[ix][ny-2-g][iz];
+                    vector[ix][ny-1-g][iz] = vector[ix][1+g][iz];
+                }
+    }
+    if (right_neighborZ == myrank && left_neighborZ == myrank) {
+        for (int g = n_ghost_ - 1; g >= 0; g--)
+            for (int ix = n_ghost_; ix < nx - n_ghost_; ix++)
+                for (int iy = n_ghost_; iy < ny - n_ghost_; iy++) {
+                    vector[ix][iy][g]      = vector[ix][iy][nz-2-g];
+                    vector[ix][iy][nz-1-g] = vector[ix][iy][1+g];
+                }
+    }
+
+    if (sendcnt > 0) {
+        MPI_Waitall(sendcnt, &reqList[0], &stat[0]);
+        bool stopFlag = false;
+        for (int si = 0; si < sendcnt; si++) {
+            if (stat[si].MPI_ERROR != MPI_SUCCESS) { stopFlag = true; }
+        }
+        if (stopFlag) exit(EXIT_FAILURE);
+    }
+
+    if (!isFaceOnlyFlag) {
+        //! ============================================================
+        //  EDGE PHASE
+        //  Each axis has 4 edges (corners of the perpendicular face).
+        //  For n_ghost > 1 each corner expands to an n_ghost x n_ghost
+        //  block in the cross-section perpendicular to the edge direction.
+        //! ============================================================
+        recvcnt = 0; sendcnt = 0;
+
+        //? yEdge: Y-aligned line at (X, Z) corners. Cross-section = (gx, gz).
+        for (int gx = 0; gx < n_ghost_; gx++)
+        for (int gz = 0; gz < n_ghost_; gz++)
+        {
+            if (communicationCnt[0]) {
+                if (communicationCnt[4]) MPI_Irecv(&vector[gx][n_ghost_][gz],            1, yEdgetype, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+                if (communicationCnt[5]) MPI_Irecv(&vector[gx][n_ghost_][nz-1-gz],       1, yEdgetype, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+            }
+            if (communicationCnt[1]) {
+                if (communicationCnt[4]) MPI_Irecv(&vector[nx-1-gx][n_ghost_][gz],       1, yEdgetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+                if (communicationCnt[5]) MPI_Irecv(&vector[nx-1-gx][n_ghost_][nz-1-gz],  1, yEdgetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+            }
+        }
+
+        //? zEdge: Z-aligned line at (X, Y) corners. Cross-section = (gx, gy).
+        for (int gx = 0; gx < n_ghost_; gx++)
+        for (int gy = 0; gy < n_ghost_; gy++)
+        {
+            if (communicationCnt[2]) {
+                if (communicationCnt[0]) MPI_Irecv(&vector[gx][gy][n_ghost_],            1, zEdgetype, left_neighborY,  tag_YR, comm, &reqList[recvcnt++]);
+                if (communicationCnt[1]) MPI_Irecv(&vector[nx-1-gx][gy][n_ghost_],       1, zEdgetype, left_neighborY,  tag_YR, comm, &reqList[recvcnt++]);
+            }
+            if (communicationCnt[3]) {
+                if (communicationCnt[0]) MPI_Irecv(&vector[gx][ny-1-gy][n_ghost_],       1, zEdgetype, right_neighborY, tag_YL, comm, &reqList[recvcnt++]);
+                if (communicationCnt[1]) MPI_Irecv(&vector[nx-1-gx][ny-1-gy][n_ghost_],  1, zEdgetype, right_neighborY, tag_YL, comm, &reqList[recvcnt++]);
+            }
+        }
+
+        //? xEdge: X-aligned line at (Y, Z) corners. Cross-section = (gy, gz).
+        for (int gy = 0; gy < n_ghost_; gy++)
+        for (int gz = 0; gz < n_ghost_; gz++)
+        {
+            if (communicationCnt[4]) {
+                if (communicationCnt[2]) MPI_Irecv(&vector[n_ghost_][gy][gz],             1, xEdgetype, left_neighborZ,  tag_ZR, comm, &reqList[recvcnt++]);
+                if (communicationCnt[3]) MPI_Irecv(&vector[n_ghost_][ny-1-gy][gz],        1, xEdgetype, left_neighborZ,  tag_ZR, comm, &reqList[recvcnt++]);
+            }
+            if (communicationCnt[5]) {
+                if (communicationCnt[2]) MPI_Irecv(&vector[n_ghost_][gy][nz-1-gz],        1, xEdgetype, right_neighborZ, tag_ZL, comm, &reqList[recvcnt++]);
+                if (communicationCnt[3]) MPI_Irecv(&vector[n_ghost_][ny-1-gy][nz-1-gz],   1, xEdgetype, right_neighborZ, tag_ZL, comm, &reqList[recvcnt++]);
+            }
+        }
+
+        sendcnt = recvcnt;
+
+        //? yEdge sends (mirror of recvs; source at interior depth n_ghost + offset + g)
+        for (int gx = 0; gx < n_ghost_; gx++)
+        for (int gz = 0; gz < n_ghost_; gz++)
+        {
+            if (communicationCnt[0]) {
+                if (communicationCnt[4]) MPI_Isend(&vector[n_ghost_+offset+gx][n_ghost_][n_ghost_+offset+gz],        1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[5]) MPI_Isend(&vector[n_ghost_+offset+gx][n_ghost_][nz-1-n_ghost_-offset-gz],   1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+            }
+            if (communicationCnt[1]) {
+                if (communicationCnt[4]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][n_ghost_][n_ghost_+offset+gz],       1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[5]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][n_ghost_][nz-1-n_ghost_-offset-gz],  1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+            }
+        }
+
+        //? zEdge sends
+        for (int gx = 0; gx < n_ghost_; gx++)
+        for (int gy = 0; gy < n_ghost_; gy++)
+        {
+            if (communicationCnt[2]) {
+                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+gx][n_ghost_+offset+gy][n_ghost_],         1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][n_ghost_+offset+gy][n_ghost_],    1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
+            }
+            if (communicationCnt[3]) {
+                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+gx][ny-1-n_ghost_-offset-gy][n_ghost_],        1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][ny-1-n_ghost_-offset-gy][n_ghost_],   1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
+            }
+        }
+
+        //? xEdge sends
+        for (int gy = 0; gy < n_ghost_; gy++)
+        for (int gz = 0; gz < n_ghost_; gz++)
+        {
+            if (communicationCnt[4]) {
+                if (communicationCnt[2]) MPI_Isend(&vector[n_ghost_][n_ghost_+offset+gy][n_ghost_+offset+gz],         1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[3]) MPI_Isend(&vector[n_ghost_][ny-1-n_ghost_-offset-gy][n_ghost_+offset+gz],    1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
+            }
+            if (communicationCnt[5]) {
+                if (communicationCnt[2]) MPI_Isend(&vector[n_ghost_][n_ghost_+offset+gy][nz-1-n_ghost_-offset-gz],        1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[3]) MPI_Isend(&vector[n_ghost_][ny-1-n_ghost_-offset-gy][nz-1-n_ghost_-offset-gz],   1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+            }
+        }
+
+        assert_eq(recvcnt, sendcnt - recvcnt);
+        assert_le(sendcnt, MAX_REQS);
+
+        //* Periodic single-rank edge self-copies are deferred. For multi-rank
+        //  tests with n_ghost > 1 the edge data is exchanged via MPI above.
+
+        if (sendcnt > 0) {
+            MPI_Waitall(sendcnt, &reqList[0], &stat[0]);
+            bool stopFlag = false;
+            for (int si = 0; si < sendcnt; si++) {
+                if (stat[si].MPI_ERROR != MPI_SUCCESS) { stopFlag = true; }
+            }
+            if (stopFlag) exit(EXIT_FAILURE);
+        }
+
+        //! ============================================================
+        //  CORNER PHASE
+        //  Each of the 8 box corners is an n_ghost^3 cube of scalar nodes
+        //  for n_ghost > 1, exchanged as MPI_DOUBLE singletons. Aggregated
+        //  along the X direction in 2 messages (X-left, X-right) per
+        //  (gx, gy, gz) triple, like the cornertype does at n_ghost == 1.
+        //! ============================================================
+        recvcnt = 0; sendcnt = 0;
+
+        if ((communicationCnt[2] == 1 || communicationCnt[3] == 1) &&
+            (communicationCnt[4] == 1 || communicationCnt[5] == 1))
+        {
+            for (int gx = 0; gx < n_ghost_; gx++)
+            for (int gy = 0; gy < n_ghost_; gy++)
+            for (int gz = 0; gz < n_ghost_; gz++)
+            {
+                if (communicationCnt[0]) {
+                    MPI_Irecv(&vector[gx][gy][gz],                      1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+                    MPI_Irecv(&vector[gx][gy][nz-1-gz],                 1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+                    MPI_Irecv(&vector[gx][ny-1-gy][gz],                 1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+                    MPI_Irecv(&vector[gx][ny-1-gy][nz-1-gz],            1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+                }
+                if (communicationCnt[1]) {
+                    MPI_Irecv(&vector[nx-1-gx][gy][gz],                 1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+                    MPI_Irecv(&vector[nx-1-gx][gy][nz-1-gz],            1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+                    MPI_Irecv(&vector[nx-1-gx][ny-1-gy][gz],            1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+                    MPI_Irecv(&vector[nx-1-gx][ny-1-gy][nz-1-gz],       1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+                }
+            }
+
+            sendcnt = recvcnt;
+
+            for (int gx = 0; gx < n_ghost_; gx++)
+            for (int gy = 0; gy < n_ghost_; gy++)
+            for (int gz = 0; gz < n_ghost_; gz++)
+            {
+                const int xs_l = n_ghost_ + offset + gx;            //* X source index for left send
+                const int xs_r = nx - 1 - n_ghost_ - offset - gx;   //* X source index for right send
+                const int ys_l = n_ghost_ + offset + gy;
+                const int ys_r = ny - 1 - n_ghost_ - offset - gy;
+                const int zs_l = n_ghost_ + offset + gz;
+                const int zs_r = nz - 1 - n_ghost_ - offset - gz;
+
+                if (communicationCnt[0]) {
+                    MPI_Isend(&vector[xs_l][ys_l][zs_l],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+                    MPI_Isend(&vector[xs_l][ys_l][zs_r],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+                    MPI_Isend(&vector[xs_l][ys_r][zs_l],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+                    MPI_Isend(&vector[xs_l][ys_r][zs_r],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+                }
+                if (communicationCnt[1]) {
+                    MPI_Isend(&vector[xs_r][ys_l][zs_l],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+                    MPI_Isend(&vector[xs_r][ys_l][zs_r],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+                    MPI_Isend(&vector[xs_r][ys_r][zs_l],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+                    MPI_Isend(&vector[xs_r][ys_r][zs_r],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+                }
+            }
+        }
+
+        assert_eq(recvcnt, sendcnt - recvcnt);
+        assert_le(sendcnt, MAX_REQS);
+
+        if (sendcnt > 0) {
+            MPI_Waitall(sendcnt, &reqList[0], &stat[0]);
+            bool stopFlag = false;
+            for (int si = 0; si < sendcnt; si++) {
+                if (stat[si].MPI_ERROR != MPI_SUCCESS) { stopFlag = true; }
+            }
+            if (stopFlag) exit(EXIT_FAILURE);
+        }
+    }
+
+    //* Moment summation: after the halo has filled the ghost slab, sum each
+    //  ghost layer back into the matching inner interior layer.
+    if (needInterp) {
+        addFace (nx, ny, nz, vector, vct, n_ghost_);
+        addEdgeZ(nx, ny, nz, vector, vct, n_ghost_);
+        addEdgeY(nx, ny, nz, vector, vct, n_ghost_);
+        addEdgeX(nx, ny, nz, vector, vct, n_ghost_);
+        addCorner(nx, ny, nz, vector, vct, n_ghost_);
+    }
+}
+
+
 void communicateNodeBC(int nx, int ny, int nz, arr3_double _vector,
                         int bcFaceXrght, int bcFaceXleft,
                         int bcFaceYrght, int bcFaceYleft,
@@ -717,147 +1071,178 @@ void communicateCenterBoxStencilBC_P( int nx, int ny, int nz, arr3_double _vecto
 
 
 /** add the values of ghost cells faces to the 3D physical vector */
-void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct)
+//  For n_ghost == 1 the loop runs once with g = 0, reproducing the
+//  byte-identical literal indices of the original implementation.
+//  For n_ghost > 1, layer g of the ghost slab is summed into the matching
+//  inner interior layer (one node further from the rank boundary).
+void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
 {
-    const int nxr = nx-2;
-    const int nyr = ny-2;
-    const int nzr = nz-2;
+    const int nxr = nx - 2 * n_ghost + 1;
+    const int nyr = ny - 2 * n_ghost + 1;
+    const int nzr = nz - 2 * n_ghost + 1;
 
-    // Xright
-    if (vct->hasXrghtNeighbor_P())
-    {
-        for (int j = 1; j <= nyr; j++)
-            for (int k = 1; k <= nzr; k++)
-                vector[nx - 2][j][k] += vector[nx - 1][j][k];
-    }
-    // XLEFT
-    if (vct->hasXleftNeighbor_P())
-    {
-        for (int j = 1; j <= nyr; j++)
-            for (int k = 1; k <= nzr; k++)
-                vector[1][j][k] += vector[0][j][k];
-    }
+    for (int g = 0; g < n_ghost; g++) {
+        // Xright
+        if (vct->hasXrghtNeighbor_P())
+        {
+            for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
+                for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
+                    vector[nx - 2 - g][j][k] += vector[nx - 1 - g][j][k];
+        }
+        // XLEFT
+        if (vct->hasXleftNeighbor_P())
+        {
+            for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
+                for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
+                    vector[1 + g][j][k] += vector[g][j][k];
+        }
 
-    // Yright
-    if (vct->hasYrghtNeighbor_P())
-    {
-        for (int i = 1; i <= nxr; i++)
-            for (int k = 1; k <= nzr; k++)
-                vector[i][ny - 2][k] += vector[i][ny - 1][k];
+        // Yright
+        if (vct->hasYrghtNeighbor_P())
+        {
+            for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
+                for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
+                    vector[i][ny - 2 - g][k] += vector[i][ny - 1 - g][k];
+        }
+        // Yleft
+        if (vct->hasYleftNeighbor_P())
+        {
+            for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
+                for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
+                    vector[i][1 + g][k] += vector[i][g][k];
+        }
+        // Zright
+        if (vct->hasZrghtNeighbor_P())
+        {
+            for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
+                for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
+                    vector[i][j][nz - 2 - g] += vector[i][j][nz - 1 - g];
+        }
+        // ZLEFT
+        if (vct->hasZleftNeighbor_P())
+        {
+            for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
+                for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
+                    vector[i][j][1 + g] += vector[i][j][g];
+        }
     }
-    // Yleft
-    if (vct->hasYleftNeighbor_P())
-    {
-        for (int i = 1; i <= nxr; i++)
-            for (int k = 1; k <= nzr; k++)
-                vector[i][1][k] += vector[i][0][k];
-    }
-    // Zright
-    if (vct->hasZrghtNeighbor_P())
-    {
-        for (int i = 1; i <= nxr; i++)
-            for (int j = 1; j <= nyr; j++)
-                vector[i][j][nz - 2] += vector[i][j][nz - 1];
-    }
-    // ZLEFT
-    if (vct->hasZleftNeighbor_P())
-    {
-        for (int i = 1; i <= nxr; i++)
-            for (int j = 1; j <= nyr; j++)
-                vector[i][j][1] += vector[i][j][0];
-    }
+    (void)nxr; (void)nyr; (void)nzr;  // legacy locals retained for clarity
 }
 
 /** insert the ghost cells Edge Z in the 3D physical vector */
-void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct)
+//  Z-aligned edge: ghost block lives in the (x, y) cross-section.
+//  Loop over (gx, gy) layers; for n_ghost == 1 collapses to a single iteration
+//  with literal indices identical to the legacy code.
+void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
 {
-    if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P()) 
+    for (int gx = 0; gx < n_ghost; gx++)
+    for (int gy = 0; gy < n_ghost; gy++)
     {
-        for (int i = 1; i < (nz - 1); i++)
-            vector[nx - 2][ny - 2][i] += vector[nx - 1][ny - 1][i];
-    }
-    if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P()) 
-    {
-        for (int i = 1; i < (nz - 1); i++)
-            vector[1][1][i] += vector[0][0][i];
-    }
-    if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P()) 
-    {
-        for (int i = 1; i < (nz - 1); i++)
-            vector[nx - 2][1][i] += vector[nx - 1][0][i];
-    }
-    if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P()) 
-    {
-        for (int i = 1; i < (nz - 1); i++)
-            vector[1][ny - 2][i] += vector[0][ny - 1][i];
+        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P())
+        {
+            for (int i = n_ghost; i < (nz - n_ghost); i++)
+                vector[nx - 2 - gx][ny - 2 - gy][i] += vector[nx - 1 - gx][ny - 1 - gy][i];
+        }
+        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P())
+        {
+            for (int i = n_ghost; i < (nz - n_ghost); i++)
+                vector[1 + gx][1 + gy][i] += vector[gx][gy][i];
+        }
+        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P())
+        {
+            for (int i = n_ghost; i < (nz - n_ghost); i++)
+                vector[nx - 2 - gx][1 + gy][i] += vector[nx - 1 - gx][gy][i];
+        }
+        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P())
+        {
+            for (int i = n_ghost; i < (nz - n_ghost); i++)
+                vector[1 + gx][ny - 2 - gy][i] += vector[gx][ny - 1 - gy][i];
+        }
     }
 }
 /** add the ghost cell values Edge Y to the 3D physical vector */
-void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct)
+//  Y-aligned edge: ghost block lives in the (x, z) cross-section.
+void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
 {
-    if (vct->hasXrghtNeighbor_P() && vct->hasZrghtNeighbor_P()) 
+    for (int gx = 0; gx < n_ghost; gx++)
+    for (int gz = 0; gz < n_ghost; gz++)
     {
-        for (int i = 1; i < (ny - 1); i++)
-            vector[nx - 2][i][nz - 2] += vector[nx - 1][i][nz - 1];
-    }
-    if (vct->hasXleftNeighbor_P() && vct->hasZleftNeighbor_P()) 
-    {
-        for (int i = 1; i < (ny - 1); i++)
-            vector[1][i][1] += vector[0][i][0];
-    }
-    if (vct->hasXleftNeighbor_P() && vct->hasZrghtNeighbor_P()) 
-    {
-        for (int i = 1; i < (ny - 1); i++)
-            vector[1][i][nz - 2] += vector[0][i][nz - 1];
-    }
-    if (vct->hasXrghtNeighbor_P() && vct->hasZleftNeighbor_P()) 
-    {
-        for (int i = 1; i < (ny - 1); i++)
-            vector[nx - 2][i][1] += vector[nx - 1][i][0];
+        if (vct->hasXrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+        {
+            for (int i = n_ghost; i < (ny - n_ghost); i++)
+                vector[nx - 2 - gx][i][nz - 2 - gz] += vector[nx - 1 - gx][i][nz - 1 - gz];
+        }
+        if (vct->hasXleftNeighbor_P() && vct->hasZleftNeighbor_P())
+        {
+            for (int i = n_ghost; i < (ny - n_ghost); i++)
+                vector[1 + gx][i][1 + gz] += vector[gx][i][gz];
+        }
+        if (vct->hasXleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+        {
+            for (int i = n_ghost; i < (ny - n_ghost); i++)
+                vector[1 + gx][i][nz - 2 - gz] += vector[gx][i][nz - 1 - gz];
+        }
+        if (vct->hasXrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+        {
+            for (int i = n_ghost; i < (ny - n_ghost); i++)
+                vector[nx - 2 - gx][i][1 + gz] += vector[nx - 1 - gx][i][gz];
+        }
     }
 }
 
 /** add the ghost values Edge X to the 3D physical vector */
-void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct)
+//  X-aligned edge: ghost block lives in the (y, z) cross-section.
+void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
 {
-    if (vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P()) {
-        for (int i = 1; i < (nx - 1); i++)
-        vector[i][ny - 2][nz - 2] += vector[i][ny - 1][nz - 1];
-    }
-    if (vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P()) {
-        for (int i = 1; i < (nx - 1); i++)
-        vector[i][1][1] += vector[i][0][0];
-    }
-    if (vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P()) {
-        for (int i = 1; i < (nx - 1); i++)
-        vector[i][1][nz - 2] += vector[i][0][nz - 1];
-    }
-    if (vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P()) {
-        for (int i = 1; i < (nx - 1); i++)
-        vector[i][ny - 2][1] += vector[i][ny - 1][0];
+    for (int gy = 0; gy < n_ghost; gy++)
+    for (int gz = 0; gz < n_ghost; gz++)
+    {
+        if (vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P()) {
+            for (int i = n_ghost; i < (nx - n_ghost); i++)
+                vector[i][ny - 2 - gy][nz - 2 - gz] += vector[i][ny - 1 - gy][nz - 1 - gz];
+        }
+        if (vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P()) {
+            for (int i = n_ghost; i < (nx - n_ghost); i++)
+                vector[i][1 + gy][1 + gz] += vector[i][gy][gz];
+        }
+        if (vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P()) {
+            for (int i = n_ghost; i < (nx - n_ghost); i++)
+                vector[i][1 + gy][nz - 2 - gz] += vector[i][gy][nz - 1 - gz];
+        }
+        if (vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P()) {
+            for (int i = n_ghost; i < (nx - n_ghost); i++)
+                vector[i][ny - 2 - gy][1 + gz] += vector[i][ny - 1 - gy][gz];
+        }
     }
 }
 
 /** add ghost cells values Corners in the 3D physical vector */
-void addCorner(int nx, int ny, int nz, double ***vector,const VirtualTopology3D * vct)
+//  Each corner is a single node for n_ghost == 1; for n_ghost > 1 it expands
+//  to a (gx, gy, gz) cube of nodes that are summed back into the matching
+//  inner interior corner.
+void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
 {
-    if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
-        vector[nx - 2][ny - 2][nz - 2] += vector[nx - 1][ny - 1][nz - 1];
-    if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
-        vector[1][ny - 2][nz - 2] += vector[0][ny - 1][nz - 1];
-    if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
-        vector[nx - 2][1][nz - 2] += vector[nx - 1][0][nz - 1];
-    if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
-        vector[1][1][nz - 2] += vector[0][0][nz - 1];
-    if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
-        vector[nx - 2][ny - 2][1] += vector[nx - 1][ny - 1][0];
-    if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
-        vector[1][ny - 2][1] += vector[0][ny - 1][0] ;
-    if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
-        vector[nx - 2][1][1] += vector[nx - 1][0][0] ;
-    if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
-        vector[1][1][1] += vector[0][0][0];
-
+    for (int gx = 0; gx < n_ghost; gx++)
+    for (int gy = 0; gy < n_ghost; gy++)
+    for (int gz = 0; gz < n_ghost; gz++)
+    {
+        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+            vector[nx - 2 - gx][ny - 2 - gy][nz - 2 - gz] += vector[nx - 1 - gx][ny - 1 - gy][nz - 1 - gz];
+        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+            vector[1 + gx][ny - 2 - gy][nz - 2 - gz] += vector[gx][ny - 1 - gy][nz - 1 - gz];
+        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+            vector[nx - 2 - gx][1 + gy][nz - 2 - gz] += vector[nx - 1 - gx][gy][nz - 1 - gz];
+        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+            vector[1 + gx][1 + gy][nz - 2 - gz] += vector[gx][gy][nz - 1 - gz];
+        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+            vector[nx - 2 - gx][ny - 2 - gy][1 + gz] += vector[nx - 1 - gx][ny - 1 - gy][gz];
+        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+            vector[1 + gx][ny - 2 - gy][1 + gz] += vector[gx][ny - 1 - gy][gz];
+        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
+            vector[nx - 2 - gx][1 + gy][1 + gz] += vector[nx - 1 - gx][gy][gz];
+        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
+            vector[1 + gx][1 + gy][1 + gz] += vector[gx][gy][gz];
+    }
 }
 /** communicate and sum shared ghost cells */
 

@@ -99,10 +99,14 @@ void communicateInterp_old(int nx, int ny, int nz, int ns, double ****vector,
                            int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft, 
                            const VirtualTopology3D *vct, EMfields3D *EMf);
 
-void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct);
-void addEdgeX (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct);
-void addEdgeY (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct);
-void addEdgeZ (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct);
-void addFace  (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct);
+//* The optional n_ghost parameter wraps the legacy 1-layer add in an outer
+//  loop over ghost layers. n_ghost = 1 (default) preserves the original
+//  byte-identical behaviour; n_ghost > 1 sums each of the wider ghost layers
+//  back into the corresponding inner interior nodes.
+void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
+void addEdgeX (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
+void addEdgeY (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
+void addEdgeZ (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
+void addFace  (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
 
 #endif
