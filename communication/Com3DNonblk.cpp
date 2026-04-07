@@ -639,31 +639,37 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     assert_eq(recvcnt, sendcnt - recvcnt);
     assert_le(sendcnt, MAX_REQS);
 
-    //* Periodic single-rank self-copies (X/Y/Z). Constant-extension fallback
-    //  consistent with the legacy n_ghost == 1 behaviour; Phase B may tighten
-    //  this if strict periodic wrapping for n_ghost > 1 is required.
+    //* Periodic single-rank self-copies (X/Y/Z). Each ghost layer reads from
+    //  the matching interior node on the OPPOSITE side; reads only touch
+    //  interior nodes, so layer order is irrelevant and there is no
+    //  read-after-write chaining (unlike a "vector[g] = vector[nx-2-g]"
+    //  formulation which would chain at n_ghost > 1).
+    //  For n_ghost == 1 this reduces to the legacy
+    //      vector[0]      = vector[nx-2]
+    //      vector[nx-1]   = vector[1]
+    //  identically.
     if (right_neighborX == myrank && left_neighborX == myrank) {
-        for (int g = n_ghost_ - 1; g >= 0; g--)
+        for (int g = 0; g < n_ghost_; g++)
             for (int iy = n_ghost_; iy < ny - n_ghost_; iy++)
                 for (int iz = n_ghost_; iz < nz - n_ghost_; iz++) {
-                    vector[g][iy][iz]      = vector[nx-2-g][iy][iz];
-                    vector[nx-1-g][iy][iz] = vector[1+g][iy][iz];
+                    vector[g][iy][iz]            = vector[nx - 1 - n_ghost_ - g][iy][iz];
+                    vector[nx - 1 - g][iy][iz]   = vector[n_ghost_ + g][iy][iz];
                 }
     }
     if (right_neighborY == myrank && left_neighborY == myrank) {
-        for (int g = n_ghost_ - 1; g >= 0; g--)
+        for (int g = 0; g < n_ghost_; g++)
             for (int ix = n_ghost_; ix < nx - n_ghost_; ix++)
                 for (int iz = n_ghost_; iz < nz - n_ghost_; iz++) {
-                    vector[ix][g][iz]      = vector[ix][ny-2-g][iz];
-                    vector[ix][ny-1-g][iz] = vector[ix][1+g][iz];
+                    vector[ix][g][iz]            = vector[ix][ny - 1 - n_ghost_ - g][iz];
+                    vector[ix][ny - 1 - g][iz]   = vector[ix][n_ghost_ + g][iz];
                 }
     }
     if (right_neighborZ == myrank && left_neighborZ == myrank) {
-        for (int g = n_ghost_ - 1; g >= 0; g--)
+        for (int g = 0; g < n_ghost_; g++)
             for (int ix = n_ghost_; ix < nx - n_ghost_; ix++)
                 for (int iy = n_ghost_; iy < ny - n_ghost_; iy++) {
-                    vector[ix][iy][g]      = vector[ix][iy][nz-2-g];
-                    vector[ix][iy][nz-1-g] = vector[ix][iy][1+g];
+                    vector[ix][iy][g]            = vector[ix][iy][nz - 1 - n_ghost_ - g];
+                    vector[ix][iy][nz - 1 - g]   = vector[ix][iy][n_ghost_ + g];
                 }
     }
 
@@ -1073,28 +1079,28 @@ void communicateCenterBoxStencilBC_P( int nx, int ny, int nz, arr3_double _vecto
 /** add the values of ghost cells faces to the 3D physical vector */
 //  For n_ghost == 1 the loop runs once with g = 0, reproducing the
 //  byte-identical literal indices of the original implementation.
-//  For n_ghost > 1, layer g of the ghost slab is summed into the matching
-//  inner interior layer (one node further from the rank boundary).
+//  For n_ghost > 1, ghost layer g (counted from the outermost) is summed into
+//  the corresponding interior layer at depth g from the boundary node:
+//      left:  vector[n_ghost + g]   += vector[g]
+//      right: vector[nx-1-n_ghost-g] += vector[nx-1-g]
+//  No chained accumulation: each (src, dst) pair is independent because the
+//  src lives in the ghost slab and the dst lives strictly inside the interior.
 void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
 {
-    const int nxr = nx - 2 * n_ghost + 1;
-    const int nyr = ny - 2 * n_ghost + 1;
-    const int nzr = nz - 2 * n_ghost + 1;
-
     for (int g = 0; g < n_ghost; g++) {
         // Xright
         if (vct->hasXrghtNeighbor_P())
         {
             for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
                 for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
-                    vector[nx - 2 - g][j][k] += vector[nx - 1 - g][j][k];
+                    vector[nx - 1 - n_ghost - g][j][k] += vector[nx - 1 - g][j][k];
         }
         // XLEFT
         if (vct->hasXleftNeighbor_P())
         {
             for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
                 for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
-                    vector[1 + g][j][k] += vector[g][j][k];
+                    vector[n_ghost + g][j][k] += vector[g][j][k];
         }
 
         // Yright
@@ -1102,37 +1108,36 @@ void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D *
         {
             for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
                 for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
-                    vector[i][ny - 2 - g][k] += vector[i][ny - 1 - g][k];
+                    vector[i][ny - 1 - n_ghost - g][k] += vector[i][ny - 1 - g][k];
         }
         // Yleft
         if (vct->hasYleftNeighbor_P())
         {
             for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
                 for (int k = n_ghost; k <= nz - 1 - n_ghost; k++)
-                    vector[i][1 + g][k] += vector[i][g][k];
+                    vector[i][n_ghost + g][k] += vector[i][g][k];
         }
         // Zright
         if (vct->hasZrghtNeighbor_P())
         {
             for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
                 for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
-                    vector[i][j][nz - 2 - g] += vector[i][j][nz - 1 - g];
+                    vector[i][j][nz - 1 - n_ghost - g] += vector[i][j][nz - 1 - g];
         }
         // ZLEFT
         if (vct->hasZleftNeighbor_P())
         {
             for (int i = n_ghost; i <= nx - 1 - n_ghost; i++)
                 for (int j = n_ghost; j <= ny - 1 - n_ghost; j++)
-                    vector[i][j][1 + g] += vector[i][j][g];
+                    vector[i][j][n_ghost + g] += vector[i][j][g];
         }
     }
-    (void)nxr; (void)nyr; (void)nzr;  // legacy locals retained for clarity
 }
 
 /** insert the ghost cells Edge Z in the 3D physical vector */
 //  Z-aligned edge: ghost block lives in the (x, y) cross-section.
-//  Loop over (gx, gy) layers; for n_ghost == 1 collapses to a single iteration
-//  with literal indices identical to the legacy code.
+//  Same shift convention as addFace: (src ghost, dst interior) pairs are
+//  independent — no chained accumulation.
 void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
 {
     for (int gx = 0; gx < n_ghost; gx++)
@@ -1141,22 +1146,22 @@ void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
         if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P())
         {
             for (int i = n_ghost; i < (nz - n_ghost); i++)
-                vector[nx - 2 - gx][ny - 2 - gy][i] += vector[nx - 1 - gx][ny - 1 - gy][i];
+                vector[nx - 1 - n_ghost - gx][ny - 1 - n_ghost - gy][i] += vector[nx - 1 - gx][ny - 1 - gy][i];
         }
         if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P())
         {
             for (int i = n_ghost; i < (nz - n_ghost); i++)
-                vector[1 + gx][1 + gy][i] += vector[gx][gy][i];
+                vector[n_ghost + gx][n_ghost + gy][i] += vector[gx][gy][i];
         }
         if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P())
         {
             for (int i = n_ghost; i < (nz - n_ghost); i++)
-                vector[nx - 2 - gx][1 + gy][i] += vector[nx - 1 - gx][gy][i];
+                vector[nx - 1 - n_ghost - gx][n_ghost + gy][i] += vector[nx - 1 - gx][gy][i];
         }
         if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P())
         {
             for (int i = n_ghost; i < (nz - n_ghost); i++)
-                vector[1 + gx][ny - 2 - gy][i] += vector[gx][ny - 1 - gy][i];
+                vector[n_ghost + gx][ny - 1 - n_ghost - gy][i] += vector[gx][ny - 1 - gy][i];
         }
     }
 }
@@ -1170,22 +1175,22 @@ void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
         if (vct->hasXrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
         {
             for (int i = n_ghost; i < (ny - n_ghost); i++)
-                vector[nx - 2 - gx][i][nz - 2 - gz] += vector[nx - 1 - gx][i][nz - 1 - gz];
+                vector[nx - 1 - n_ghost - gx][i][nz - 1 - n_ghost - gz] += vector[nx - 1 - gx][i][nz - 1 - gz];
         }
         if (vct->hasXleftNeighbor_P() && vct->hasZleftNeighbor_P())
         {
             for (int i = n_ghost; i < (ny - n_ghost); i++)
-                vector[1 + gx][i][1 + gz] += vector[gx][i][gz];
+                vector[n_ghost + gx][i][n_ghost + gz] += vector[gx][i][gz];
         }
         if (vct->hasXleftNeighbor_P() && vct->hasZrghtNeighbor_P())
         {
             for (int i = n_ghost; i < (ny - n_ghost); i++)
-                vector[1 + gx][i][nz - 2 - gz] += vector[gx][i][nz - 1 - gz];
+                vector[n_ghost + gx][i][nz - 1 - n_ghost - gz] += vector[gx][i][nz - 1 - gz];
         }
         if (vct->hasXrghtNeighbor_P() && vct->hasZleftNeighbor_P())
         {
             for (int i = n_ghost; i < (ny - n_ghost); i++)
-                vector[nx - 2 - gx][i][1 + gz] += vector[nx - 1 - gx][i][gz];
+                vector[nx - 1 - n_ghost - gx][i][n_ghost + gz] += vector[nx - 1 - gx][i][gz];
         }
     }
 }
@@ -1199,19 +1204,19 @@ void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
     {
         if (vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P()) {
             for (int i = n_ghost; i < (nx - n_ghost); i++)
-                vector[i][ny - 2 - gy][nz - 2 - gz] += vector[i][ny - 1 - gy][nz - 1 - gz];
+                vector[i][ny - 1 - n_ghost - gy][nz - 1 - n_ghost - gz] += vector[i][ny - 1 - gy][nz - 1 - gz];
         }
         if (vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P()) {
             for (int i = n_ghost; i < (nx - n_ghost); i++)
-                vector[i][1 + gy][1 + gz] += vector[i][gy][gz];
+                vector[i][n_ghost + gy][n_ghost + gz] += vector[i][gy][gz];
         }
         if (vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P()) {
             for (int i = n_ghost; i < (nx - n_ghost); i++)
-                vector[i][1 + gy][nz - 2 - gz] += vector[i][gy][nz - 1 - gz];
+                vector[i][n_ghost + gy][nz - 1 - n_ghost - gz] += vector[i][gy][nz - 1 - gz];
         }
         if (vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P()) {
             for (int i = n_ghost; i < (nx - n_ghost); i++)
-                vector[i][ny - 2 - gy][1 + gz] += vector[i][ny - 1 - gy][gz];
+                vector[i][ny - 1 - n_ghost - gy][n_ghost + gz] += vector[i][ny - 1 - gy][gz];
         }
     }
 }
@@ -1227,21 +1232,21 @@ void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D
     for (int gz = 0; gz < n_ghost; gz++)
     {
         if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
-            vector[nx - 2 - gx][ny - 2 - gy][nz - 2 - gz] += vector[nx - 1 - gx][ny - 1 - gy][nz - 1 - gz];
+            vector[nx - 1 - n_ghost - gx][ny - 1 - n_ghost - gy][nz - 1 - n_ghost - gz] += vector[nx - 1 - gx][ny - 1 - gy][nz - 1 - gz];
         if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
-            vector[1 + gx][ny - 2 - gy][nz - 2 - gz] += vector[gx][ny - 1 - gy][nz - 1 - gz];
+            vector[n_ghost + gx][ny - 1 - n_ghost - gy][nz - 1 - n_ghost - gz] += vector[gx][ny - 1 - gy][nz - 1 - gz];
         if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
-            vector[nx - 2 - gx][1 + gy][nz - 2 - gz] += vector[nx - 1 - gx][gy][nz - 1 - gz];
+            vector[nx - 1 - n_ghost - gx][n_ghost + gy][nz - 1 - n_ghost - gz] += vector[nx - 1 - gx][gy][nz - 1 - gz];
         if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
-            vector[1 + gx][1 + gy][nz - 2 - gz] += vector[gx][gy][nz - 1 - gz];
+            vector[n_ghost + gx][n_ghost + gy][nz - 1 - n_ghost - gz] += vector[gx][gy][nz - 1 - gz];
         if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
-            vector[nx - 2 - gx][ny - 2 - gy][1 + gz] += vector[nx - 1 - gx][ny - 1 - gy][gz];
+            vector[nx - 1 - n_ghost - gx][ny - 1 - n_ghost - gy][n_ghost + gz] += vector[nx - 1 - gx][ny - 1 - gy][gz];
         if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
-            vector[1 + gx][ny - 2 - gy][1 + gz] += vector[gx][ny - 1 - gy][gz];
+            vector[n_ghost + gx][ny - 1 - n_ghost - gy][n_ghost + gz] += vector[gx][ny - 1 - gy][gz];
         if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
-            vector[nx - 2 - gx][1 + gy][1 + gz] += vector[nx - 1 - gx][gy][gz];
+            vector[nx - 1 - n_ghost - gx][n_ghost + gy][n_ghost + gz] += vector[nx - 1 - gx][gy][gz];
         if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
-            vector[1 + gx][1 + gy][1 + gz] += vector[gx][gy][gz];
+            vector[n_ghost + gx][n_ghost + gy][n_ghost + gz] += vector[gx][gy][gz];
     }
 }
 /** communicate and sum shared ghost cells */

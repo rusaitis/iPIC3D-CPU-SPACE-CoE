@@ -2380,42 +2380,39 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     const VirtualTopology3D *vct = &get_vct();
     int rank = vct->getCartesian_rank();
 
-    //* Convert ECSIM/RelSIM moments from type array4_double to *** for communication
-    // double ***moment_rhons = convert_to_arr3(rhons[is]);
-    // double ***moment_Jxhs  = convert_to_arr3(Jxhs[is]);
-    // double ***moment_Jyhs  = convert_to_arr3(Jyhs[is]);
-    // double ***moment_Jzhs  = convert_to_arr3(Jzhs[is]);
+    //* Phase B: route the per-species moment halo through the modern 3D path
+    //  via slice views. The legacy 4D ComParser3D helpers
+    //  (communicateInterp_old / communicateNode_P_old) are hard-coded to
+    //  n_ghost == 1 and produce wrong results when n_ghost > 1; the modern
+    //  NBDerivedHaloComm path goes through NBDerivedHaloCommN for n_ghost > 1.
+    //
+    //  The Jxh / Jyh / Jzh aggregates are still 0 here (sumOverSpecies is
+    //  called later), so the calls on them are no-ops. Keeping them for
+    //  parity with the legacy structure — they will become meaningful once
+    //  this routine is restructured to sum first.
+    double ***moment_rhons = convert_to_arr3(rhons[is]);
+    double ***moment_Jxhs  = convert_to_arr3(Jxhs[is]);
+    double ***moment_Jyhs  = convert_to_arr3(Jyhs[is]);
+    double ***moment_Jzhs  = convert_to_arr3(Jzhs[is]);
 
-    // interpolate adding common nodes among processors
-    communicateInterp(nxn, nyn, nzn, Jxh, vct, this);
-    communicateInterp(nxn, nyn, nzn, Jyh, vct, this);
-    communicateInterp(nxn, nyn, nzn, Jzh, vct, this);
+    //* Halo sum (interpolation pattern: face/edge/corner addFace into the
+    //  matching interior nodes).
+    communicateInterp(nxn, nyn, nzn, Jxh,         vct, this);
+    communicateInterp(nxn, nyn, nzn, Jyh,         vct, this);
+    communicateInterp(nxn, nyn, nzn, Jzh,         vct, this);
+    communicateInterp(nxn, nyn, nzn, moment_Jxhs, vct, this);
+    communicateInterp(nxn, nyn, nzn, moment_Jyhs, vct, this);
+    communicateInterp(nxn, nyn, nzn, moment_Jzhs, vct, this);
+    communicateInterp(nxn, nyn, nzn, moment_rhons, vct, this);
 
-    //* NonBlocking Halo Exchange for Interpolation
-    // communicateInterp(nxn, nyn, nzn, moment_rhons, vct, this);
-    // communicateInterp(nxn, nyn, nzn, moment_Jxhs,  vct, this);
-    // communicateInterp(nxn, nyn, nzn, moment_Jyhs,  vct, this);
-    // communicateInterp(nxn, nyn, nzn, moment_Jzhs,  vct, this);
-
-    communicateInterp_old(nxn, nyn, nzn, is, Jxhs,  0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, Jyhs,  0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, Jzhs,  0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, rhons, 0, 0, 0, 0, 0, 0, vct, this);
-
-    //* Populate the ghost nodes - Nonblocking Halo Exchange
-    communicateNode_P(nxn, nyn, nzn, Jxh, vct, this);
-    communicateNode_P(nxn, nyn, nzn, Jyh, vct, this);
-    communicateNode_P(nxn, nyn, nzn, Jzh, vct, this);
-
-    // communicateNode_P(nxn, nyn, nzn, moment_Jxhs,  vct, this);
-    // communicateNode_P(nxn, nyn, nzn, moment_Jyhs,  vct, this);
-    // communicateNode_P(nxn, nyn, nzn, moment_Jzhs,  vct, this);
-    // communicateNode_P(nxn, nyn, nzn, moment_rhons, vct, this);
-
-    communicateNode_P_old(nxn, nyn, nzn, is, Jxhs,  vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, Jyhs,  vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, Jzhs,  vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, rhons, vct, this);
+    //* Populate the ghost layers (no sum-on-receive, just copy from interior).
+    communicateNode_P(nxn, nyn, nzn, Jxh,         vct, this);
+    communicateNode_P(nxn, nyn, nzn, Jyh,         vct, this);
+    communicateNode_P(nxn, nyn, nzn, Jzh,         vct, this);
+    communicateNode_P(nxn, nyn, nzn, moment_Jxhs, vct, this);
+    communicateNode_P(nxn, nyn, nzn, moment_Jyhs, vct, this);
+    communicateNode_P(nxn, nyn, nzn, moment_Jzhs, vct, this);
+    communicateNode_P(nxn, nyn, nzn, moment_rhons, vct, this);
 }
 
 void EMfields3D::communicateGhostP2G_mass_matrix()
@@ -2847,9 +2844,14 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //? Move from Krylov space to physical space
     solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn, n_ghost_);
 
-    communicateNodeBC_old(nxn, nyn, nzn, tempX, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
-	communicateNodeBC_old(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
-	communicateNodeBC_old(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
+    //* Phase B: switched to the modern n_ghost-aware NBDerivedHaloComm path
+    //  (was communicateNodeBC_old which uses ComParser3D helpers hardcoded to
+    //  n_ghost == 1). The legacy path stayed for historical reasons; both
+    //  produce identical data movement at n_ghost == 1, so this is a no-op
+    //  there.
+    communicateNodeBC(nxn, nyn, nzn, tempX, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
+	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
+	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
 
     //? curl(curl(E)) is computed using finite differences
     grid->curlN2C(tempXC, tempYC, tempZC, tempX, tempY, tempZ);
@@ -4361,25 +4363,25 @@ void EMfields3D::init_double_Harris()
                     Byn[i][j][k] += (-B0x * perturbation) * exp_pert * ( cos(M_PI * xpert / 10.0 / delta) * cos(M_PI * ypert / 10.0 / delta) * 2.0 * xpert / delta + sin(M_PI * xpert / 10.0 / delta) * cos(M_PI * ypert / 10.0 / delta) * M_PI / 10.0);
                 }
 
-        //* Communicate ghost data on nodes
-        communicateNodeBC_old(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
-        communicateNodeBC_old(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
-        communicateNodeBC_old(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
-        
+        //* Communicate ghost data on nodes (modern n_ghost-aware path)
+        communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
+
         //* Initialise B on cell centres
         grid->interpN2C(Bxc, Bxn);
         grid->interpN2C(Byc, Byn);
         grid->interpN2C(Bzc, Bzn);
-        
+
         //* Communicate ghost data on cell centres
         communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
         communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
         communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
-    
+
         //* Initialise rho on cell centres
         for (int is = 0; is < ns; is++)
             grid->interpN2C(rhocs, is, rhons);
-    } 
+    }
     else
         init();  //! READ FROM RESTART
 }

@@ -309,12 +309,16 @@ void Particles3D::maxwellian_Double_Harris(Field * EMf)
 
     const double q_factor =  (qom / fabs(qom)) * grid->getVOL() / npcel;
 
-    for (int i = 1; i < grid->getNXC() - 1; i++)
-        for (int j = 1; j < grid->getNYC() - 1; j++)
-            for (int k = 1; k < grid->getNZC() - 1; k++)
+    //* Iterate over interior cells [n_ghost, nxc - n_ghost). Literal "1" only
+    //  works for n_ghost == 1; for n_ghost == 2 the loop must shrink so that
+    //  particles are seeded only in real cells, never in ghost cells.
+    const int ng = grid->getNGhost();
+    for (int i = ng; i < grid->getNXC() - ng; i++)
+        for (int j = ng; j < grid->getNYC() - ng; j++)
+            for (int k = ng; k < grid->getNZC() - ng; k++)
             {
                 const double q = q_factor * fabs(EMf->getRHOcs(i, j, k, ns));
-                
+
                 for (int ii = 0; ii < npcelx; ii++)
                     for (int jj = 0; jj < npcely; jj++)
                         for (int kk = 0; kk < npcelz; kk++)
@@ -325,13 +329,13 @@ void Particles3D::maxwellian_Double_Harris(Field * EMf)
                             const double x = (ii + .5) * (dx / npcelx) + grid->getXN(i, j, k);
                             const double y = (jj + .5) * (dy / npcely) + grid->getYN(i, j, k);
                             const double z = (kk + .5) * (dz / npcelz) + grid->getZN(i, j, k);
-                            
+
                             double u, v, w;
                             sample_maxwellian(u, v, w, uth, vth, wth, u0, v0, w0*shaper_z);
                             create_new_particle(u,v,w,q,x,y,z);
                         }
             }
-    
+
     fixPosition();
 }
 
@@ -1363,12 +1367,16 @@ void Particles3D::ECSIM_position(Field *EMf)
             //! This may be further optimised - PJD
             //? Charge Conservation (energy conservation inherently violates charge conservation --> charge has to be conserved separately)
 
+            //* Cell-centered cell index. Origin offset is (n_ghost + 1):
+            //  ixd == -1 maps to the leftmost interior cell [n_ghost], which
+            //  matches the legacy literal "2 +" when n_ghost == 1.
             const double ixd = floor((xavg - dx/2.0 - xstart) * inv_dx);
 			const double iyd = floor((yavg - dy/2.0 - ystart) * inv_dy);
 			const double izd = floor((zavg - dz/2.0 - zstart) * inv_dz);
-			int ix = 2 + int (ixd);
-			int iy = 2 + int (iyd);
-			int iz = 2 + int (izd);
+			const int n_ghost_p = grid->getNGhost();
+			int ix = (n_ghost_p + 1) + int (ixd);
+			int iy = (n_ghost_p + 1) + int (iyd);
+			int iz = (n_ghost_p + 1) + int (izd);
 		
 			//* Difference along X
 			eta0  = yavg - grid->getYC(ix, iy - 1, iz);
@@ -2109,11 +2117,15 @@ void Particles3D::mover_PC(Field * EMf)
                 const double ixd = floor((xavg - xstart) * inv_dx);
                 const double iyd = floor((yavg - ystart) * inv_dy);
                 const double izd = floor((zavg - zstart) * inv_dz);
-                
-                //* interface of index to right of cell
-                int ix = 2 + int(ixd);
-                int iy = 2 + int(iyd);
-                int iz = 2 + int(izd);
+
+                //* interface of index to right of cell. Origin offset is
+                //  (n_ghost + 1): ixd == 0 maps to ix == n_ghost + 1, which
+                //  references nodes [n_ghost] and [n_ghost+1] (the leftmost
+                //  interior boundary node and the next interior node).
+                const int n_ghost_p = grid->getNGhost();
+                int ix = (n_ghost_p + 1) + int(ixd);
+                int iy = (n_ghost_p + 1) + int(iyd);
+                int iz = (n_ghost_p + 1) + int(izd);
 
                 //* use field data of closest cell in domain
                 if (ix < 1) ix = 1;
