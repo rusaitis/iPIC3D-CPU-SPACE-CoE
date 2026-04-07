@@ -101,6 +101,7 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     z_center(col->getz_center()),
     L_square(col->getL_square()),
     stencil_order_(col->getStencilOrderInt()),
+    n_ghost_(grid->getNGhost()),
     ne_mass_(col->getStencilOrderInt() == 2 ? 63 : 14),
     delt (c*th*dt), // declared after these
 
@@ -349,36 +350,41 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     }
 
     //! Define MPI Derived Data types for Center Halo Exchange
+    //  Strip widths use (n - 2*n_ghost_) so the type packs only the interior
+    //  cells/nodes. For n_ghost_ = 1 the literals (nyc-2), (nxc-2), etc. recover.
+    //  Corner displacements stay literal: they point at outermost ghost corners,
+    //  which are unchanged regardless of n_ghost_. (For n_ghost_=2 the inner-ring
+    //  corners need an additional exchange pass — handled in Com3DNonblk.)
     //? For face exchange on X dir
-    MPI_Type_vector((nyc-2),(nzc-2),nzc, MPI_DOUBLE, &yzFacetypeC);
+    MPI_Type_vector((nyc-2*n_ghost_),(nzc-2*n_ghost_),nzc, MPI_DOUBLE, &yzFacetypeC);
     MPI_Type_commit(&yzFacetypeC);
-    
+
     //? For face exchange on Y dir
-    MPI_Type_create_hvector((nxc-2),(nzc-2),(nzc*nyc*sizeof(double)), MPI_DOUBLE, &xzFacetypeC);
+    MPI_Type_create_hvector((nxc-2*n_ghost_),(nzc-2*n_ghost_),(nzc*nyc*sizeof(double)), MPI_DOUBLE, &xzFacetypeC);
     MPI_Type_commit(&xzFacetypeC);
 
-    MPI_Type_vector((nyc-2), 1, nzc, MPI_DOUBLE, &yEdgetypeC);
+    MPI_Type_vector((nyc-2*n_ghost_), 1, nzc, MPI_DOUBLE, &yEdgetypeC);
     MPI_Type_commit(&yEdgetypeC);
-    
+
     //? For face exchangeg on Z dir
-    MPI_Type_create_hvector((nxc-2), 1, (nzc*nyc*sizeof(double)), yEdgetypeC, &xyFacetypeC);
+    MPI_Type_create_hvector((nxc-2*n_ghost_), 1, (nzc*nyc*sizeof(double)), yEdgetypeC, &xyFacetypeC);
     MPI_Type_commit(&xyFacetypeC);
-    
+
     //? 2 yEdgeType can be merged into one message
     MPI_Type_create_hvector(2, 1,(nzc-1)*sizeof(double), yEdgetypeC, &yEdgetypeC2);
     MPI_Type_commit(&yEdgetypeC2);
-    
-    MPI_Type_contiguous((nzc-2),MPI_DOUBLE, &zEdgetypeC);
+
+    MPI_Type_contiguous((nzc-2*n_ghost_),MPI_DOUBLE, &zEdgetypeC);
     MPI_Type_commit(&zEdgetypeC);
-    
-    MPI_Type_create_hvector(2, (nzc-2),(nxc-1)*(nyc*nzc)*sizeof(double), MPI_DOUBLE, &zEdgetypeC2);
+
+    MPI_Type_create_hvector(2, (nzc-2*n_ghost_),(nxc-1)*(nyc*nzc)*sizeof(double), MPI_DOUBLE, &zEdgetypeC2);
     MPI_Type_commit(&zEdgetypeC2);
-    
-    MPI_Type_vector((nxc-2), 1, nyc*nzc, MPI_DOUBLE, &xEdgetypeC);
+
+    MPI_Type_vector((nxc-2*n_ghost_), 1, nyc*nzc, MPI_DOUBLE, &xEdgetypeC);
     MPI_Type_commit(&xEdgetypeC);
     MPI_Type_create_hvector(2, 1, (nyc-1)*nzc*sizeof(double), xEdgetypeC, &xEdgetypeC2);
     MPI_Type_commit(&xEdgetypeC2);
-    
+
     //* corner used to communicate in x direction
     int blocklengthC[]={1,1,1,1};
     int displacementsC[]={0,nzc-1,(nyc-1)*nzc,nyc*nzc-1};
@@ -387,31 +393,31 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
 
     //! Define MPI Derived Data types for Node Halo Exchange
     //? For face exchange on X dir
-    MPI_Type_vector((nyn-2),(nzn-2),nzn, MPI_DOUBLE, &yzFacetypeN);
+    MPI_Type_vector((nyn-2*n_ghost_),(nzn-2*n_ghost_),nzn, MPI_DOUBLE, &yzFacetypeN);
     MPI_Type_commit(&yzFacetypeN);
 
     //? For face exchange on Y dir
-    MPI_Type_create_hvector((nxn-2),(nzn-2),(nzn*nyn*sizeof(double)), MPI_DOUBLE, &xzFacetypeN);
+    MPI_Type_create_hvector((nxn-2*n_ghost_),(nzn-2*n_ghost_),(nzn*nyn*sizeof(double)), MPI_DOUBLE, &xzFacetypeN);
     MPI_Type_commit(&xzFacetypeN);
 
-    MPI_Type_vector((nyn-2), 1, nzn, MPI_DOUBLE, &yEdgetypeN);
+    MPI_Type_vector((nyn-2*n_ghost_), 1, nzn, MPI_DOUBLE, &yEdgetypeN);
     MPI_Type_commit(&yEdgetypeN);
 
     //? For face exchangeg on Z dir
-    MPI_Type_create_hvector((nxn-2), 1, (nzn*nyn*sizeof(double)), yEdgetypeN, &xyFacetypeN);
+    MPI_Type_create_hvector((nxn-2*n_ghost_), 1, (nzn*nyn*sizeof(double)), yEdgetypeN, &xyFacetypeN);
     MPI_Type_commit(&xyFacetypeN);
 
     //? 2 yEdgeType can be merged into one message
     MPI_Type_create_hvector(2, 1,(nzn-1)*sizeof(double), yEdgetypeN, &yEdgetypeN2);
     MPI_Type_commit(&yEdgetypeN2);
 
-    MPI_Type_contiguous((nzn-2),MPI_DOUBLE, &zEdgetypeN);
+    MPI_Type_contiguous((nzn-2*n_ghost_),MPI_DOUBLE, &zEdgetypeN);
     MPI_Type_commit(&zEdgetypeN);
 
-    MPI_Type_create_hvector(2, (nzn-2),(nxn-1)*(nyn*nzn)*sizeof(double), MPI_DOUBLE, &zEdgetypeN2);
+    MPI_Type_create_hvector(2, (nzn-2*n_ghost_),(nxn-1)*(nyn*nzn)*sizeof(double), MPI_DOUBLE, &zEdgetypeN2);
     MPI_Type_commit(&zEdgetypeN2);
 
-    MPI_Type_vector((nxn-2), 1, nyn*nzn, MPI_DOUBLE, &xEdgetypeN);
+    MPI_Type_vector((nxn-2*n_ghost_), 1, nyn*nzn, MPI_DOUBLE, &xEdgetypeN);
     MPI_Type_commit(&xEdgetypeN);
     MPI_Type_create_hvector(2, 1, (nyn-1)*nzn*sizeof(double), xEdgetypeN, &xEdgetypeN2);
     MPI_Type_commit(&xEdgetypeN2);
@@ -2544,20 +2550,21 @@ void EMfields3D::communicateGhostP2G_supplementary_moments(int is)
 //! ===================================== Compute Fields ===================================== !//
 
 //? Convert a 3D field to a 1D array (not considering guard cells)
-void solver2phys(arr3_double vectPhys, double *vectSolver, int nx, int ny, int nz) 
+//* n_ghost is the number of ghost cell layers per face (1 = legacy CIC; 2 = TSC)
+void solver2phys(arr3_double vectPhys, double *vectSolver, int nx, int ny, int nz, int n_ghost)
 {
-    for (int i = 1; i < nx - 1; i++)
-        for (int j = 1; j < ny - 1; j++)
-            for (int k = 1; k < nz - 1; k++)
+    for (int i = n_ghost; i < nx - n_ghost; i++)
+        for (int j = n_ghost; j < ny - n_ghost; j++)
+            for (int k = n_ghost; k < nz - n_ghost; k++)
                 vectPhys[i][j][k] = *vectSolver++;
 }
 
 //? Convert three 3D fields to a 1D array (not considering guard cells)
-void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2, arr3_double vectPhys3, double *vectSolver, int nx, int ny, int nz) 
+void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2, arr3_double vectPhys3, double *vectSolver, int nx, int ny, int nz, int n_ghost)
 {
-    for (int i = 1; i < nx - 1; i++)
-        for (int j = 1; j < ny - 1; j++)
-            for (int k = 1; k < nz - 1; k++) 
+    for (int i = n_ghost; i < nx - n_ghost; i++)
+        for (int j = n_ghost; j < ny - n_ghost; j++)
+            for (int k = n_ghost; k < nz - n_ghost; k++)
             {
                 vectPhys1[i][j][k] = *vectSolver++;
                 vectPhys2[i][j][k] = *vectSolver++;
@@ -2566,20 +2573,20 @@ void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2, arr3_double vectP
 }
 
 //? Convert a 1D vector to 3D field (not considering guard cells)
-void phys2solver(double *vectSolver, const arr3_double vectPhys, int nx, int ny, int nz) 
+void phys2solver(double *vectSolver, const arr3_double vectPhys, int nx, int ny, int nz, int n_ghost)
 {
-    for (int i = 1; i < nx - 1; i++)
-        for (int j = 1; j < ny - 1; j++)
-            for (int k = 1; k < nz - 1; k++)
+    for (int i = n_ghost; i < nx - n_ghost; i++)
+        for (int j = n_ghost; j < ny - n_ghost; j++)
+            for (int k = n_ghost; k < nz - n_ghost; k++)
                 *vectSolver++ = vectPhys.get(i,j,k);
 }
 
 //? Convert a 1D vector to three 3D fields (not considering guard cells)
-void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_double vectPhys2, const arr3_double vectPhys3, int nx, int ny, int nz) 
+void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_double vectPhys2, const arr3_double vectPhys3, int nx, int ny, int nz, int n_ghost)
 {
-    for (int i = 1; i < nx - 1; i++)
-        for (int j = 1; j < ny - 1; j++)
-            for (int k = 1; k < nz - 1; k++) 
+    for (int i = n_ghost; i < nx - n_ghost; i++)
+        for (int j = n_ghost; j < ny - n_ghost; j++)
+            for (int k = n_ghost; k < nz - n_ghost; k++)
             {
                 *vectSolver++ = vectPhys1.get(i,j,k);
                 *vectSolver++ = vectPhys2.get(i,j,k);
@@ -2604,12 +2611,20 @@ void EMfields3D::calculateE()
         cout << "*** Electric field computation ***" << endl;
 
     //? X,Y,Z components for E
-    double *xkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];
-    double *bkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];
+    //  The Krylov vector size is the count of interior nodes (excluding all ghost layers).
+    //  For n_ghost_=1 this is the legacy (nxn-2)*(nyn-2)*(nzn-2); for n_ghost_=2 it shrinks
+    //  by 2 nodes per axis on each side.
+    const int krylov_dim_x = nxn - 2*n_ghost_;
+    const int krylov_dim_y = nyn - 2*n_ghost_;
+    const int krylov_dim_z = nzn - 2*n_ghost_;
+    const int krylov_size  = 3 * krylov_dim_x * krylov_dim_y * krylov_dim_z;
 
-    //? Initialise all params with zeros 
-    eqValue(0.0, xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2));
-    eqValue(0.0, bkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2));
+    double *xkrylov = new double[krylov_size];
+    double *bkrylov = new double[krylov_size];
+
+    //? Initialise all params with zeros
+    eqValue(0.0, xkrylov, krylov_size);
+    eqValue(0.0, bkrylov, krylov_size);
 
     #ifdef __PROFILE_FIELDS__
     time_ms.start();
@@ -2623,21 +2638,21 @@ void EMfields3D::calculateE()
     #endif
 
     //* Move to Krylov space from physical space
-    phys2solver(xkrylov, Ex, Ey, Ez, nxn, nyn, nzn);
+    phys2solver(xkrylov, Ex, Ey, Ez, nxn, nyn, nzn, n_ghost_);
 
     #ifdef __PROFILE_FIELDS__
     time_gmres.start();
     #endif
-    
+
     //? Solve using GMRes or PETSc
 #ifdef USE_PETSC
     if (petscSolver_ != nullptr) {
-        petscSolver_->solve(xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2), bkrylov,
+        petscSolver_->solve(xkrylov, krylov_size, bkrylov,
                             col->getCurrentCycle());
     } else
 #endif
     {
-        GMRES(&Field::MaxwellImage, xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2), bkrylov, 20, 50, GMREStol, this);
+        GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, 20, 50, GMREStol, this);
     }
 
     #ifdef __PROFILE_FIELDS__
@@ -2645,7 +2660,7 @@ void EMfields3D::calculateE()
     #endif
 
     //* Move from Krylov space to physical space
-    solver2phys(Exth, Eyth, Ezth, xkrylov, nxn, nyn, nzn);
+    solver2phys(Exth, Eyth, Ezth, xkrylov, nxn, nyn, nzn, n_ghost_);
 
     #ifdef __PROFILE_FIELDS__
     time_com.start();
@@ -2775,7 +2790,7 @@ void EMfields3D::MaxwellSource(double *bkrylov)
     // }
 
     //* Physical space --> Krylov space
-    phys2solver(bkrylov, tempX, tempY, tempZ, nxn, nyn, nzn);
+    phys2solver(bkrylov, tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
 }
 
 //? RHS of the Maxwell solver
@@ -2827,10 +2842,10 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     const VirtualTopology3D *vct = &get_vct();
     const Grid *grid = &get_grid();
 
-    eqValue(0.0, im, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2));
+    eqValue(0.0, im, 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_));
 
     //? Move from Krylov space to physical space
-    solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn);
+    solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn, n_ghost_);
 
     communicateNodeBC_old(nxn, nyn, nzn, tempX, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
 	communicateNodeBC_old(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
@@ -2847,9 +2862,9 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
 
     //* Multiply by factor
     double factor = c*th*dt*c*th*dt;
-    for (int i=1;i<nxn-1;i++)
-        for (int j=1;j<nyn-1;j++)
-            for (int k=1;k<nzn-1;k++) 
+    for (int i = n_ghost_; i < nxn - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_; k++)
             {
                 imageX[i][j][k] = tempX[i][j][k] + factor * imageX[i][j][k];
                 imageY[i][j][k] = tempY[i][j][k] + factor * imageY[i][j][k];
@@ -2859,15 +2874,18 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(tempX, tempY, tempZ, nxn, nyn, nzn);
 
+    //* mass_matrix_times_vector handles bounds internally for the wider TSC stencil
+    //* (mass-matrix product cube reaches +/- stencil_order_ nodes), so we keep the
+    //* full interior [n_ghost_, nxn-n_ghost_) for both Linear and Quadratic.
     #pragma omp parallel for collapse(3) schedule(static)
-    for (int i=1; i<nxn-1; i++) 
-        for (int j=1; j<nyn-1; j++) 
-            for (int k=1; k<nzn-1; k++) 
+    for (int i = n_ghost_; i < nxn - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_; k++)
             {
                 double MEx, MEy, MEz;
-                
+
                 mass_matrix_times_vector(&MEx, &MEy, &MEz, tempX, tempY, tempZ, i, j, k);
-                
+
                 temp2X[i][j][k] = dt*th*FourPI*MEx;
                 temp2Y[i][j][k] = dt*th*FourPI*MEy;
                 temp2Z[i][j][k] = dt*th*FourPI*MEz;
@@ -2876,18 +2894,18 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(temp2X, temp2Y, temp2Z, nxn, nyn, nzn);
 
-    for (int i=1; i<nxn-1; i++)
-        for (int j=1; j<nyn-1; j++)
-            for (int k=1; k<nzn-1; k++) 
+    for (int i = n_ghost_; i < nxn - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_; k++)
             {
                 temp2X[i][j][k] *= invVOL;
                 temp2Y[i][j][k] *= invVOL;
                 temp2Z[i][j][k] *= invVOL;
             }
-    
-    for (int i=1;i<nxn-1;i++)
-        for (int j=1;j<nyn-1;j++)
-            for (int k=1;k<nzn-1;k++) 
+
+    for (int i = n_ghost_; i < nxn - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_; k++)
             {
                 imageX[i][j][k] = temp2X[i][j][k] + imageX[i][j][k];
                 imageY[i][j][k] = temp2Y[i][j][k] + imageY[i][j][k];
@@ -2895,7 +2913,7 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
             }
 
     //? Move from physical space to Krylov space
-    phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn);
+    phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_);
 }
 
 //? Update the values of magnetic field at the nodes at time n+1
@@ -3001,9 +3019,9 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
 
     for (int icount = 0; icount < num_smoothings; icount++)
     {
-        for (int i = 1; i < nx - 1; i++)
-            for (int j = 1; j < ny - 1; j++)
-                for (int k = 1; k < nz - 1; k++)
+        for (int i = n_ghost_; i < nx - n_ghost_; i++)
+            for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                for (int k = n_ghost_; k < nz - n_ghost_; k++)
                     temp[i][j][k] = 0.015625 * (8.0*data[i][j][k]
                                               + 4.0 * (data[i-1][j][k] + data[i+1][j][k] + data[i][j-1][k] + data[i][j+1][k] + data[i][j][k-1] + data[i][j][k+1])     //* Faces
                                               + 2.0 * (data[i-1][j-1][k] + data[i+1][j-1][k] + data[i-1][j+1][k] + data[i+1][j+1][k]                                  //* Edges
@@ -3012,9 +3030,9 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
                                               + 1.0 * (data[i-1][j-1][k-1] + data[i+1][j-1][k-1] + data[i-1][j+1][k-1] + data[i+1][j+1][k-1]                          //* Corners
                                                     +  data[i-1][j-1][k+1] + data[i+1][j-1][k+1] + data[i-1][j+1][k+1] + data[i+1][j+1][k+1]));                       //* Corners
 
-        for (int i = 1; i < nx - 1; i++)
-            for (int j = 1; j < ny - 1; j++)
-                for (int k = 1; k < nz - 1; k++)
+        for (int i = n_ghost_; i < nx - n_ghost_; i++)
+            for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                for (int k = n_ghost_; k < nz - n_ghost_; k++)
                     data[i][j][k] = temp[i][j][k];
 
         //! Using new communication routines results in energy growth
@@ -6129,9 +6147,9 @@ double EMfields3D::get_E_field_energy(void)
     double localEenergy = 0.0;
     double totalEenergy = 0.0;
 
-    for (int i = 1; i < nxn - 2; i++)
-        for (int j = 1; j < nyn - 2; j++)
-            for (int k = 1; k < nzn - 2; k++)
+    for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k] + Ey[i][j][k] * Ey[i][j][k] + Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
 
     MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
@@ -6143,9 +6161,9 @@ double EMfields3D::get_Ex_field_energy(void)
     double localEenergy = 0.0;
     double totalEenergy = 0.0;
 
-    for (int i = 1; i < nxn - 2; i++)
-        for (int j = 1; j < nyn - 2; j++)
-            for (int k = 1; k < nzn - 2; k++)
+    for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k]) / (FourPI);
 
     MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
@@ -6157,9 +6175,9 @@ double EMfields3D::get_Ey_field_energy(void)
     double localEenergy = 0.0;
     double totalEenergy = 0.0;
 
-    for (int i = 1; i < nxn - 2; i++)
-        for (int j = 1; j < nyn - 2; j++)
-            for (int k = 1; k < nzn - 2; k++)
+    for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ey[i][j][k] * Ey[i][j][k]) / (FourPI);
 
     MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
@@ -6171,9 +6189,9 @@ double EMfields3D::get_Ez_field_energy(void)
     double localEenergy = 0.0;
     double totalEenergy = 0.0;
 
-    for (int i = 1; i < nxn - 2; i++)
-        for (int j = 1; j < nyn - 2; j++)
-            for (int k = 1; k < nzn - 2; k++)
+    for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
 
     MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
@@ -6189,9 +6207,12 @@ double EMfields3D::get_B_field_energy(void)
     double Byt = 0.0;
     double Bzt = 0.0;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    //  Cells (B is on cell centers) are owned by exactly one rank, so the loop
+    //  iterates [n_ghost_, nxc-n_ghost_) interior cells. For n_ghost_=1 this
+    //  reproduces [1, nxc-1).
+    for (int i = n_ghost_; i < nxc - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyc - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
             {
                 Bxt = Bxc[i][j][k];
                 Byt = Byc[i][j][k];
@@ -6204,42 +6225,42 @@ double EMfields3D::get_B_field_energy(void)
     return (totalBenergy);
 }
 
-double EMfields3D::get_Bx_field_energy(void) 
+double EMfields3D::get_Bx_field_energy(void)
 {
     double localBenergy = 0.0;
     double totalBenergy = 0.0;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    for (int i = n_ghost_; i < nxc - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyc - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
                 localBenergy += .5 * dx * dy * dz * (Bxc[i][j][k] * Bxc[i][j][k])/(FourPI);
 
     MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
-double EMfields3D::get_By_field_energy(void) 
+double EMfields3D::get_By_field_energy(void)
 {
     double localBenergy = 0.0;
     double totalBenergy = 0.0;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    for (int i = n_ghost_; i < nxc - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyc - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
                 localBenergy += .5 * dx * dy * dz * (Byc[i][j][k] * Byc[i][j][k])/(FourPI);
 
     MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
-double EMfields3D::get_Bz_field_energy(void) 
+double EMfields3D::get_Bz_field_energy(void)
 {
     double localBenergy = 0.0;
     double totalBenergy = 0.0;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    for (int i = n_ghost_; i < nxc - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyc - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
                 localBenergy += .5 * dx * dy * dz * (Bzc[i][j][k] * Bzc[i][j][k])/(FourPI);
 
     MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
@@ -6247,7 +6268,7 @@ double EMfields3D::get_Bz_field_energy(void)
 }
 
 //*! Get external magnetic field energy
-double EMfields3D::get_Bext_energy(void) 
+double EMfields3D::get_Bext_energy(void)
 {
     double localBenergy = 0.0;
     double totalBenergy = 0.0;
@@ -6255,9 +6276,9 @@ double EMfields3D::get_Bext_energy(void)
     double Byt = 0.0;
     double Bzt = 0.0;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    for (int i = n_ghost_; i < nxc - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyc - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
             {
                 Bxt = Bxc_ext[i][j][k];
                 Byt = Byc_ext[i][j][k];
@@ -6271,13 +6292,13 @@ double EMfields3D::get_Bext_energy(void)
 }
 
 /*! get bulk kinetic energy*/
-double EMfields3D::get_bulk_energy(int is) 
+double EMfields3D::get_bulk_energy(int is)
 {
     double localBenergy = 0.0;
     double totalBenergy = 0.0;
-    for (int i = 1; i < nxn - 2; i++)
-        for (int j = 1; j < nyn - 2; j++)
-            for (int k = 1; k < nzn - 2; k++)
+    for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 // Trying to avoid division by zero. Where rho iz 0, current must be 0.
                 localBenergy += (fabs(rhons[is][i][j][k]) > 1.e-20) ? (0.5 * dx * dy * dz * (Jxs[is][i][j][k] * Jxs[is][i][j][k] + Jys[is][i][j][k] * Jys[is][i][j][k] + Jzs[is][i][j][k] * Jzs[is][i][j][k]) / rhons[is][i][j][k]) : 0.0;
 

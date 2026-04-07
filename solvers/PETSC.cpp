@@ -21,9 +21,10 @@
 #include <cmath>
 #include <filesystem>
 
-// Free functions defined in EMfields3D.cpp (no header declaration)
-void solver2phys(arr3_double, arr3_double, arr3_double, double*, int, int, int);
-void phys2solver(double*, const arr3_double, const arr3_double, const arr3_double, int, int, int);
+// Free functions defined in EMfields3D.cpp (no header declaration).
+// The trailing int is the ghost-cell layer count (1 = legacy CIC; 2 = TSC).
+void solver2phys(arr3_double, arr3_double, arr3_double, double*, int, int, int, int n_ghost = 1);
+void phys2solver(double*, const arr3_double, const arr3_double, const arr3_double, int, int, int, int n_ghost = 1);
 
 /*  Matrix-free A*x callback: computes y = A*x.
  *  PETSc calls this whenever the KSP solver needs a matrix-vector product.

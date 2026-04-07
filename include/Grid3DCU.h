@@ -170,17 +170,24 @@ private:
 private:
     const static bool suppress_runaway_particle_instability = true;
     const VirtualTopology3D& _vct;
-    /** number of cells - X direction, including + 2 (guard cells) */
+    /** number of ghost cell layers per face. 1 for the default trilinear (CIC)
+     *  shape function; 2 for the opt-in quadratic B-spline (TSC) path whose
+     *  mass-matrix product cube has support +/- 2 cells. Set in the constructor
+     *  from `Collective::stencilOrderInt`. All loop bounds, MPI types, and
+     *  array allocations derive from this — substituting n_ghost = 1 reproduces
+     *  the legacy literal offsets exactly. */
+    int n_ghost;
+    /** number of cells - X direction, including + 2*n_ghost (guard cells) */
     int nxc;
-    /** number of nodes - X direction, including + 2 extra nodes for guard cells */
+    /** number of nodes - X direction, = nxc + 1 */
     int nxn;
-    /** number of cell - Y direction, including + 2 (guard cells) */
+    /** number of cell - Y direction, including + 2*n_ghost (guard cells) */
     int nyc;
-    /** number of nodes - Y direction, including + 2 extra nodes for guard cells */
+    /** number of nodes - Y direction, = nyc + 1 */
     int nyn;
-    /** number of cell - Z direction, including + 2 (guard cells) */
+    /** number of cell - Z direction, including + 2*n_ghost (guard cells) */
     int nzc;
-    /** number of nodes - Z direction, including + 2 extra nodes for guard cells */
+    /** number of nodes - Z direction, = nzc + 1 */
     int nzn;
     /** dx = space step - X direction */
     double dx;
@@ -229,9 +236,10 @@ private:
     double nyc_minus_epsilon;
     double nzc_minus_epsilon;
 
-public: 
+public:
     // accessors (inline)
     const VirtualTopology3D& get_vct()const{return _vct;}
+    int getNGhost()const{ return n_ghost; }
     int getNXC()const{ return (nxc); }
     int getNXN()const{ return (nxn); }
     int getNYC()const{ return (nyc); }
@@ -306,13 +314,14 @@ public:
       const double rel_xpos = xpos - xStart;
       const double rel_ypos = ypos - yStart;
       const double rel_zpos = zpos - zStart;
-      // cell position minus 1 (due to ghost cells)
+      // cell position relative to first interior cell
       const double cxm1_pos = rel_xpos * invdx;
       const double cym1_pos = rel_ypos * invdy;
       const double czm1_pos = rel_zpos * invdz;
-      cx = 1 + int(floor(cxm1_pos));
-      cy = 1 + int(floor(cym1_pos));
-      cz = 1 + int(floor(czm1_pos));
+      // shift by n_ghost to get the index in the guarded grid
+      cx = n_ghost + int(floor(cxm1_pos));
+      cy = n_ghost + int(floor(cym1_pos));
+      cz = n_ghost + int(floor(czm1_pos));
   }
   void make_grid_position_safe(double& cx_pos, double& cy_pos, double& cz_pos)const
   {

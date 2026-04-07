@@ -246,7 +246,7 @@ public:
     {
         Jzhs[is][X][Y][Z] += value;
     }
-
+    
     void add_Jxh(double weight[8], int X, int Y, int Z, int is);
     void add_Jyh(double weight[8], int X, int Y, int Z, int is);
     void add_Jzh(double weight[8], int X, int Y, int Z, int is);
@@ -538,6 +538,10 @@ public: // accessors
     const Grid& get_grid()const{return _grid;};
     const VirtualTopology3D& get_vct()const{return _vct;}
 
+    //* Number of ghost cell layers per face (1 = legacy CIC, 2 = TSC).
+    //* Cached from grid->getNGhost() at construction.
+    int getNGhost()const{ return n_ghost_; }
+
 #ifdef USE_PETSC
     // Mass matrix components (for PETSc preconditioner assembly)
     const_arr4_double getMxx() const { return Mxx; }
@@ -622,6 +626,10 @@ private:
     //* Read from Collective::StencilOrder; default 1 (legacy byte-identical path).
     //* Declared early so it is initialized BEFORE the mass-matrix arrays below.
     const int stencil_order_;
+
+    //* Number of ghost cell layers per face (cached from grid->getNGhost()).
+    //* Linear -> 1 (legacy literal). Quadratic -> 2 (TSC mass-matrix product cube needs +/- 2 reach).
+    const int n_ghost_;
 
     //* Number of distinct +/- offset groups in the mass-matrix product cube.
     //*   stencil_order_ = 1  ->  ne_mass_ = 14   (3x3x3 cube)

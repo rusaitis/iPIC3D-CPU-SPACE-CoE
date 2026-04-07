@@ -36,6 +36,14 @@ Grid3DCU::Grid3DCU(CollectiveIO * col, VirtualTopology3D * vct):
     assert_le(col->getYLEN(),col->getNyc());
     assert_le(col->getZLEN(),col->getNzc());
 
+    // Number of ghost cell layers per face. The default trilinear (CIC) shape
+    // function needs 1; the opt-in quadratic B-spline (TSC) path needs 2 because
+    // its mass-matrix product cube has +/- 2 reach. n_ghost = 1 reproduces the
+    // legacy literal offsets exactly.
+    n_ghost = col->getStencilOrderInt();
+    assert_ge(n_ghost, 1);
+    assert_le(n_ghost, 2);
+
     // get number of cells restricted to regular (untruncated) subdomain
     const int nxc_rr = ceiling_of_ratio(col->getNxc(), col->getXLEN());
     const int nyc_rr = ceiling_of_ratio(col->getNyc(), col->getYLEN());
@@ -75,10 +83,10 @@ Grid3DCU::Grid3DCU(CollectiveIO * col, VirtualTopology3D * vct):
     //assert_eq(nyc_r,nyc_rr);
     //assert_eq(nzc_r,nzc_rr);
 
-    // add two for ghost cells
-    nxc = nxc_r + 2;
-    nyc = nyc_r + 2;
-    nzc = nzc_r + 2;
+    // add 2*n_ghost ghost cells (n_ghost on each side)
+    nxc = nxc_r + 2*n_ghost;
+    nyc = nyc_r + 2*n_ghost;
+    nzc = nzc_r + 2*n_ghost;
 
     dx = col->getDx();
     dy = col->getDy();
@@ -117,9 +125,9 @@ void Grid3DCU::init_derived_parameters()
     assert_lt(int(floor(nxc_minus_epsilon)),nxc);
     assert_lt(int(floor(nyc_minus_epsilon)),nyc);
     assert_lt(int(floor(nzc_minus_epsilon)),nzc);
-    xStart_g = xStart - dx;
-    yStart_g = yStart - dy;
-    zStart_g = zStart - dz;
+    xStart_g = xStart - n_ghost*dx;
+    yStart_g = yStart - n_ghost*dy;
+    zStart_g = zStart - n_ghost*dz;
     // calculation conveniences
     //
     VOL = dx * dy * dz;
@@ -143,9 +151,9 @@ void Grid3DCU::init_derived_parameters()
     node_ycoord = new double[nyn];
     node_zcoord = new double[nzn];
     
-    for (int i=0; i<nxn; i++) node_xcoord[i] = xStart + (i - 1) * dx;
-    for (int j=0; j<nyn; j++) node_ycoord[j] = yStart + (j - 1) * dy;
-    for (int k=0; k<nzn; k++) node_zcoord[k] = zStart + (k - 1) * dz;
+    for (int i=0; i<nxn; i++) node_xcoord[i] = xStart + (i - n_ghost) * dx;
+    for (int j=0; j<nyn; j++) node_ycoord[j] = yStart + (j - n_ghost) * dy;
+    for (int k=0; k<nzn; k++) node_zcoord[k] = zStart + (k - n_ghost) * dz;
     for (int i=0; i<nxn; i++) pfloat_node_xcoord[i] = node_xcoord[i];
     for (int j=0; j<nyn; j++) pfloat_node_ycoord[j] = node_ycoord[j];
     for (int k=0; k<nzn; k++) pfloat_node_zcoord[k] = node_zcoord[k];
@@ -183,22 +191,22 @@ void Grid3DCU::print()const
             ptVCT->getCoordinates(1),
             ptVCT->getCoordinates(2));
     
-    printf("Number of cells: X:%d, Y:%d, Z:%d\n", nxc - 2, nyc - 2, nzc - 2);
-    
+    printf("Number of cells: X:%d, Y:%d, Z:%d\n", nxc - 2*n_ghost, nyc - 2*n_ghost, nzc - 2*n_ghost);
+
     printf("Xin = %g; Xfin = %g\n"
            "Yin = %g; Yfin = %g\n"
            "Zin = %g; Zfin = %g\n\n",
-           node_xcoord[1], node_xcoord[nxn - 2],
-           node_ycoord[1], node_ycoord[nyn - 2],
-           node_zcoord[1], node_zcoord[nzn - 2]);
+           node_xcoord[n_ghost], node_xcoord[nxn - 1 - n_ghost],
+           node_ycoord[n_ghost], node_ycoord[nyn - 1 - n_ghost],
+           node_zcoord[n_ghost], node_zcoord[nzn - 1 - n_ghost]);
 }
 
 /** calculate gradient on nodes, given a scalar field defined on central points  */
 void Grid3DCU::gradC2N(arr3_double gradXN, arr3_double gradYN, arr3_double gradZN, const_arr3_double scFieldC)const
 {
-    for (int i = 1; i < nxn - 1; i++)
-        for (int j = 1; j < nyn - 1; j++)
-            for (int k = 1; k < nzn - 1; k++) 
+    for (int i = n_ghost; i < nxn - n_ghost; i++)
+        for (int j = n_ghost; j < nyn - n_ghost; j++)
+            for (int k = n_ghost; k < nzn - n_ghost; k++)
             {
                 gradXN[i][j][k] = .25 * (scFieldC[i][j][k] - scFieldC[i - 1][j][k]) * invdx + .25 * (scFieldC[i][j][k - 1] - scFieldC[i - 1][j][k - 1]) * invdx + .25 * (scFieldC[i][j - 1][k] - scFieldC[i - 1][j - 1][k]) * invdx + .25 * (scFieldC[i][j - 1][k - 1] - scFieldC[i - 1][j - 1][k - 1]) * invdx;
                 gradYN[i][j][k] = .25 * (scFieldC[i][j][k] - scFieldC[i][j - 1][k]) * invdy + .25 * (scFieldC[i][j][k - 1] - scFieldC[i][j - 1][k - 1]) * invdy + .25 * (scFieldC[i - 1][j][k] - scFieldC[i - 1][j - 1][k]) * invdy + .25 * (scFieldC[i - 1][j][k - 1] - scFieldC[i - 1][j - 1][k - 1]) * invdy;
@@ -209,9 +217,9 @@ void Grid3DCU::gradC2N(arr3_double gradXN, arr3_double gradYN, arr3_double gradZ
 /** calculate gradient on nodes, given a scalar field defined on central points  */
 void Grid3DCU::gradN2C(arr3_double gradXC, arr3_double gradYC, arr3_double gradZC, const_arr3_double scFieldN)const
 {
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++) 
+    for (int i = n_ghost; i < nxc - n_ghost; i++)
+        for (int j = n_ghost; j < nyc - n_ghost; j++)
+            for (int k = n_ghost; k < nzc - n_ghost; k++)
             {
                 gradXC[i][j][k] = .25 * (scFieldN[i + 1][j][k] - scFieldN[i][j][k]) * invdx + .25 * (scFieldN[i + 1][j][k + 1] - scFieldN[i][j][k + 1]) * invdx + .25 * (scFieldN[i + 1][j + 1][k] - scFieldN[i][j + 1][k]) * invdx + .25 * (scFieldN[i + 1][j + 1][k + 1] - scFieldN[i][j + 1][k + 1]) * invdx;
                 gradYC[i][j][k] = .25 * (scFieldN[i][j + 1][k] - scFieldN[i][j][k]) * invdy + .25 * (scFieldN[i][j + 1][k + 1] - scFieldN[i][j][k + 1]) * invdy + .25 * (scFieldN[i + 1][j + 1][k] - scFieldN[i + 1][j][k]) * invdy + .25 * (scFieldN[i + 1][j + 1][k + 1] - scFieldN[i + 1][j][k + 1]) * invdy;
@@ -226,9 +234,9 @@ void Grid3DCU::divN2C(arr3_double divC, const_arr3_double vecFieldXN, const_arr3
     double compY;
     double compZ;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++) 
+    for (int i = n_ghost; i < nxc - n_ghost; i++)
+        for (int j = n_ghost; j < nyc - n_ghost; j++)
+            for (int k = n_ghost; k < nzc - n_ghost; k++)
             {
                 compX = .25 * (vecFieldXN[i + 1][j][k] - vecFieldXN[i][j][k]) * invdx + .25 * (vecFieldXN[i + 1][j][k + 1] - vecFieldXN[i][j][k + 1]) * invdx + .25 * (vecFieldXN[i + 1][j + 1][k] - vecFieldXN[i][j + 1][k]) * invdx + .25 * (vecFieldXN[i + 1][j + 1][k + 1] - vecFieldXN[i][j + 1][k + 1]) * invdx;
                 compY = .25 * (vecFieldYN[i][j + 1][k] - vecFieldYN[i][j][k]) * invdy + .25 * (vecFieldYN[i][j + 1][k + 1] - vecFieldYN[i][j][k + 1]) * invdy + .25 * (vecFieldYN[i + 1][j + 1][k] - vecFieldYN[i + 1][j][k]) * invdy + .25 * (vecFieldYN[i + 1][j + 1][k + 1] - vecFieldYN[i + 1][j][k + 1]) * invdy;
@@ -245,9 +253,9 @@ void Grid3DCU::divSymmTensorN2C(arr3_double divCX, arr3_double divCY, arr3_doubl
     double comp1Y, comp2Y, comp3Y;
     double comp1Z, comp2Z, comp3Z;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++) 
+    for (int i = n_ghost; i < nxc - n_ghost; i++)
+        for (int j = n_ghost; j < nyc - n_ghost; j++)
+            for (int k = n_ghost; k < nzc - n_ghost; k++)
             {
                 comp1X = .25 * (pXX[ns][i + 1][j][k] - pXX[ns][i][j][k]) * invdx + .25 * (pXX[ns][i + 1][j][k + 1] - pXX[ns][i][j][k + 1]) * invdx + .25 * (pXX[ns][i + 1][j + 1][k] - pXX[ns][i][j + 1][k]) * invdx + .25 * (pXX[ns][i + 1][j + 1][k + 1] - pXX[ns][i][j + 1][k + 1]) * invdx;
                 comp2X = .25 * (pXY[ns][i + 1][j][k] - pXY[ns][i][j][k]) * invdx + .25 * (pXY[ns][i + 1][j][k + 1] - pXY[ns][i][j][k + 1]) * invdx + .25 * (pXY[ns][i + 1][j + 1][k] - pXY[ns][i][j + 1][k]) * invdx + .25 * (pXY[ns][i + 1][j + 1][k + 1] - pXY[ns][i][j + 1][k + 1]) * invdx;
@@ -274,9 +282,9 @@ void Grid3DCU::divC2N(arr3_double divN, const_arr3_double vecFieldXC, const_arr3
     double compY;
     double compZ;
 
-    for (int i = 1; i < nxn - 1; i++)
-        for (int j = 1; j < nyn - 1; j++)
-            for (int k = 1; k < nzn - 1; k++) 
+    for (int i = n_ghost; i < nxn - n_ghost; i++)
+        for (int j = n_ghost; j < nyn - n_ghost; j++)
+            for (int k = n_ghost; k < nzn - n_ghost; k++)
             {
                 compX = .25 * (vecFieldXC[i][j][k] - vecFieldXC[i - 1][j][k]) * invdx + .25 * (vecFieldXC[i][j][k - 1] - vecFieldXC[i - 1][j][k - 1]) * invdx + .25 * (vecFieldXC[i][j - 1][k] - vecFieldXC[i - 1][j - 1][k]) * invdx + .25 * (vecFieldXC[i][j - 1][k - 1] - vecFieldXC[i - 1][j - 1][k - 1]) * invdx;
                 compY = .25 * (vecFieldYC[i][j][k] - vecFieldYC[i][j - 1][k]) * invdy + .25 * (vecFieldYC[i][j][k - 1] - vecFieldYC[i][j - 1][k - 1]) * invdy + .25 * (vecFieldYC[i - 1][j][k] - vecFieldYC[i - 1][j - 1][k]) * invdy + .25 * (vecFieldYC[i - 1][j][k - 1] - vecFieldYC[i - 1][j - 1][k - 1]) * invdy;
@@ -292,9 +300,9 @@ void Grid3DCU::curlC2N(arr3_double curlXN, arr3_double curlYN, arr3_double curlZ
     double compXDZ, compZDX;
     double compYDX, compXDY;
 
-    for (int i = 1; i < nxn - 1; i++)
-        for (int j = 1; j < nyn - 1; j++)
-            for (int k = 1; k < nzn - 1; k++) 
+    for (int i = n_ghost; i < nxn - n_ghost; i++)
+        for (int j = n_ghost; j < nyn - n_ghost; j++)
+            for (int k = n_ghost; k < nzn - n_ghost; k++)
             {
                 // curl - X
                 compZDY = .25 * (vecFieldZC[i][j][k] - vecFieldZC[i][j - 1][k]) * invdy + .25 * (vecFieldZC[i][j][k - 1] - vecFieldZC[i][j - 1][k - 1]) * invdy + .25 * (vecFieldZC[i - 1][j][k] - vecFieldZC[i - 1][j - 1][k]) * invdy + .25 * (vecFieldZC[i - 1][j][k - 1] - vecFieldZC[i - 1][j - 1][k - 1]) * invdy;
@@ -320,9 +328,9 @@ void Grid3DCU::curlN2C(arr3_double curlXC, arr3_double curlYC, arr3_double curlZ
     double compXDZ, compZDX;
     double compYDX, compXDY;
 
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++) 
+    for (int i = n_ghost; i < nxc - n_ghost; i++)
+        for (int j = n_ghost; j < nyc - n_ghost; j++)
+            for (int k = n_ghost; k < nzc - n_ghost; k++)
             {
                 // curl - X
                 compZDY = .25 * (vecFieldZN[i][j + 1][k] - vecFieldZN[i][j][k]) * invdy + .25 * (vecFieldZN[i][j + 1][k + 1] - vecFieldZN[i][j][k + 1]) * invdy + .25 * (vecFieldZN[i + 1][j + 1][k] - vecFieldZN[i + 1][j][k]) * invdy + .25 * (vecFieldZN[i + 1][j + 1][k + 1] - vecFieldZN[i + 1][j][k + 1]) * invdy;
@@ -415,9 +423,9 @@ void Grid3DCU::lapC2Cpoisson(arr3_double lapC, arr3_double scFieldC,EMfields3D *
     // communicate first the scFieldC
     communicateCenterBoxStencilBC(nxc, nyc, nzc, scFieldC, 1, 1, 1, 1, 1, 1, vct, EMf);
     
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    for (int i = n_ghost; i < nxc - n_ghost; i++)
+        for (int j = n_ghost; j < nyc - n_ghost; j++)
+            for (int k = n_ghost; k < nzc - n_ghost; k++)
                 lapC[i][j][k] = (scFieldC[i - 1][j][k] - 2 * scFieldC[i][j][k] + scFieldC[i + 1][j][k]) * invdx * invdx + (scFieldC[i][j - 1][k] - 2 * scFieldC[i][j][k] + scFieldC[i][j + 1][k]) * invdy * invdy + (scFieldC[i][j][k - 1] - 2 * scFieldC[i][j][k] + scFieldC[i][j][k + 1]) * invdz * invdz;
 }
 
@@ -534,26 +542,26 @@ void Grid3DCU::derBC(arr3_double derBC, const_arr3_double vector, int leftActive
 /** interpolate on nodes from central points: do this for the magnetic field*/
 void Grid3DCU::interpC2N(arr3_double vecFieldN, const_arr3_double vecFieldC)const
 {
-    for (int i = 1; i < nxn - 1; i++)
-        for (int j = 1; j < nyn - 1; j++)
-            for (int k = 1; k < nzn - 1; k++)
+    for (int i = n_ghost; i < nxn - n_ghost; i++)
+        for (int j = n_ghost; j < nyn - n_ghost; j++)
+            for (int k = n_ghost; k < nzn - n_ghost; k++)
                 vecFieldN[i][j][k] = .125 * (vecFieldC[i][j][k] + vecFieldC[i - 1][j][k] + vecFieldC[i][j - 1][k] + vecFieldC[i][j][k - 1] + vecFieldC[i - 1][j - 1][k] + vecFieldC[i - 1][j][k - 1] + vecFieldC[i][j - 1][k - 1] + vecFieldC[i - 1][j - 1][k - 1]);
 }
 
 /** interpolate on central points from nodes */
 void Grid3DCU::interpN2C(arr3_double vecFieldC, const_arr3_double vecFieldN)const
 {
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    for (int i = n_ghost; i < nxc - n_ghost; i++)
+        for (int j = n_ghost; j < nyc - n_ghost; j++)
+            for (int k = n_ghost; k < nzc - n_ghost; k++)
                 vecFieldC[i][j][k] = .125 * (vecFieldN[i][j][k] + vecFieldN[i + 1][j][k] + vecFieldN[i][j + 1][k] + vecFieldN[i][j][k + 1] + vecFieldN[i + 1][j + 1][k] + vecFieldN[i + 1][j][k + 1] + vecFieldN[i][j + 1][k + 1] + vecFieldN[i + 1][j + 1][k + 1]);
 }
 
 /** interpolate on central points from nodes */
 void Grid3DCU::interpN2C(arr4_double vecFieldC, int ns, const_arr4_double vecFieldN)const
 {
-    for (int i = 1; i < nxc - 1; i++)
-        for (int j = 1; j < nyc - 1; j++)
-            for (int k = 1; k < nzc - 1; k++)
+    for (int i = n_ghost; i < nxc - n_ghost; i++)
+        for (int j = n_ghost; j < nyc - n_ghost; j++)
+            for (int k = n_ghost; k < nzc - n_ghost; k++)
                 vecFieldC[ns][i][j][k] = .125 * (vecFieldN[ns][i][j][k] + vecFieldN[ns][i + 1][j][k] + vecFieldN[ns][i][j + 1][k] + vecFieldN[ns][i][j][k + 1] + vecFieldN[ns][i + 1][j + 1][k] + vecFieldN[ns][i + 1][j][k + 1] + vecFieldN[ns][i][j + 1][k + 1] + vecFieldN[ns][i + 1][j + 1][k + 1]);
 }
