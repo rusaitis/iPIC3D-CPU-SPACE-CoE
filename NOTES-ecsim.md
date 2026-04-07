@@ -59,8 +59,14 @@ conservation; looser tolerances introduce solver-residual-level energy drift.
 ### 3a. Mass matrix M
 
 The mass matrix is a **9-component tensor** (Mxx, Mxy, Mxz, Myx, Myy, Myz,
-Mzx, Mzy, Mzz) stored on each grid node with a **14-element stencil**
-(`NE_MASS = 14`, defined at `EMfields3D.cpp:59`).
+Mzx, Mzy, Mzz) stored on each grid node with a runtime-sized stencil
+controlled by the `StencilOrder` input parameter (see `EMfields3D::ne_mass_`,
+declared in `include/EMfields3D.h`):
+
+| StencilOrder | Shape function       | Particle support | NE_MASS |
+|--------------|----------------------|------------------|---------|
+| Linear (default) | Trilinear / CIC  | 8 nodes (2³)     | 14      |
+| Quadratic        | Quadratic B-spline / TSC | 27 nodes (3³) | 63 |
 
 Storage (`EMfields3D.cpp:151–159`):
 ```cpp
@@ -346,6 +352,7 @@ the E^n for the next cycle.
 | `SmoothCycle` | 1 | `Collective.cpp:110` | Apply smoothing every N cycles |
 | `num_smoothings` | 0 | `Collective.cpp:111` | Number of smoothing passes per application |
 | `GMREStol` | 1e-15 | input file | Solver tolerance (≤1e-15 for strict energy conservation) |
+| `StencilOrder` | "Linear" | input file | Particle/grid shape function: "Linear" (CIC, default) or "Quadratic" (TSC) — see §13 |
 | `Relativistic` | false | input file | Use RelSIM instead of ECSIM for velocities |
 | `PoissonMAres` | 0.01 | `Collective.cpp:155` | Charge-conserving position correction residual threshold (0.0 to disable) |
 | `NiterMover` | — | `Collective.h:417` | Legacy predictor-corrector count (unused by ECSIM) |
@@ -649,3 +656,85 @@ The ~0.03% drift in the default Double Harris simulation is an inherent property
 of grid-based PIC with moving particles, not a numerical deficiency. ECSIM
 delivers exact conservation between cell-crossing events — which is the
 theoretical best for this class of methods.
+
+## 13. Optional higher-order shape function (TSC, opt-in)
+
+§12 traces the residual energy drift to the C⁰ discontinuity of trilinear
+(CIC) cell crossings. The natural follow-up is whether a smoother shape
+function reduces the drift. iPIC3D supports an optional **quadratic B-spline
+(TSC)** path behind the input flag `StencilOrder = Quadratic` (default
+`Linear`). The default Linear path is byte-identical to the legacy code.
+
+### 13a. Geometry
+
+| Quantity | Linear (CIC) | Quadratic (TSC) |
+|----------|--------------|-----------------|
+| Particle support per axis | 2 nodes | 3 nodes |
+| Particle support (3D) | 8 nodes | 27 nodes |
+| Mass-matrix product cube | 3×3×3 (27) | 5×5×5 (125) |
+| `NE_MASS` (forward halves + center) | 14 | 63 |
+| Mass-matrix memory (×9 components) | reference | ~4.5× |
+
+The TSC weight, per axis with fractional offset `s ∈ [-½, ½]` from the
+**nearest** node:
+
+```
+w_left   = ½ · (½ - s)²
+w_center = ¾  -  s²
+w_right  = ½ · (½ + s)²
+```
+
+These satisfy a partition of unity (Σ w = 1) and the same gather/scatter
+helper (`Grid3DCU::get_nearest_node_and_weights_tsc`) is used in both
+`Particles3D::computeMoments` and `Particles3D::ECSIM_velocity` to keep the
+shape function consistent across the implicit step.
+
+### 13b. Implementation surface
+
+| File | TSC additions |
+|------|---------------|
+| `include/Collective.h` / `main/Collective.cpp` | `StencilOrder` flag, validates `PrecType=Matrix` is not combined with `Quadratic`. |
+| `include/Neighbouring_Nodes.h` | Constructor-parameterised: `NeighbouringNodes(order)` builds either the 14-entry or 63-entry table; both share `getX/Y/Z(g)` API. |
+| `include/Grid3DCU.h` | `get_weights_tsc(weights[27], sx, sy, sz)` and `get_nearest_node_and_weights_tsc(...)`. |
+| `include/EMfields3D.h` | `add_Rho_node`/`add_Jxh_node`/`add_Jyh_node`/`add_Jzh_node` single-node deposit helpers (the 8-corner `add_Rho`/`add_Jxh` API is too rigid for 27-node TSC scatter). New `const int stencil_order_, ne_mass_` declared early so they initialize before the mass-matrix arrays. |
+| `fields/EMfields3D.cpp` | `Mxx ... Mzz` allocated with `ne_mass_`; `mass_matrix_times_vector` does in-bounds checks before partner reads (out-of-range "wing" contributions are skipped at boundary nodes). The MaxwellImage M·E loop bounds remain `[1, nxn-2]`. |
+| `particles/Particles3D.cpp` | `computeMoments` and `ECSIM_velocity` branch on `stencil_order_`: the TSC path uses the 27-node gather, the 27-node ρ/Jₕ scatter, and a 27×63 mass-matrix assembly. Linear path is unchanged. |
+
+### 13c. Caveats and known limitations (v1)
+
+1. **Energy conservation is not at machine precision for TSC.** The default
+   Double Harris smoke test on a 60×60 grid shows TSC drift around `~3e-4`
+   per cycle at `dt = 0.125`, vs. `~1e-9` for Linear. The drift scales
+   approximately as `dt²` per cycle (vs. effectively `dt^∞` for Linear),
+   confirming that the TSC path is a *consistent* discretization but does
+   not satisfy ECSIM's exact discrete cancellation. Two probable causes:
+   (a) the wider mass-matrix cube needs **2 ghost cell layers** to fully
+   close the boundary contributions; iPIC3D currently exchanges only one,
+   so the outermost interior nodes drop their wing contributions in
+   `mass_matrix_times_vector`. (b) the per-rank mass matrix is not
+   communicated across MPI boundaries — a pre-existing limitation that
+   bites harder when the support widens from 8 to 27 nodes.
+2. **`PrecType = Matrix` is unsupported.** `solvers/PETSC.cpp::assembleP()`
+   hardcodes a 3×3×3 neighbour loop and 14-group lookup. With
+   `StencilOrder = Quadratic`, `Collective.cpp` aborts early with a clear
+   error message. Use `PrecType = None` (matrix-free GMRES or matrix-free
+   PETSc) for the TSC experiments.
+3. **Memory footprint.** The 9 mass-matrix arrays grow ~4.5× when
+   `StencilOrder = Quadratic`. Default Linear is unchanged.
+
+### 13d. How to test
+
+```bash
+# Default Linear (byte-identical baseline regression)
+pixi run test
+
+# TSC smoke test
+mkdir -p /tmp/ipic3d_tsc
+mpirun -np 4 build/iPIC3D inputfiles/ci_smoke_tsc.inp > tsc.log 2>&1
+tail /tmp/ipic3d_tsc/ConservedQuantities.txt
+```
+
+`inputfiles/ci_smoke_tsc.inp` is a copy of `ci_smoke.inp` with
+`StencilOrder = Quadratic` and `PrecType = None`. Compare its
+`ConservedQuantities.txt` to a Linear run on the same problem to see the
+relative drift.

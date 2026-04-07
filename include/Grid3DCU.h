@@ -399,6 +399,85 @@ public:
         get_safe_cell_and_weights(xpos[0], xpos[1], xpos[2], cx[0], cx[1], cx[2], weights);
     }
 
+    //! ==================================================================== !//
+    //! Quadratic B-spline (TSC) shape function — opt-in higher-order stencil !//
+    //!
+    //! Particle support: 27 nodes (3x3x3 cube), centered on the *nearest* node.
+    //! Per-axis weights for fractional offset s ∈ [-½, ½] from the nearest node:
+    //!     w_left   = ½ · (½ - s)²
+    //!     w_center = ¾  -  s²
+    //!     w_right  = ½ · (½ + s)²
+    //! These satisfy w_L + w_C + w_R = 1 exactly.
+    //!
+    //! 3D weights are the outer product. Index layout (matches the order used by
+    //! the deposition / gather code in EMfields3D and Particles3D):
+    //!     weights[ (a*3 + b)*3 + c ]   for a, b, c ∈ {0=left, 1=center, 2=right}
+    //! corresponding to node offset (a-1, b-1, c-1) from the nearest node.
+    //! ==================================================================== !//
+
+    static void get_weights_tsc(double weights[27],
+                                double sx, double sy, double sz)
+    {
+        const double wx_l = 0.5 * (0.5 - sx) * (0.5 - sx);
+        const double wx_c = 0.75 - sx * sx;
+        const double wx_r = 0.5 * (0.5 + sx) * (0.5 + sx);
+
+        const double wy_l = 0.5 * (0.5 - sy) * (0.5 - sy);
+        const double wy_c = 0.75 - sy * sy;
+        const double wy_r = 0.5 * (0.5 + sy) * (0.5 + sy);
+
+        const double wz_l = 0.5 * (0.5 - sz) * (0.5 - sz);
+        const double wz_c = 0.75 - sz * sz;
+        const double wz_r = 0.5 * (0.5 + sz) * (0.5 + sz);
+
+        const double wx[3] = { wx_l, wx_c, wx_r };
+        const double wy[3] = { wy_l, wy_c, wy_r };
+        const double wz[3] = { wz_l, wz_c, wz_r };
+
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                for (int c = 0; c < 3; ++c)
+                    weights[(a * 3 + b) * 3 + c] = wx[a] * wy[b] * wz[c];
+    }
+
+    //! Returns the *nearest* node index (cx, cy, cz) on the guarded grid plus
+    //! the 27 TSC weights centered on that node. The node index is the global
+    //! guarded-grid index (same convention as get_safe_cell_and_weights), so
+    //! the 27 surrounding nodes are at (cx + a - 1, cy + b - 1, cz + c - 1) for
+    //! a, b, c ∈ {0, 1, 2}.
+    void get_nearest_node_and_weights_tsc(double xpos, double ypos, double zpos,
+                                          int& cx, int& cy, int& cz,
+                                          double weights[27]) const
+    {
+        // Position relative to the guarded-grid origin, in node units.
+        const double rel_xpos = xpos - xStart_g;
+        const double rel_ypos = ypos - yStart_g;
+        const double rel_zpos = zpos - zStart_g;
+
+        double nx_pos = rel_xpos * invdx;
+        double ny_pos = rel_ypos * invdy;
+        double nz_pos = rel_zpos * invdz;
+
+        if (suppress_runaway_particle_instability)
+            make_grid_position_safe(nx_pos, ny_pos, nz_pos);
+
+        // Round to nearest node (TSC is centered, not floor-based).
+        cx = int(floor(nx_pos + 0.5));
+        cy = int(floor(ny_pos + 0.5));
+        cz = int(floor(nz_pos + 0.5));
+
+        if (suppress_runaway_particle_instability)
+            make_cell_coordinates_safe(cx, cy, cz);
+        assert_cell_coordinates_safe(cx, cy, cz);
+
+        // Fractional offset from the nearest node, in [-½, ½].
+        const double sx = nx_pos - cx;
+        const double sy = ny_pos - cy;
+        const double sz = nz_pos - cz;
+
+        get_weights_tsc(weights, sx, sy, sz);
+    }
+
 };
 
 typedef Grid3DCU Grid;

@@ -1027,36 +1027,61 @@ void Particles3D::ECSIM_velocity(Field *EMf)
 
             //* --------------------------------------- *//
 
-            //* Compute weights for field components
-            double weights[8] ALLOC_ALIGNED;
+            //* Compute weights for field components.
+            //* Same dual-path structure as Particles3D::computeMoments — must use the
+            //* identical shape function for gather here and deposit there or ECSIM
+            //* energy conservation breaks.
+            double weights_lin[8] ALLOC_ALIGNED;
+            double weights_tsc[27];
             int cx, cy, cz;
-            grid->get_safe_cell_and_weights(x_old, y_old, z_old, cx, cy, cz, weights);
-
-            const double* field_components[8] ALLOC_ALIGNED;
-            get_field_components_for_cell(field_components, fieldForPcls, cx, cy, cz);
 
             double sampled_field[8] ALLOC_ALIGNED;
             for(int i=0;i<8;i++) sampled_field[i]=0;
-            
+
             double& Bxl = sampled_field[0];
             double& Byl = sampled_field[1];
             double& Bzl = sampled_field[2];
             double& Exl = sampled_field[0+DFIELD_3or4];
             double& Eyl = sampled_field[1+DFIELD_3or4];
             double& Ezl = sampled_field[2+DFIELD_3or4];
-            
+
             const int num_field_components = 2*DFIELD_3or4;
 
-            for(int c = 0; c < 8; c++)
+            if (stencil_order_ == 1)
             {
-                const double* field_components_c = field_components[c];
-                ASSUME_ALIGNED(field_components_c);
-                const double weights_c = weights[c];
-                
-                #pragma simd
-                for(int i=0; i<num_field_components; i++)
+                grid->get_safe_cell_and_weights(x_old, y_old, z_old, cx, cy, cz, weights_lin);
+
+                const double* field_components[8] ALLOC_ALIGNED;
+                get_field_components_for_cell(field_components, fieldForPcls, cx, cy, cz);
+
+                for(int c = 0; c < 8; c++)
                 {
-                    sampled_field[i] += weights_c*field_components_c[i];
+                    const double* field_components_c = field_components[c];
+                    ASSUME_ALIGNED(field_components_c);
+                    const double weights_c = weights_lin[c];
+
+                    #pragma simd
+                    for(int i=0; i<num_field_components; i++)
+                    {
+                        sampled_field[i] += weights_c*field_components_c[i];
+                    }
+                }
+            }
+            else
+            {
+                //? TSC: 27-node gather centered on the nearest node.
+                grid->get_nearest_node_and_weights_tsc(x_old, y_old, z_old, cx, cy, cz, weights_tsc);
+
+                for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b)
+                for (int cc = 0; cc < 3; ++cc)
+                {
+                    const double w = weights_tsc[(a*3 + b)*3 + cc];
+                    const double* field_node = fieldForPcls[cx + a - 1][cy + b - 1][cz + cc - 1];
+                    ASSUME_ALIGNED(field_node);
+                    #pragma simd
+                    for (int i = 0; i < num_field_components; i++)
+                        sampled_field[i] += w * field_node[i];
                 }
             }
 
@@ -1519,37 +1544,69 @@ void Particles3D::computeMoments(Field *EMf)
             time_fc.start();
             #endif
 
-            //* Compute weights for field components
-            double weights[8] ALLOC_ALIGNED;
+            //* Compute weights for field components.
+            //* `weights_lin` (8) is used by the default Linear/CIC path.
+            //* `weights_tsc` (27) is used by the optional Quadratic/TSC path.
+            //* `cx, cy, cz` are: cell indices for Linear, nearest-node indices
+            //* for TSC. Both paths fall through to the same Boris/α math by
+            //* accumulating into the shared `sampled_field` array layout.
+            double weights_lin[8] ALLOC_ALIGNED;
+            double weights_tsc[27];
             int cx, cy, cz;
-            grid->get_safe_cell_and_weights(x_old, y_old, z_old, cx, cy, cz, weights);
-
-            const double* field_components[8] ALLOC_ALIGNED;
-            get_field_components_for_cell(field_components, fieldForPcls, cx, cy, cz);
 
             double sampled_field[8] ALLOC_ALIGNED;
-            for(int i = 0; i < 8;i++) sampled_field[i] = 0;
-            
+            for(int i = 0; i < 8; i++) sampled_field[i] = 0;
+
             double& Bxl = sampled_field[0];
             double& Byl = sampled_field[1];
             double& Bzl = sampled_field[2];
             double& Exl = sampled_field[0+DFIELD_3or4];
             double& Eyl = sampled_field[1+DFIELD_3or4];
             double& Ezl = sampled_field[2+DFIELD_3or4];
-            
+
             const int num_field_components = 2*DFIELD_3or4;
 
-            //TODO: External force are to be implemented in "sampled_field"
-            for(int c = 0; c < 8; c++)
+            if (stencil_order_ == 1)
             {
-                const double* field_components_c = field_components[c];
-                ASSUME_ALIGNED(field_components_c);
-                const double weights_c = weights[c];
-                
-                #pragma simd
-                for(int i = 0; i < num_field_components; i++)
+                //? ----- Default linear / CIC gather: 8-node trilinear sum -----
+                grid->get_safe_cell_and_weights(x_old, y_old, z_old, cx, cy, cz, weights_lin);
+
+                const double* field_components[8] ALLOC_ALIGNED;
+                get_field_components_for_cell(field_components, fieldForPcls, cx, cy, cz);
+
+                //TODO: External force are to be implemented in "sampled_field"
+                for(int c = 0; c < 8; c++)
                 {
-                    sampled_field[i] += weights_c*field_components_c[i];
+                    const double* field_components_c = field_components[c];
+                    ASSUME_ALIGNED(field_components_c);
+                    const double weights_c = weights_lin[c];
+
+                    #pragma simd
+                    for(int i = 0; i < num_field_components; i++)
+                    {
+                        sampled_field[i] += weights_c*field_components_c[i];
+                    }
+                }
+            }
+            else
+            {
+                //? ----- Quadratic / TSC gather: 27-node sum centered on nearest node -----
+                //  cx, cy, cz are now the nearest-node indices on the guarded grid.
+                //  Surrounding nodes lie at (cx + a - 1, cy + b - 1, cz + c - 1)
+                //  for a, b, c ∈ {0, 1, 2}, matching the Grid3DCU::get_weights_tsc layout:
+                //      weights_tsc[(a*3 + b)*3 + c]
+                grid->get_nearest_node_and_weights_tsc(x_old, y_old, z_old, cx, cy, cz, weights_tsc);
+
+                for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b)
+                for (int cc = 0; cc < 3; ++cc)
+                {
+                    const double w = weights_tsc[(a*3 + b)*3 + cc];
+                    const double* field_node = fieldForPcls[cx + a - 1][cy + b - 1][cz + cc - 1];
+                    ASSUME_ALIGNED(field_node);
+                    #pragma simd
+                    for (int i = 0; i < num_field_components; i++)
+                        sampled_field[i] += w * field_node[i];
                 }
             }
 
@@ -1658,82 +1715,179 @@ void Particles3D::computeMoments(Field *EMf)
 
             //* --------------------------------------- *//
 
-            //* Temporary variable used to add density and current density
-            double temp[8];
-            
-            //* Index of cell of particles
-            const int ix = cx + 1;
-            const int iy = cy + 1;
-            const int iz = cz + 1;
-
             #ifdef __PROFILE_MOMENTS__
             time_add.start();
             #endif
 
-            //* Add charge density                 
-            for (int ii = 0; ii < 8; ii++)
-                temp[ii] = q * weights[ii];
-            EMf->add_Rho(temp, ix, iy, iz, ns);
+            if (stencil_order_ == 1)
+            {
+                //? ===== Linear / CIC deposit + mass matrix (8 nodes, 14 groups) =====
 
-            //* Add implicit current density - X
-            for (int ii = 0; ii < 8; ii++)
-                temp[ii] = qau * weights[ii];
-            EMf->add_Jxh(temp, ix, iy, iz, ns);
-            
-            //* Add implicit current density - Y
-            for (int ii = 0; ii < 8; ii++)
-                temp[ii] = qav * weights[ii];
-            EMf->add_Jyh(temp, ix, iy, iz, ns);
+                //* Temporary variable used to add density and current density
+                double temp[8];
 
-            //* Add implicit current density - Z
-            for (int ii = 0; ii < 8; ii++)
-                temp[ii] = qaw * weights[ii];
-            EMf->add_Jzh(temp, ix, iy, iz, ns);
+                //* Index of cell of particles
+                const int ix = cx + 1;
+                const int iy = cy + 1;
+                const int iz = cz + 1;
 
-            #ifdef __PROFILE_MOMENTS__
-            time_add.stop();
-            time_mm.start();
-            #endif
-            
-            //? Compute exact Mass Matrix
-            for (int i = 0; i < 2; i++) 
-                for (int j = 0; j < 2; j++) 
-                    for (int k = 0; k < 2; k++) 
-                    {
-                        int ni = ix-i;
-                        int nj = iy-j;
-                        int nk = iz-k;
+                //* Add charge density
+                for (int ii = 0; ii < 8; ii++)
+                    temp[ii] = q * weights_lin[ii];
+                EMf->add_Rho(temp, ix, iy, iz, ns);
 
-                        //* Iterate over half of the 27 neighbouring nodes as M is symmetric
-                        for (int n_node = 0; n_node < 14; n_node++)
+                //* Add implicit current density - X
+                for (int ii = 0; ii < 8; ii++)
+                    temp[ii] = qau * weights_lin[ii];
+                EMf->add_Jxh(temp, ix, iy, iz, ns);
+
+                //* Add implicit current density - Y
+                for (int ii = 0; ii < 8; ii++)
+                    temp[ii] = qav * weights_lin[ii];
+                EMf->add_Jyh(temp, ix, iy, iz, ns);
+
+                //* Add implicit current density - Z
+                for (int ii = 0; ii < 8; ii++)
+                    temp[ii] = qaw * weights_lin[ii];
+                EMf->add_Jzh(temp, ix, iy, iz, ns);
+
+                #ifdef __PROFILE_MOMENTS__
+                time_add.stop();
+                time_mm.start();
+                #endif
+
+                //? Compute exact Mass Matrix
+                for (int i = 0; i < 2; i++)
+                    for (int j = 0; j < 2; j++)
+                        for (int k = 0; k < 2; k++)
                         {
-                            int n2i = ni + NeNo.getX(n_node);
-                            int n2j = nj + NeNo.getY(n_node);
-                            int n2k = nk + NeNo.getZ(n_node);
+                            int ni = ix-i;
+                            int nj = iy-j;
+                            int nk = iz-k;
 
-                            int i2 = ix - n2i;
-                            int j2 = iy - n2j;
-                            int k2 = iz - n2k;
-
-                            //TODO: What does this part actually do? - Ask Fabio
-                            //* Check if this node is one of the cell where the particle is
-                            if (i2 >= 0 && i2 < 2 && j2 >= 0 && j2 < 2 && k2 >= 0 && k2 < 2) 
+                            //* Iterate over half of the 27 neighbouring nodes as M is symmetric
+                            for (int n_node = 0; n_node < 14; n_node++)
                             {
-                                // Map (i, j, k) & (i2, j2, k2) to 1D
-                                int index1 = i * 4 + j * 2 + k;
-                                int index2 = i2 * 4 + j2 * 2 + k2; 
-                                double qww = q * q_dt_2mc * weights[index1] * weights[index2];
-                                double value[3][3];
-                                
-                                for (int ind1 = 0; ind1 < 3; ind1++)
-                                    for (int ind2 = 0; ind2 < 3; ind2++) 
-                                        value[ind1][ind2] = alpha[ind2][ind1]*qww;
+                                int n2i = ni + NeNo.getX(n_node);
+                                int n2j = nj + NeNo.getY(n_node);
+                                int n2k = nk + NeNo.getZ(n_node);
 
-                                EMf->add_Mass(value, ni, nj, nk, n_node);
+                                int i2 = ix - n2i;
+                                int j2 = iy - n2j;
+                                int k2 = iz - n2k;
+
+                                //TODO: What does this part actually do? - Ask Fabio
+                                //* Check if this node is one of the cell where the particle is
+                                if (i2 >= 0 && i2 < 2 && j2 >= 0 && j2 < 2 && k2 >= 0 && k2 < 2)
+                                {
+                                    // Map (i, j, k) & (i2, j2, k2) to 1D
+                                    int index1 = i * 4 + j * 2 + k;
+                                    int index2 = i2 * 4 + j2 * 2 + k2;
+                                    double qww = q * q_dt_2mc * weights_lin[index1] * weights_lin[index2];
+                                    double value[3][3];
+
+                                    for (int ind1 = 0; ind1 < 3; ind1++)
+                                        for (int ind2 = 0; ind2 < 3; ind2++)
+                                            value[ind1][ind2] = alpha[ind2][ind1]*qww;
+
+                                    EMf->add_Mass(value, ni, nj, nk, n_node);
+                                }
                             }
                         }
+            }
+            else
+            {
+                //? ===== Quadratic / TSC deposit + mass matrix (27 nodes, 63 groups) =====
+                // The 27 support nodes are (cx + a - 1, cy + b - 1, cz + cc - 1) for
+                // a, b, cc ∈ {0, 1, 2} — same layout as the gather block above.
+                // Linear-index helper:  s = (a*3 + b)*3 + cc  ∈ [0, 27)
+
+                //* Deposit rho, Jxh, Jyh, Jzh
+                double temp_rho[27];
+                double temp_jx [27];
+                double temp_jy [27];
+                double temp_jz [27];
+                for (int s = 0; s < 27; ++s)
+                {
+                    const double w = weights_tsc[s];
+                    temp_rho[s] = q   * w;
+                    temp_jx [s] = qau * w;
+                    temp_jy [s] = qav * w;
+                    temp_jz [s] = qaw * w;
+                }
+
+                //* The deposit helpers (add_Rho, add_Jxh, ...) only know how to
+                //* scatter 8 values into a 2x2x2 corner block. For TSC we scatter
+                //* the 27 weights as 27 calls of an inline 1-node accumulator below.
+                //* The slightly clunky inline accumulation avoids touching the
+                //* EMf API for the v1 experiment.
+                for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b)
+                for (int cc = 0; cc < 3; ++cc)
+                {
+                    const int s   = (a*3 + b)*3 + cc;
+                    const int nix = cx + a - 1;
+                    const int niy = cy + b - 1;
+                    const int niz = cz + cc - 1;
+                    EMf->add_Rho_node(temp_rho[s], nix, niy, niz, ns);
+                    EMf->add_Jxh_node(temp_jx [s], nix, niy, niz, ns);
+                    EMf->add_Jyh_node(temp_jy [s], nix, niy, niz, ns);
+                    EMf->add_Jzh_node(temp_jz [s], nix, niy, niz, ns);
+                }
+
+                #ifdef __PROFILE_MOMENTS__
+                time_add.stop();
+                time_mm.start();
+                #endif
+
+                //? Compute exact Mass Matrix for TSC.
+                //  Outer loop runs over the 27 support nodes (s1 = (a*3+b)*3+cc).
+                //  Inner loop runs over the 63 forward NeNo groups, accumulating to
+                //  the partner node (s2). The +/- symmetry is exploited by the
+                //  mass_matrix_times_vector code, so we only deposit forward halves
+                //  (the same convention as the linear path uses).
+                for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b)
+                for (int cc = 0; cc < 3; ++cc)
+                {
+                    const int i_off = a - 1;     // node1 offset from nearest, in [-1, 1]
+                    const int j_off = b - 1;
+                    const int k_off = cc - 1;
+                    const int ni = cx + i_off;
+                    const int nj = cy + j_off;
+                    const int nk = cz + k_off;
+                    const int s1 = (a*3 + b)*3 + cc;
+                    const double w1 = weights_tsc[s1];
+
+                    for (int g = 0; g < 63; ++g)
+                    {
+                        // Partner offset from nearest = node1_offset + NeNo(g)
+                        const int i2_off = i_off + NeNo.getX(g);
+                        const int j2_off = j_off + NeNo.getY(g);
+                        const int k2_off = k_off + NeNo.getZ(g);
+
+                        // Partner must also lie in the 27-node support cube,
+                        // i.e. each offset in [-1, 1].
+                        if (i2_off < -1 || i2_off > 1) continue;
+                        if (j2_off < -1 || j2_off > 1) continue;
+                        if (k2_off < -1 || k2_off > 1) continue;
+
+                        const int a2  = i2_off + 1;
+                        const int b2  = j2_off + 1;
+                        const int cc2 = k2_off + 1;
+                        const int s2  = (a2*3 + b2)*3 + cc2;
+
+                        const double qww = q * q_dt_2mc * w1 * weights_tsc[s2];
+                        double value[3][3];
+                        for (int ind1 = 0; ind1 < 3; ind1++)
+                            for (int ind2 = 0; ind2 < 3; ind2++)
+                                value[ind1][ind2] = alpha[ind2][ind1]*qww;
+
+                        EMf->add_Mass(value, ni, nj, nk, g);
                     }
-            
+                }
+            }
+
             #ifdef __PROFILE_MOMENTS__
             time_mm.stop();
             #endif

@@ -511,6 +511,11 @@ protected:
     //* Object of class to handle which nodes have to be computed when the mass matrix is calculated
     NeighbouringNodes NeNo;
 
+    //* Particle/grid shape function order (cached from Collective::StencilOrder).
+    //*   1 = Linear (CIC, 8-node support)   — default, byte-identical to legacy path
+    //*   2 = Quadratic (TSC, 27-node support) — opt-in higher-order experiment
+    int stencil_order_;
+
     //* Limits to apply to particle velocity
     double umin, umax, vmin, vmax, wmin, wmax;
 

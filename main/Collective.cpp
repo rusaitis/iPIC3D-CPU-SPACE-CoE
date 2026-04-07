@@ -162,6 +162,26 @@ void Collective::ReadInput(string inputfile)
         // Backward compat: PrecMatrix=true implies PrecType=Matrix if not explicitly set
         if (PrecMatrix && PrecType == "None")
             PrecType = "Matrix";
+
+        //* Particle/grid shape function order
+        //*   "Linear"    -> 8-node trilinear (CIC), default — byte-identical to legacy path
+        //*   "Quadratic" -> 27-node quadratic B-spline (TSC), opt-in higher-order experiment
+        StencilOrder = config.read<string>("StencilOrder", "Linear");
+        if (StencilOrder == "Linear")
+            stencilOrderInt = 1;
+        else if (StencilOrder == "Quadratic" || StencilOrder == "TSC")
+            stencilOrderInt = 2;
+        else {
+            cout << "ERROR: Unknown StencilOrder '" << StencilOrder
+                 << "'. Valid values: Linear, Quadratic." << endl;
+            MPI_Abort(MPI_COMM_WORLD, -1);
+        }
+        if (stencilOrderInt == 2 && PrecType == "Matrix") {
+            cout << "ERROR: StencilOrder=Quadratic is not yet supported with "
+                    "PrecType=Matrix. Use PrecType=None (matrix-free) for the v1 "
+                    "experiment." << endl;
+            MPI_Abort(MPI_COMM_WORLD, -1);
+        }
         NiterMover                  = config.read<int>      ("NiterMover", 3);
         Vinj                        = config.read<double>   ("Vinj", 0.0);
         SaveHeatFluxTensor          = config.read<bool>     ("SaveHeatFluxTensor", false);

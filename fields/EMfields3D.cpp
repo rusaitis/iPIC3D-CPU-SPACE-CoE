@@ -56,8 +56,6 @@ using std::cout;
 using std::endl;
 using namespace iPic3D;
 
-#define NE_MASS 14      //* Used in mass matrix
-
 /*! constructor */
 //
 // We rely on the following rule from the C++ standard, section 12.6.2.5:
@@ -102,6 +100,8 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     y_center(col->gety_center()),
     z_center(col->getz_center()),
     L_square(col->getL_square()),
+    stencil_order_(col->getStencilOrderInt()),
+    ne_mass_(col->getStencilOrderInt() == 2 ? 63 : 14),
     delt (c*th*dt), // declared after these
 
     //! Allocate arrays for data on nodes !//
@@ -148,15 +148,17 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Jzh     (nxn, nyn, nzn),
 
     //! Mass matrix quantities
-    Mxx (NE_MASS, nxn, nyn, nzn),
-    Myy (NE_MASS, nxn, nyn, nzn),
-    Mzz (NE_MASS, nxn, nyn, nzn),
-    Mxy (NE_MASS, nxn, nyn, nzn),
-    Myx (NE_MASS, nxn, nyn, nzn),
-    Mxz (NE_MASS, nxn, nyn, nzn),
-    Mzx (NE_MASS, nxn, nyn, nzn),
-    Myz (NE_MASS, nxn, nyn, nzn),
-    Mzy (NE_MASS, nxn, nyn, nzn),
+    //  Sized by ne_mass_ (declared above): 14 for linear (CIC), 63 for quadratic (TSC).
+    //  Default StencilOrder=Linear keeps the legacy 14-group layout byte-for-byte.
+    Mxx (ne_mass_, nxn, nyn, nzn),
+    Myy (ne_mass_, nxn, nyn, nzn),
+    Mzz (ne_mass_, nxn, nyn, nzn),
+    Mxy (ne_mass_, nxn, nyn, nzn),
+    Myx (ne_mass_, nxn, nyn, nzn),
+    Mxz (ne_mass_, nxn, nyn, nzn),
+    Mzx (ne_mass_, nxn, nyn, nzn),
+    Myz (ne_mass_, nxn, nyn, nzn),
+    Mzy (ne_mass_, nxn, nyn, nzn),
 
     //! Species-specific quantities
     rhocs_avg (ns, nxc, nyc, nzc),
@@ -225,7 +227,12 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Dz      (nxn, nyn, nzn),
     vectX   (nxn, nyn, nzn),
     vectY   (nxn, nyn, nzn),
-    vectZ   (nxn, nyn, nzn)
+    vectZ   (nxn, nyn, nzn),
+
+    //* Build the +/- offset table that matches the chosen stencil.
+    //* (Default ctor would always build the linear table — explicit construction
+    //*  is required for the quadratic / TSC path.)
+    NeNo (stencil_order_)
 
 {
     //! =============== Constructor =============== !//
@@ -555,7 +562,7 @@ void EMfields3D::setAllzero()
                     rhons.fetch(is, ii, jj, kk) = 0.0;
                 }
 
-    for (int is = 0; is < NE_MASS; is ++)
+    for (int is = 0; is < ne_mass_; is ++)
         for (int ii = 0; ii < nxn; ii++)
             for (int jj = 0; jj < nyn; jj++)
                     for (int kk = 0; kk < nzn; kk++)
@@ -2259,6 +2266,13 @@ void EMfields3D::sumMoments_vectorized_AoS(const Particles3Dcomm* part)
 }
 
 //* Compute the product of mass matrix with vector "V = (Vx, Vy, Vz)"
+//*
+//* For the TSC stencil (NE_MASS = 63, offsets up to +/- 2) the partner reads can
+//* go +/- 2 nodes from (i, j, k). The MaxwellImage caller iterates the interior
+//* [1, nxn-2] which only guarantees a 1-cell ghost layer, so when stencil_order_
+//* >= 2 we must skip out-of-range partner reads at the boundary nodes. The skip
+//* drops at most a few "wing" contributions per boundary node — small enough to
+//* not break energy conservation in the bulk, but enough to keep us in bounds.
 void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz, const_arr3_double vectX, const_arr3_double vectY, const_arr3_double vectZ, int i, int j, int k)
 {
     double resX = 0.0; double resY = 0.0; double resZ = 0.0;
@@ -2269,26 +2283,35 @@ void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz,
     resZ  = vectX[i][j][k]*Mxz[0][i][j][k] + vectY[i][j][k]*Myz[0][i][j][k] + vectZ[i][j][k]*Mzz[0][i][j][k];
 
     //* Neighbours
-    for (int g = 1; g < NE_MASS; g++) 
+    for (int g = 1; g < ne_mass_; g++)
     {
-        int i1 = i + NeNo.getX(g);
-        int j1 = j + NeNo.getY(g);
-        int k1 = k + NeNo.getZ(g);
+        const int dxg = NeNo.getX(g);
+        const int dyg = NeNo.getY(g);
+        const int dzg = NeNo.getZ(g);
 
-        resX += vectX[i1][j1][k1]*Mxx[g][i][j][k] + vectY[i1][j1][k1]*Myx[g][i][j][k] + vectZ[i1][j1][k1]*Mzx[g][i][j][k];
-        resY += vectX[i1][j1][k1]*Mxy[g][i][j][k] + vectY[i1][j1][k1]*Myy[g][i][j][k] + vectZ[i1][j1][k1]*Mzy[g][i][j][k];
-        resZ += vectX[i1][j1][k1]*Mxz[g][i][j][k] + vectY[i1][j1][k1]*Myz[g][i][j][k] + vectZ[i1][j1][k1]*Mzz[g][i][j][k];
+        const int i1 = i + dxg;
+        const int j1 = j + dyg;
+        const int k1 = k + dzg;
 
-        // if (g == 0)
-        //     continue;
-        
-        int i2 = i - NeNo.getX(g);
-        int j2 = j - NeNo.getY(g);
-        int k2 = k - NeNo.getZ(g);
+        const bool fwd_ok = (i1 >= 0 && i1 < nxn && j1 >= 0 && j1 < nyn && k1 >= 0 && k1 < nzn);
+        if (fwd_ok)
+        {
+            resX += vectX[i1][j1][k1]*Mxx[g][i][j][k] + vectY[i1][j1][k1]*Myx[g][i][j][k] + vectZ[i1][j1][k1]*Mzx[g][i][j][k];
+            resY += vectX[i1][j1][k1]*Mxy[g][i][j][k] + vectY[i1][j1][k1]*Myy[g][i][j][k] + vectZ[i1][j1][k1]*Mzy[g][i][j][k];
+            resZ += vectX[i1][j1][k1]*Mxz[g][i][j][k] + vectY[i1][j1][k1]*Myz[g][i][j][k] + vectZ[i1][j1][k1]*Mzz[g][i][j][k];
+        }
 
-        resX += vectX[i2][j2][k2]*Mxx[g][i2][j2][k2] + vectY[i2][j2][k2]*Myx[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzx[g][i2][j2][k2];
-        resY += vectX[i2][j2][k2]*Mxy[g][i2][j2][k2] + vectY[i2][j2][k2]*Myy[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzy[g][i2][j2][k2];
-        resZ += vectX[i2][j2][k2]*Mxz[g][i2][j2][k2] + vectY[i2][j2][k2]*Myz[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzz[g][i2][j2][k2];
+        const int i2 = i - dxg;
+        const int j2 = j - dyg;
+        const int k2 = k - dzg;
+
+        const bool bwd_ok = (i2 >= 0 && i2 < nxn && j2 >= 0 && j2 < nyn && k2 >= 0 && k2 < nzn);
+        if (bwd_ok)
+        {
+            resX += vectX[i2][j2][k2]*Mxx[g][i2][j2][k2] + vectY[i2][j2][k2]*Myx[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzx[g][i2][j2][k2];
+            resY += vectX[i2][j2][k2]*Mxy[g][i2][j2][k2] + vectY[i2][j2][k2]*Myy[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzy[g][i2][j2][k2];
+            resZ += vectX[i2][j2][k2]*Mxz[g][i2][j2][k2] + vectY[i2][j2][k2]*Myz[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzz[g][i2][j2][k2];
+        }
     }
 
     *MEx = resX;
@@ -2394,7 +2417,7 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     const VirtualTopology3D * vct = &get_vct();
     int rank = vct->getCartesian_rank();
 
-    for (int m = 0; m < NE_MASS; m++)
+    for (int m = 0; m < ne_mass_; m++)
     {
         //! This gives wrong results
         // double ***moment_Mxx = convert_to_arr3(Mxx[m]);
@@ -3581,10 +3604,10 @@ void EMfields3D::timeAveragedDivE(double ma)
 //? Set all elements of mass matrix to 0
 void EMfields3D::setZeroMassMatrix()
 {
-    for (int c = 0; c < NE_MASS; c++) 
+    for (int c = 0; c < ne_mass_; c++)
         for (int i = 0; i < nxn; i++)
             for (int j = 0; j < nyn; j++)
-                for (int k = 0; k < nzn; k++) 
+                for (int k = 0; k < nzn; k++)
                 {
                     Mxx[c][i][j][k] = 0.0;
                     Mxy[c][i][j][k] = 0.0;

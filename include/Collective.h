@@ -182,6 +182,8 @@ class Collective
     bool getPrecMatrix()                const{ return (PrecMatrix); }
     bool getPrecDiagnostics()           const{ return (PrecDiagnostics); }
     string getPrecType()                const{ return (PrecType); }
+    string getStencilOrder()            const{ return (StencilOrder); }
+    int    getStencilOrderInt()         const{ return (stencilOrderInt); }
     int getLast_cycle()                 const{ return (last_cycle); }
     int getNiterMover()                 const{ return (NiterMover); }
     int getFieldOutputCycle()           const{ return (FieldOutputCycle); }
@@ -420,6 +422,10 @@ class Collective
 
     //* Preconditioner type: "None" (default), "Matrix" (explicit P), "Smooth" (PCShell with smoothing)
     string PrecType;
+
+    //* Particle/grid shape function order: "Linear" (default, 8-node CIC) or "Quadratic" (27-node TSC)
+    string StencilOrder;
+    int stencilOrderInt;        // 1 = Linear, 2 = Quadratic
 
     //* mover predictor correction iteration (not needed for ECSIM)
     int NiterMover;

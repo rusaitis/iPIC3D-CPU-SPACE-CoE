@@ -142,7 +142,10 @@ Particles3Dcomm::Particles3Dcomm(int species_number, CollectiveIO * col_, Virtua
                                 vct(vct_),
                                 grid(grid_),
                                 pclIDgenerator(),
-                                particleType(ParticleType::AoS)
+                                particleType(ParticleType::AoS),
+                                //* Build the +/- offset table that matches Collective::StencilOrder
+                                //* (default Linear preserves the legacy NE_MASS=14 path).
+                                NeNo(col_->getStencilOrderInt())
 {
     //* communicators for particles
     MPI_Comm_dup(vct->getParticleComm(), &mpi_comm);
@@ -209,6 +212,10 @@ Particles3Dcomm::Particles3Dcomm(int species_number, CollectiveIO * col_, Virtua
     c = col->getC();
     NiterMover = col->getNiterMover();            // info for mover
     Vinj = col->getVinj();                        // velocity of the injection from the wall
+
+    //* Cache the shape function order from Collective. Branched on per-particle
+    //* in computeMoments() and the movers; the value is constant for the run.
+    stencil_order_ = col->getStencilOrderInt();
 
     // boundary condition for particles
     bcPfaceXright = col->getBcPfaceXright();

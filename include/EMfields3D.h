@@ -226,7 +226,27 @@ public:
 
     //* ECSIM/RelSIM moments
     void add_Rho(double weight[8], int X, int Y, int Z, int is);
-    
+    //* Single-node deposit helpers used by the TSC (quadratic) stencil path.
+    //* The 8-corner add_Rho/add_Jxh/... helpers above hardcode a 2x2x2 pattern,
+    //* which is too rigid for the 27-node TSC support. These accept a single
+    //* (value, node) pair so the per-particle TSC code can call them in a 27-loop.
+    inline void add_Rho_node(double value, int X, int Y, int Z, int is)
+    {
+        rhons[is][X][Y][Z] += value * invVOL;
+    }
+    inline void add_Jxh_node(double value, int X, int Y, int Z, int is)
+    {
+        Jxhs[is][X][Y][Z] += value;
+    }
+    inline void add_Jyh_node(double value, int X, int Y, int Z, int is)
+    {
+        Jyhs[is][X][Y][Z] += value;
+    }
+    inline void add_Jzh_node(double value, int X, int Y, int Z, int is)
+    {
+        Jzhs[is][X][Y][Z] += value;
+    }
+
     void add_Jxh(double weight[8], int X, int Y, int Z, int is);
     void add_Jyh(double weight[8], int X, int Y, int Z, int is);
     void add_Jzh(double weight[8], int X, int Y, int Z, int is);
@@ -597,6 +617,16 @@ private:
     
     //* Source
     double x_center, y_center, z_center, L_square;
+
+    //* Particle/grid shape function order: 1 = linear (CIC), 2 = quadratic (TSC)
+    //* Read from Collective::StencilOrder; default 1 (legacy byte-identical path).
+    //* Declared early so it is initialized BEFORE the mass-matrix arrays below.
+    const int stencil_order_;
+
+    //* Number of distinct +/- offset groups in the mass-matrix product cube.
+    //*   stencil_order_ = 1  ->  ne_mass_ = 14   (3x3x3 cube)
+    //*   stencil_order_ = 2  ->  ne_mass_ = 63   (5x5x5 cube)
+    const int ne_mass_;
 
     //? Electric field component used to move particles organized for rapid access
     //! This is the information transferred from cluster to booster
