@@ -2418,60 +2418,51 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
 void EMfields3D::communicateGhostP2G_mass_matrix()
 {
     const VirtualTopology3D * vct = &get_vct();
-    int rank = vct->getCartesian_rank();
 
+    //* Phase D: route the per-stencil-group mass-matrix halo through the modern
+    //  3D path via slice views, mirroring communicateGhostP2G_ecsim above. The
+    //  legacy 4D ComParser3D helpers (communicateInterp_old / communicateNode_P_old)
+    //  are hard-coded to n_ghost == 1 and silently corrupt Mxx..Mzz at MPI faces
+    //  when n_ghost > 1; the modern NBDerivedHaloComm path goes through
+    //  NBDerivedHaloCommN for n_ghost > 1.
+    //
+    //  Each Mxx[m] is a contiguous (nxn x nyn x nzn) slab of the underlying
+    //  array4_double, so convert_to_arr3 yields a valid 3D view per stencil
+    //  group m in [0, ne_mass_).
     for (int m = 0; m < ne_mass_; m++)
     {
-        //! This gives wrong results
-        // double ***moment_Mxx = convert_to_arr3(Mxx[m]);
-        // double ***moment_Mxy = convert_to_arr3(Mxy[m]);
-        // double ***moment_Mxz = convert_to_arr3(Mxz[m]);
-        // double ***moment_Myx = convert_to_arr3(Myx[m]);
-        // double ***moment_Myy = convert_to_arr3(Myy[m]);
-        // double ***moment_Myz = convert_to_arr3(Myz[m]);
-        // double ***moment_Mzx = convert_to_arr3(Mzx[m]);
-        // double ***moment_Mzy = convert_to_arr3(Mzy[m]);
-        // double ***moment_Mzz = convert_to_arr3(Mzz[m]);
+        double ***moment_Mxx = convert_to_arr3(Mxx[m]);
+        double ***moment_Mxy = convert_to_arr3(Mxy[m]);
+        double ***moment_Mxz = convert_to_arr3(Mxz[m]);
+        double ***moment_Myx = convert_to_arr3(Myx[m]);
+        double ***moment_Myy = convert_to_arr3(Myy[m]);
+        double ***moment_Myz = convert_to_arr3(Myz[m]);
+        double ***moment_Mzx = convert_to_arr3(Mzx[m]);
+        double ***moment_Mzy = convert_to_arr3(Mzy[m]);
+        double ***moment_Mzz = convert_to_arr3(Mzz[m]);
 
-        // communicateInterp(nxn, nyn, nzn, moment_Mxx, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Mxy, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Mxz, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Myx, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Myy, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Myz, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Mzx, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Mzy, vct, this);
-        // communicateInterp(nxn, nyn, nzn, moment_Mzz, vct, this);
+        //* Halo sum (interpolation pattern: face/edge/corner addFace into the
+        //  matching interior nodes).
+        communicateInterp(nxn, nyn, nzn, moment_Mxx, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Mxy, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Mxz, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Myx, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Myy, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Myz, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Mzx, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Mzy, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Mzz, vct, this);
 
-        // communicateNode_P(nxn, nyn, nzn, moment_Mxx, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Mxy, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Mxz, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Myx, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Myy, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Myz, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Mzx, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Mzy, vct, this);
-        // communicateNode_P(nxn, nyn, nzn, moment_Mzz, vct, this);
-
-        communicateInterp_old(nxn, nyn, nzn, m, Mxx, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Mxy, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Mxz, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Myx, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Myy, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Myz, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Mzx, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Mzy, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, m, Mzz, 0, 0, 0, 0, 0, 0, vct, this);
-
-        communicateNode_P_old(nxn, nyn, nzn, m, Mxx, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Mxy, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Mxz, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Myx, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Myy, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Myz, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Mzx, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Mzy, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, m, Mzz, vct, this);
+        //* Populate the ghost layers (no sum-on-receive, just copy from interior).
+        communicateNode_P(nxn, nyn, nzn, moment_Mxx, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Mxy, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Mxz, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Myx, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Myy, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Myz, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Mzx, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Mzy, vct, this);
+        communicateNode_P(nxn, nyn, nzn, moment_Mzz, vct, this);
     }
 }
 
@@ -3014,8 +3005,12 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
     //? Initialise temporary arrays with zeros
     double ***temp = newArr3(double, nx, ny, nz);
 
-    //! Using new communication routines results in energy growth
-    communicateNodeBC_old(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
+    //* Phase D: switched to modern n_ghost-aware halo. The legacy "old" comment
+    //  ("Using new communication routines results in energy growth") was from
+    //  the era when NBDerivedHaloComm had its own n_ghost=1 bugs (commit c6000ce
+    //  era); after Phase A.3b's NBDerivedHaloComm[N] fixes the modern path is
+    //  the only one that's correct for n_ghost > 1.
+    communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
 
     int k = 0;
 
@@ -3037,8 +3032,8 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
                 for (int k = n_ghost_; k < nz - n_ghost_; k++)
                     data[i][j][k] = temp[i][j][k];
 
-        //! Using new communication routines results in energy growth
-        communicateNodeBC_old(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
+        //* Phase D: switched to modern n_ghost-aware halo (see comment above).
+        communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
     }
 
     delArr3(temp, nxn, nyn);

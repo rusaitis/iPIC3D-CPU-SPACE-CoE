@@ -886,6 +886,18 @@ void communicateNodeBC(int nx, int ny, int nz, arr3_double _vector,
 	BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
+//* double*** overload — same body as the arr3_double version, used by code paths
+//  that hold a raw triple pointer (e.g. energy_conserve_smooth_direction).
+void communicateNodeBC(int nx, int ny, int nz, double*** vector,
+                        int bcFaceXrght, int bcFaceXleft,
+                        int bcFaceYrght, int bcFaceYleft,
+                        int bcFaceZrght, int bcFaceZleft,
+                        const VirtualTopology3D * vct, EMfields3D *EMf)
+{
+	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false,false,false,false);
+	BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
+}
+
 void communicateNodeBC_old( int nx, int ny, int nz, double ***vector, 
                             int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft, 
                             const VirtualTopology3D *vct, EMfields3D *EMf)

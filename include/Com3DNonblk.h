@@ -42,12 +42,16 @@ developers           : Stefano Markidis, Ivy Bo Peng
 #include "ComParser3D.h"
 
 //* Communicate ghost cells (nodes)
-void communicateNodeBC( int nx, int ny, int nz, arr3_double vector, 
-                        int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft, 
+void communicateNodeBC( int nx, int ny, int nz, arr3_double vector,
+                        int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
                         const VirtualTopology3D * vct, EMfields3D *EMf);
 
-void communicateNodeBC_old( int nx, int ny, int nz, double ***vector, 
-                            int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft, 
+void communicateNodeBC( int nx, int ny, int nz, double ***vector,
+                        int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
+                        const VirtualTopology3D * vct, EMfields3D *EMf);
+
+void communicateNodeBC_old( int nx, int ny, int nz, double ***vector,
+                            int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
                             const VirtualTopology3D *vct, EMfields3D *EMf);
 
 void communicateNodeBoxStencilBC(int nx, int ny, int nz, arr3_double vector, 
