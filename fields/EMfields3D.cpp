@@ -2640,7 +2640,10 @@ void EMfields3D::calculateE()
     } else
 #endif
     {
-        GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, 20, 50, GMREStol, this);
+        // Restart=40 chosen 2026-04-09 from empirical sweep (plan-preconditioners.md §Phase 9b):
+        // r=40 gives +5-20% wall-clock vs r=20 on stiff cases (dt≥0.75) and matches v1 baseline on
+        // easy cases (dt<0.5). Total iter budget kept at 1000 by halving max-restart from 50 to 25.
+        GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, 40, 25, GMREStol, this);
     }
 
     #ifdef __PROFILE_FIELDS__

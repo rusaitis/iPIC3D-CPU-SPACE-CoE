@@ -67,15 +67,21 @@ at each restart?
 
 ## Solver Configuration
 
-GMRES restart is hardcoded at 20 in both solvers (not configurable from input file):
-- Built-in: literal `20` passed at the call site in `EMfields3D.cpp:2616`
-- PETSc: `KSPGMRESSetRestart(ksp_, 20)` in the constructor
+GMRES restart was originally hardcoded at 20 in both solvers; **PETSc was bumped to 40 on 2026-04-09** after empirical sweeps showed it consistently faster across the stiffness corpus (see `plan-preconditioners.md` §Phase 9b, ~14-20% speedup at dt≥0.75 with no penalty up to dt=1.0). Built-in GMRES stayed at 20 because it's slower per matvec — bumping its restart didn't pay off as cleanly.
+- Built-in: literal `20` at `EMfields3D.cpp:2643`
+- PETSc: `KSPGMRESSetRestart(ksp_, 40)` at `solvers/PETSC.cpp:188`
 
 `KSPSetFromOptions()` allows runtime override of PETSc settings without recompiling:
 ```
 mpirun -np 8 build/iPIC3D input.inp -solver PETSc -ksp_type bcgs
-mpirun -np 8 build/iPIC3D input.inp -solver PETSc -ksp_gmres_restart 40 -ksp_monitor
+mpirun -np 8 build/iPIC3D input.inp -solver PETSc -ksp_gmres_restart 50 -ksp_monitor
 ```
+
+### Recommended PETSc preconditioner for ECSIM Maxwell
+
+**None.** Plan v2 of the preconditioner study (`plan-preconditioners.md`) ran a comprehensive sweep across 5 stiffness regimes × 8-10 preconditioner variants and found zero PCs that beat unpreconditioned GMRES in wall-clock time. The explicit `P` matrix (`assembleP()`, `solvers/PETSC.cpp:436`) omits the smoothing operator `S` from the implicit Maxwell operator, which makes `P` a poor enough approximation of `A` that any PC built from it scatters the spectrum instead of clustering it.
+
+The single piece of HYPRE BoomerAMG that was *not* tested (because Homebrew's PETSc is built without `--with-hypre`) remains the only theoretically promising approach. To enable it, install HYPRE and rebuild PETSc with `--with-hypre-dir=$(brew --prefix hypre)`.
 
 ## Performance Notes
 

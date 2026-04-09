@@ -652,7 +652,9 @@ make_input() {
 # Args: logfile output_csv
 extract_profile() {
     local logfile="$1" outcsv="$2"
-    "$PYTHON" "$SCRIPTS_DIR/extract_profile.py" "$logfile" "$outcsv" 2>/dev/null || true
+    # Redirect stdout too — extract_profile.py prints "Extracted N cycles" which would
+    # otherwise be captured by run_solver's $(...) and corrupt the timing fields.
+    "$PYTHON" "$SCRIPTS_DIR/extract_profile.py" "$logfile" "$outcsv" >/dev/null 2>&1 || true
 }
 
 # Parse convergence info from a log file.
@@ -663,6 +665,7 @@ extract_profile() {
 parse_convergence() {
     local logfile="$1"
     PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}" "$PYTHON" -c "
+import sys
 from log_patterns import CONVERGENCE_PATTERNS, GMRES_ZERO_ITER
 
 logfile = sys.argv[1]
@@ -953,8 +956,15 @@ extract_convergence() {
             local _cv_mark="${GREEN}${CHECK}${RESET}"
             [[ $_fail_count -gt 0 ]] && _cv_mark="${RED}${CROSS}${RESET}"
             echo "    ${_cv_mark} ${_name}: $_conv_count converged, $_fail_count failed"
-            grep "$_conv_pat" "$logfile" | head -1 | sed 's/^/    First: /'
-            grep "$_conv_pat" "$logfile" | tail -1 | sed 's/^/    Last:  /'
+            # Show first/last successful convergence line if any (guard against pipefail
+            # when _conv_count=0 — grep returns 1 and aborts the script under set -e).
+            if [[ $_conv_count -gt 0 ]]; then
+                grep "$_conv_pat" "$logfile" | head -1 | sed 's/^/    First: /'
+                grep "$_conv_pat" "$logfile" | tail -1 | sed 's/^/    Last:  /'
+            else
+                grep "$_fail_pat" "$logfile" | head -1 | sed 's/^/    First fail: /' || true
+                grep "$_fail_pat" "$logfile" | tail -1 | sed 's/^/    Last fail:  /' || true
+            fi
         fi
     done
 

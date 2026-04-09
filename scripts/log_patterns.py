@@ -14,10 +14,13 @@ import re
 # Each entry: (regex, iter_extractor_fn)
 # iter_extractor takes a re.Match and returns the iteration count.
 
+_GMRES_RESTART_LEN = 40  # built-in iPIC3D GMRES restart length (EMfields3D.cpp:2643)
+                         # Bumped from 20 → 40 on 2026-04-09 (plan-preconditioners.md §Phase 9b)
+
 ITER_PATTERNS = [
     # GMRES: "GMRES converged at restart R; iteration K with error: E"
     (re.compile(r'GMRES converged at restart (\d+); iteration (\d+) with error:'),
-     lambda m: int(m.group(1)) * 20 + int(m.group(2))),
+     lambda m: int(m.group(1)) * _GMRES_RESTART_LEN + int(m.group(2))),
     # GMRES zero-iter: "GMRES converged without iterations"
     (re.compile(r'GMRES converged without iterations'),
      lambda m: 0),
@@ -62,7 +65,7 @@ CONVERGENCE_PATTERNS = [
     ("GMRES",
      re.compile(r'GMRES converged at restart (\d+); iteration (\d+) with error:\s*([\d.eE+\-]+)'),
      re.compile(r'GMRES not converged.*Final error:\s*([\d.eE+\-]+)'),
-     lambda m: int(m.group(1)) * 20 + int(m.group(2)),
+     lambda m: int(m.group(1)) * _GMRES_RESTART_LEN + int(m.group(2)),
      3,     # residual group index in success regex
      None,  # no iter count for GMRES failure
      1),    # residual group index in fail regex
