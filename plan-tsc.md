@@ -47,19 +47,27 @@
 
 3. **sm=4 is the current sweet spot.** The drift is bounded and oscillatory (not secular).
 
-4. **Drift scales with problem size.** 100x100x4 is worse than 20x20x4 in absolute dE (more total FP operations).
+4. **Drift scales with per-rank workload, not communication volume.** np=1 (all self-periodic, zero MPI) is WORSE than np=4:
+
+   | | dE(1) np=1 | dE(1) np=4 | dE(10) np=1 | dE(10) np=4 |
+   |---|---|---|---|---|
+   | **CIC** | 2.2e-06 | 1.7e-08 | 4.9e-05 | 1.2e-05 |
+   | **TSC** | 1.5e-05 | 9.8e-06 | 2.8e-04 | 7.9e-05 |
+
+   MPI doesn't hurt — it helps. With np=1, each rank processes 4x more particles and grid nodes, accumulating ~4x more local FP noise in P2G scatter, addFace summation, and smoothing. The drift is dominated by **local FP accumulation**, not communication. More ranks = less work per rank = better energy conservation.
+
+   This also rules out the self-copy convention as a drift source: np=1 (100% self-copies) has worse drift than np=4 (mixed MPI + self-copies).
 
 ---
 
 ## What we don't know
 
-The investigation so far has narrowed the drift to the **smoothing ↔ mass-matrix interaction**, but hasn't pinpointed the exact mechanism. The ECSIM energy theorem says energy is exactly conserved when the implicit operator A is self-adjoint and the GMRES solve is exact. For TSC, something breaks this — but what?
+The investigation has narrowed the drift to **local FP accumulation in the smoothing ↔ mass-matrix chain**, but hasn't pinpointed the exact mechanism. The ECSIM energy theorem says energy is exactly conserved when the implicit operator A is self-adjoint and the GMRES solve is exact. For TSC, something breaks this — but what?
 
-Possible mechanisms (not yet tested):
+Open questions:
 
 - **Operator asymmetry**: Is MaxwellImage actually non-self-adjoint in floating-point? By how much?
-- **Smoothing asymmetry**: Is the discrete smoothing operator S non-self-adjoint due to ghost communication at n_ghost=2?
-- **Self-copy convention mismatch**: The legacy n_ghost=1 path uses `ghost = boundary` (ignoring offset) for self-copies. NBDerivedHaloCommN uses `ghost = MPI-consistent` (with offset). Does this matter?
+- **Smoothing asymmetry**: Is the discrete smoothing operator S non-self-adjoint due to the accumulation of FP noise across 4 passes × 2 calls per GMRES iteration?
 - **RHS/operator inconsistency**: MaxwellSource smooths J once. MaxwellImage smooths E twice per iteration. Are these "the same" smoothing in practice?
 - **Theoretical limitation**: Does published ECSIM literature predict this drift level for TSC?
 
@@ -77,13 +85,9 @@ This is the most direct diagnostic. If the operator A is self-adjoint to machine
 
 - [ ] **4c. Component isolation** — Temporarily disable the mass-matrix term in MaxwellImage (skip lines 2876-2900 in `EMfields3D.cpp`), leaving only the curl-curl term. Run TSC with smoothing. If drift vanishes → asymmetry is in S·M·S. If drift persists → asymmetry is in S alone or the curl operators.
 
-### Phase 5: Self-copy convention experiment (MEDIUM PRIORITY)
+### Phase 5: Self-copy convention experiment (DONE — ruled out)
 
-The legacy n_ghost=1 path uses `vector[0] = vector[nx-2]` (boundary value, no offset) for face self-copies, while NBDerivedHaloCommN uses `vector[0] = vector[nx-1-n_ghost-offset-g]` (MPI-consistent). For a self-periodic single-rank axis, the boundary value IS the periodic image of itself, making the legacy self-copy use a "wrong" but SYMMETRIC value. The MPI-consistent self-copy uses the correct value but may introduce asymmetry between left and right ghost layers.
-
-- [ ] **5a. Test offset=0 for node-path self-copy** — In `NBDerivedHaloCommN` (`Com3DNonblk.cpp:649-690`), temporarily set `offset_selfcopy = 0` for the face self-copy only (keep MPI sends using real offset). Run TSC smoke test. If drift improves, the self-copy convention matters.
-
-- [ ] **5b. Compare 1-rank vs 4-rank** — Run the same 20x20x4 TSC test on 1 rank (XLEN=1 YLEN=1 ZLEN=1, all self-periodic, all self-copies) vs 4 ranks (XLEN=2 YLEN=2 ZLEN=1, mixed MPI+self-copy). Different drift → self-copy convention matters. Same drift → convention doesn't matter.
+- [x] **5b. Compare 1-rank vs 4-rank** — np=1 (all self-copies) gives WORSE drift than np=4 (mixed MPI+self-copy). Self-copy convention is NOT the drift source. See Finding 4 above.
 
 ### Phase 6: RHS/operator smoothing consistency (MEDIUM PRIORITY)
 
