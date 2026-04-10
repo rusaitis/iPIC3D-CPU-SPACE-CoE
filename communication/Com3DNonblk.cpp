@@ -950,7 +950,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //* Periodic single-rank corner self-copies.
         //  Generalized from legacy L437-494. Uses else-if like legacy: for np=1
         //  (all periodic) the first branch handles all 8 corner cubes via the
-        //  cascade face→edge→corner. Source cells were filled by edge self-copies.
+        //  cascade face->edge->corner. Source cells were filled by edge self-copies.
         if (left_neighborX == myrank && right_neighborX == myrank) {
             for (int g = 0; g < n_ghost_; g++)
             for (int gy = 0; gy < n_ghost_; gy++)
@@ -1021,6 +1021,13 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
 
     //* Moment summation: after the halo has filled the ghost slab, sum each
     //  ghost layer back into the matching inner interior layer.
+    //
+    //  NOTE: for self-periodic thin axes where n_cells_per_rank < 2*n_ghost,
+    //  the left-side and right-side addFace destinations overlap, causing
+    //  double-counting of periodic-wrap moment contributions. This can NOT
+    //  be fixed by clamping addFace alone — the whole discretization (field
+    //  copy, stencils, moments) is self-consistently calibrated. Require
+    //  nxc_r >= 2*n_ghost - 1 per rank for each self-periodic axis.
     if (needInterp) {
         addFace (nx, ny, nz, vector, vct, n_ghost_);
         addEdgeZ(nx, ny, nz, vector, vct, n_ghost_);
