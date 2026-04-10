@@ -64,30 +64,36 @@ GMRES converges to ~9e-16 in both cases, so solver convergence is not the issue.
 
 ---
 
-## Remaining work
+## Tasks
 
-### Phase 4: Investigate TSC/CIC gap further (only if ~1e-06 isn't acceptable)
+### Phase 4: Investigate TSC/CIC gap (~10-100x remaining)
 
-**Step 4a: Mass matrix symmetry check**
-Add diagnostic in `EMfields3D::communicateGhostP2G_mass_matrix()` (after communicateInterp + communicateNode_P) to check `|M[g] - M[g']|` for symmetric partner pairs. If max asymmetry > 1e-14, the communication introduces asymmetry.
-- File: `fields/EMfields3D.cpp:2418-2467`
+Only needed if ~1e-06/cycle drift is insufficient. These tasks help isolate where the remaining drift comes from.
 
-**Step 4b: Forced n_ghost=2 CIC vs TSC comparison**
-Use `IPIC3D_FORCE_NGHOST` scaffold (temporarily add to `Grid3DCU.cpp:43`) to test CIC with n_ghost=2 on the same grid. Isolates halo exchange effects (shared) from TSC-specific stencil effects.
-- Note: scaffold crashed previously for np=1. Use np=4+ topologies.
+- [ ] **4a. Mass matrix symmetry diagnostic** — Add temporary check in `communicateGhostP2G_mass_matrix()` (`fields/EMfields3D.cpp:2418-2467`) after communicateInterp + communicateNode_P: print `max |M[g][i][j][k] - M[g'][i'][j'][k']|` for symmetric partner pairs. If > 1e-14, the communication introduces asymmetry.
+- [ ] **4b. Forced n_ghost=2 CIC vs TSC** — Add `IPIC3D_FORCE_NGHOST` scaffold (temp, `grids/Grid3DCU.cpp:43`), run CIC with n_ghost=2 on same 20x20x4 grid (np=4). Isolates halo exchange (shared) vs TSC stencil (specific). Note: scaffold crashed for np=1 previously; use np=4+.
+- [ ] **4c. Solver residual isolation** — Run TSC with `GMREStol=1e-20` on the standard smoke test. If drift improves, it's solver-residual-dominated; if not, scheme-intrinsic.
+- [ ] **4d. Larger grid test** — Run TSC on 100x100x4 (XLEN=2 YLEN=4 ZLEN=1, np=8) with `DiagnosticsOutputCycle=1`. Compare per-cycle drift with 20x20x4 to separate grid-resolution effects from n_ghost bugs.
 
-**Step 4c: Solver residual isolation**
-Run TSC at `GMREStol=1e-20` to check if drift is solver-residual-dominated or scheme-intrinsic.
+### Phase 5: Edge/corner self-copy modular wrapping
 
-### Phase 6: Secondary cleanups (deferred)
+The face self-copy got modular wrapping in `e2e7c0d`, but edge and corner self-copies still use `n_ghost+offset+g` without thin-dimension guards. This is a latent bug masked by current test topologies.
 
-These are real n_ghost=1 hardcodings that don't fire for periodic Double_Harris but should be fixed before non-periodic runs with n_ghost > 1:
+- [ ] **5a.** Add modular wrapping to X-periodic edge self-copy (`Com3DNonblk.cpp:797-830`)
+- [ ] **5b.** Add modular wrapping to Y-periodic edge self-copy (`Com3DNonblk.cpp:832-858`)
+- [ ] **5c.** Add modular wrapping to Z-periodic edge self-copy (`Com3DNonblk.cpp:860-886`)
+- [ ] **5d.** Add modular wrapping to corner self-copies (`Com3DNonblk.cpp:950-1035`)
+- [ ] **5e.** Verify: `pixi run test` still PASS, TSC smoke still ~1e-06
 
-- `EMfields3D::adjustNonPeriodicDensities` (L3176-3273)
-- `EMfields3D::OpenBoundaryInflowB/E` (L5756-5899)
-- `Grid3DCU::divN2C_BCLeftRight` etc. (L440-535)
-- 12 alternative particle initializers in `Particles3D.cpp`
-- Edge/corner self-copy modular wrapping (thin-dim safety, currently masked)
+### Phase 6: Non-periodic boundary hardcodings (n_ghost=1)
+
+These don't fire for the all-periodic Double_Harris test but will break for non-periodic BCs with n_ghost > 1. Fix when needed.
+
+- [ ] **6a.** `EMfields3D::adjustNonPeriodicDensities` (`fields/EMfields3D.cpp:3176-3273`) — hardcoded `[1]` and `[nxn-2]` boundary indices
+- [ ] **6b.** `EMfields3D::OpenBoundaryInflowB/E` (`fields/EMfields3D.cpp:5756-5899`) — hardcoded `[1]` and `[nxn-2]`
+- [ ] **6c.** `Grid3DCU::divN2C_BCLeftRight`, `derBC_left{X,Y,Z}` (`grids/Grid3DCU.cpp:440-535`) — hardcoded `-2` loop ends
+- [ ] **6d.** 12 alternative particle initializers in `Particles3D.cpp` — cell loops use `[1, getNXC()-1)` instead of `[n_ghost, getNXC()-n_ghost)`
+- [ ] **6e.** `EMfields3D::init_double_Harris` field init bounds (`fields/EMfields3D.cpp:5274,5299`)
 
 ---
 
