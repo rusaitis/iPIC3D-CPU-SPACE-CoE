@@ -639,34 +639,54 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     assert_eq(recvcnt, sendcnt - recvcnt);
     assert_le(sendcnt, MAX_REQS);
 
-    //* Periodic single-rank self-copies (X/Y/Z). Each ghost layer reads from
-    //  the matching interior node on the OPPOSITE side; reads only touch
-    //  interior nodes, so layer order is irrelevant and there is no
-    //  read-after-write chaining. For n_ghost == 1 this reduces to the legacy
-    //  vector[0] = vector[nx-2], vector[nx-1] = vector[1] identically.
+    //* Periodic single-rank self-copies (X/Y/Z). Source indices use the same
+    //  (n_ghost + offset + g) depth convention as the MPI face sends, with
+    //  modular wrapping for thin dimensions where the source would otherwise
+    //  fall outside the interior range [n_ghost, n-1-n_ghost].
+    //  stride = n - 2*n_ghost - offset = nxc_r (distinct periodic nodes/centers).
+    //  For offset=0 (moment/interp path), this reduces to the original formula.
+    //  For offset=1 (node field-copy path), this corrects the source to match MPI.
     if (right_neighborX == myrank && left_neighborX == myrank) {
-        for (int g = 0; g < n_ghost_; g++)
+        const int stride_x = nx - 2 * n_ghost_ - offset;
+        for (int g = 0; g < n_ghost_; g++) {
+            int sL = nx - 1 - n_ghost_ - offset - g;
+            if (sL < n_ghost_) sL += stride_x;
+            int sR = n_ghost_ + offset + g;
+            if (sR > nx - 1 - n_ghost_) sR -= stride_x;
             for (int iy = 1; iy < ny - 1; iy++)
                 for (int iz = 1; iz < nz - 1; iz++) {
-                    vector[g][iy][iz]            = vector[nx - 1 - n_ghost_ - g][iy][iz];
-                    vector[nx - 1 - g][iy][iz]   = vector[n_ghost_ + g][iy][iz];
+                    vector[g][iy][iz]            = vector[sL][iy][iz];
+                    vector[nx - 1 - g][iy][iz]   = vector[sR][iy][iz];
                 }
+        }
     }
     if (right_neighborY == myrank && left_neighborY == myrank) {
-        for (int g = 0; g < n_ghost_; g++)
+        const int stride_y = ny - 2 * n_ghost_ - offset;
+        for (int g = 0; g < n_ghost_; g++) {
+            int sL = ny - 1 - n_ghost_ - offset - g;
+            if (sL < n_ghost_) sL += stride_y;
+            int sR = n_ghost_ + offset + g;
+            if (sR > ny - 1 - n_ghost_) sR -= stride_y;
             for (int ix = 1; ix < nx - 1; ix++)
                 for (int iz = 1; iz < nz - 1; iz++) {
-                    vector[ix][g][iz]            = vector[ix][ny - 1 - n_ghost_ - g][iz];
-                    vector[ix][ny - 1 - g][iz]   = vector[ix][n_ghost_ + g][iz];
+                    vector[ix][g][iz]            = vector[ix][sL][iz];
+                    vector[ix][ny - 1 - g][iz]   = vector[ix][sR][iz];
                 }
+        }
     }
     if (right_neighborZ == myrank && left_neighborZ == myrank) {
-        for (int g = 0; g < n_ghost_; g++)
+        const int stride_z = nz - 2 * n_ghost_ - offset;
+        for (int g = 0; g < n_ghost_; g++) {
+            int sL = nz - 1 - n_ghost_ - offset - g;
+            if (sL < n_ghost_) sL += stride_z;
+            int sR = n_ghost_ + offset + g;
+            if (sR > nz - 1 - n_ghost_) sR -= stride_z;
             for (int ix = 1; ix < nx - 1; ix++)
                 for (int iy = 1; iy < ny - 1; iy++) {
-                    vector[ix][iy][g]            = vector[ix][iy][nz - 1 - n_ghost_ - g];
-                    vector[ix][iy][nz - 1 - g]   = vector[ix][iy][n_ghost_ + g];
+                    vector[ix][iy][g]            = vector[ix][iy][sL];
+                    vector[ix][iy][nz - 1 - g]   = vector[ix][iy][sR];
                 }
+        }
     }
 
     if (sendcnt > 0) {

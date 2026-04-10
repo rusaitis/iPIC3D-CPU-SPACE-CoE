@@ -66,6 +66,19 @@ Grid3DCU::Grid3DCU(CollectiveIO * col, VirtualTopology3D * vct):
     assert_lt(0,nyc_r); assert_le(nyc_r,nyc_rr);
     assert_lt(0,nzc_r); assert_le(nzc_r,nzc_rr);
 
+    // For n_ghost > 1 with self-periodic axes (single rank per axis),
+    // the per-rank cell count must be >= 2*n_ghost - 1 to avoid
+    // addFace moment double-counting on thin periodic dimensions.
+    if (n_ghost > 1) {
+        const int min_cells = 2 * n_ghost - 1;  // = 3 for n_ghost=2
+        if (col->getPERIODICX() && col->getXLEN() == 1)
+            assert_ge(nxc_r, min_cells);
+        if (col->getPERIODICY() && col->getYLEN() == 1)
+            assert_ge(nyc_r, min_cells);
+        if (col->getPERIODICZ() && col->getZLEN() == 1)
+            assert_ge(nzc_r, min_cells);
+    }
+
     // These restrictions should be removed.
     //
     // An objection to removing them is that the user can always
