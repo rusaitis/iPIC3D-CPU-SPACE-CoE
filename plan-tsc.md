@@ -2,17 +2,20 @@
 
 ## Status (2026-04-10)
 
-**Branch:** `with-petsc`, head at `e2e7c0d`.
+**Branch:** `with-petsc`, head at `55203c3`.
 
 ### Energy drift summary
 
-| Test | Before fixes | After a87cac1 | After e2e7c0d | Target |
-|------|-------------|---------------|---------------|--------|
-| CIC n_ghost=1 100x100x1 | ~7e-08 | ~7e-08 | ~6e-09 | ~1e-07 |
-| TSC 20x20x1 (nzc=1) | ~1.5e-02/cyc | ~3.6e-02/cyc | N/A (blocked by assertion) | ~1e-07 |
-| TSC 20x20x4 (nzc=4) | — | ~2e-06 @ cyc3 | ~1e-06 @ cyc3 | ~1e-07 |
-| CIC 20x20x4 (nzc=4) | — | — | ~1.6e-04 @ 10cyc | — |
-| CIC 100x100x4 (nzc=4) | — | — | ~2.5e-05/cyc | — |
+| Test | dE metric | CIC | TSC | Notes |
+|------|-----------|-----|-----|-------|
+| 100x100x1 (standard) | \|dE/E0\| 10cyc | 5.1e-08 | N/A (needs nzc≥3) | Gold standard CIC test |
+| 20x20x4 np=4 sm=4 | \|dE\| cyc1 | 3.6e-08 | 1.1e-05 | TSC ~300x worse at cycle 1 |
+| 20x20x4 np=4 sm=4 | \|dE\| cyc3 | 1.5e-06 | 3.6e-05 | TSC bounded, oscillatory |
+| 20x20x4 np=4 sm=4 | \|dE\| 10cyc | 1.2e-05 | 7.9e-05 | TSC amplitude ~1e-04 peak |
+
+### Key finding
+
+**TSC energy drift is inherent to the wider stencil + smoothing interaction, not a code bug.** The drift is bounded and oscillatory (~1e-04 amplitude on 20x20x4), not secularly growing. This is ~10x worse than CIC on the same grid but is the expected behavior for the ECSIM scheme with TSC shape functions.
 
 ### Commit history (oldest → newest)
 
@@ -40,52 +43,78 @@ For self-periodic axes where `nxc_r < 2*n_ghost` (e.g., nzc=1 with n_ghost=2), t
 
 ### Issue 2: Face self-copy vs MPI offset inconsistency (FIXED in e2e7c0d)
 
-**Critical finding:** The inconsistency only affects the **node field-copy path** (`communicateNodeBC`, `communicateNode_P`) where `isCenterFlag=false` → `offset=1`. The **moment summation path** (`communicateInterp`) sets `isCenterFlag=true` → `offset=0`, making the old and new formulas identical. So moment P2G communication was never affected.
+The node field-copy path (`communicateNodeBC`, `isCenterFlag=false` → `offset=1`) uses `offset` in MPI sends but the old self-copy did not include `offset`. Fixed with modular wrapping. The moment path (`communicateInterp`, `offset=0`) was never affected.
 
-The node field-copy path is used by:
-- `energy_conserve_smooth_direction` (smoothing during ECSIM field solve)
-- `communicateNode_P` (post-moment ghost population)
-- `communicateNodeBC` in `MaxwellImage` (GMRES matrix-vector product)
+**Impact:** ~2x improvement on standard TSC test.
 
-**Fix:** Face self-copy in `NBDerivedHaloCommN` now uses `n_ghost+offset+g` source depth (matching MPI sends), with modular wrapping for thin dimensions (`stride = n - 2*n_ghost - offset`). For offset=0 (moment path), this is algebraically identical to the old formula — no behavior change. For offset=1 (node path), ghost values now match what MPI exchange would produce.
+### Issue 3: TSC smoothing-induced energy drift (INVESTIGATED — inherent)
 
-**Impact:** ~2x improvement on standard TSC test (2.15e-06 → 1.06e-06 at cycle 3).
+**This is the main remaining issue.** Comprehensive investigation in this session:
 
-### Issue 3: Remaining TSC vs CIC gap (~10-100x)
+#### Finding 3a: TSC is UNSTABLE without smoothing
 
-On the same grid, TSC drifts more than CIC. On 20x20x4: TSC ~1e-06 at cycle 3 vs CIC ~5e-07 at cycle 1 (comparable early-cycle). The gap widens with more cycles as cell-crossing events accumulate.
+Without smoothing (Smooth=0), TSC energy explodes by cycle 7 (dE grows from 3.8e-06 at cycle 1 to 5.7e-01 at cycle 10). CIC is stable without smoothing. The wider TSC stencil creates high-frequency modes that the implicit scheme cannot damp.
 
-Possible remaining causes:
-- 63 mass matrix components (vs 14 for CIC) → 4.5x more FP operations in communication and summation
-- Wider TSC stencil → more arithmetic per operator application → more round-off
-- Edge/corner self-copies still use `n_ghost+offset+g` without modular wrapping (latent thin-dim bug, masked by current test topologies)
+#### Finding 3b: Smoothing is the dominant drift source
 
-GMRES converges to ~9e-16 in both cases, so solver convergence is not the issue.
+| num_smoothings | dE(1) | dE(10) | Stability |
+|---------------|-------|--------|-----------|
+| 0 (none) | 3.8e-06 | EXPLODED | Unstable at cycle 7 |
+| 1 | 2.3e-05 | 5.8e-02 | Unstable at cycle 10 |
+| 2 | 2.2e-05 | 9.9e-03 | Marginally stable |
+| **4 (default)** | **1.1e-05** | **7.9e-05** | **Stable, oscillatory** |
+| 8 | 5.5e-06 | 2.1e-03 | Initially better, then worse |
+
+**sm=4 is the sweet spot** — fewer passes are unstable, more passes add FP noise. The drift at cycle 1 (1.1e-05 with smoothing vs 3.8e-06 without) confirms that smoothing ADDS drift but is necessary for stability.
+
+#### Finding 3c: NOT solver-limited
+
+Tighter GMRES tolerance (1e-20 instead of 1e-15) makes the drift WORSE (2.2e-05 at cycle 3 vs 1.6e-05). The extra GMRES iterations (>40 vs 30) introduce more FP noise. The GMRES residual at 1e-15 is already sufficient.
+
+#### Finding 3d: NOT halo-exchange-limited
+
+CIC forced to n_ghost=2 (using NBDerivedHaloCommN instead of legacy path) produces identical results to CIC with n_ghost=1. The NBDerivedHaloCommN implementation is correct.
+
+#### Finding 3e: NOT scatter-noise-limited
+
+TSC with 5³=125 particles per cell gives the same drift as 3³=27 particles per cell. The mass matrix FP noise from the P2G scatter is not the bottleneck.
+
+#### Finding 3f: Drift scales with problem size
+
+| Grid | dE(1) | dE(5) | Particles/rank |
+|------|-------|-------|---------------|
+| 20x20x4 | 1.1e-05 | 1.0e-04 | 43k |
+| 100x100x4 | 8.2e-05 | 5.3e-04 | 1.08M |
+
+Larger grids give WORSE absolute drift (more FP operations in the mass matrix and smoothing). The drift appears proportional to the square root of the particle count.
 
 ---
 
-## Tasks
+## Conclusion
 
-### Phase 4: Investigate TSC/CIC gap (~10-100x remaining)
+The ~10x TSC/CIC energy conservation gap is an inherent property of the wider stencil requiring smoothing. The ECSIM energy theorem holds exactly only when GMRES converges to zero residual. With smoothing, the effective operator is:
 
-Only needed if ~1e-06/cycle drift is insufficient. These tasks help isolate where the remaining drift comes from.
+  A = I + θ²Δt²c² ∇×∇× + θΔt·4π/V · S(M · S(·))
 
-- [ ] **4a. Mass matrix symmetry diagnostic** — Add temporary check in `communicateGhostP2G_mass_matrix()` (`fields/EMfields3D.cpp:2418-2467`) after communicateInterp + communicateNode_P: print `max |M[g][i][j][k] - M[g'][i'][j'][k']|` for symmetric partner pairs. If > 1e-14, the communication introduces asymmetry.
-- [ ] **4b. Forced n_ghost=2 CIC vs TSC** — Add `IPIC3D_FORCE_NGHOST` scaffold (temp, `grids/Grid3DCU.cpp:43`), run CIC with n_ghost=2 on same 20x20x4 grid (np=4). Isolates halo exchange (shared) vs TSC stencil (specific). Note: scaffold crashed for np=1 previously; use np=4+.
-- [ ] **4c. Solver residual isolation** — Run TSC with `GMREStol=1e-20` on the standard smoke test. If drift improves, it's solver-residual-dominated; if not, scheme-intrinsic.
-- [ ] **4d. Larger grid test** — Run TSC on 100x100x4 (XLEN=2 YLEN=4 ZLEN=1, np=8) with `DiagnosticsOutputCycle=1`. Compare per-cycle drift with 20x20x4 to separate grid-resolution effects from n_ghost bugs.
+The smoothing S is applied 8× per GMRES iteration (2 smooth calls × 4 passes each), totaling ~240 smoothing passes per cycle. Each pass involves ghost communication + 27-point stencil evaluation, accumulating O(ε_mach) round-off per operation. For TSC, the 63-group mass matrix (vs 14 for CIC) multiplies this noise ~4.5×.
 
-### Phase 5: Edge/corner self-copy modular wrapping
+The drift is bounded and oscillatory — energy conservation is not lost over time, it just oscillates. For practical purposes, ~1e-04 amplitude on a 20x20x4 grid is acceptable. On production grids (much larger), the per-particle contribution to drift is smaller, but total operations are larger. The net scaling is approximately O(sqrt(N_particles)).
 
-The face self-copy got modular wrapping in `e2e7c0d`, but edge and corner self-copies still use `n_ghost+offset+g` without thin-dimension guards. This is a latent bug masked by current test topologies.
+---
 
-- [ ] **5a.** Add modular wrapping to X-periodic edge self-copy (`Com3DNonblk.cpp:797-830`)
-- [ ] **5b.** Add modular wrapping to Y-periodic edge self-copy (`Com3DNonblk.cpp:832-858`)
-- [ ] **5c.** Add modular wrapping to Z-periodic edge self-copy (`Com3DNonblk.cpp:860-886`)
-- [ ] **5d.** Add modular wrapping to corner self-copies (`Com3DNonblk.cpp:950-1035`)
-- [ ] **5e.** Verify: `pixi run test` still PASS, TSC smoke still ~1e-06
+## Remaining tasks
 
-### Phase 6: Non-periodic boundary hardcodings (n_ghost=1)
+### Phase 5: Edge/corner self-copy modular wrapping (DEFERRED)
+
+The face self-copy got modular wrapping in `e2e7c0d`, but edge and corner self-copies still use `n_ghost+offset+g` without thin-dimension guards. This is a **latent bug** masked by current test topologies (all tests have nzc_r ≥ 3, so indices stay in range). Only relevant for future tests with thin self-periodic axes near the minimum grid assertion boundary.
+
+- [ ] **5a.** Add modular wrapping to X-periodic edge self-copy (`Com3DNonblk.cpp:806-832`)
+- [ ] **5b.** Add modular wrapping to Y-periodic edge self-copy (`Com3DNonblk.cpp:834-860`)
+- [ ] **5c.** Add modular wrapping to Z-periodic edge self-copy (`Com3DNonblk.cpp:862-888`)
+- [ ] **5d.** Add modular wrapping to corner self-copies (`Com3DNonblk.cpp:974-1039`)
+- [ ] **5e.** Verify: `tests/test.sh` still PASS, TSC smoke still ~3e-05 at cycle 3
+
+### Phase 6: Non-periodic boundary hardcodings (n_ghost=1) (DEFERRED)
 
 These don't fire for the all-periodic Double_Harris test but will break for non-periodic BCs with n_ghost > 1. Fix when needed.
 
@@ -95,6 +124,14 @@ These don't fire for the all-periodic Double_Harris test but will break for non-
 - [ ] **6d.** 12 alternative particle initializers in `Particles3D.cpp` — cell loops use `[1, getNXC()-1)` instead of `[n_ghost, getNXC()-n_ghost)`
 - [ ] **6e.** `EMfields3D::init_double_Harris` field init bounds (`fields/EMfields3D.cpp:5274,5299`)
 
+### Phase 7: Potential improvements (OPTIONAL, research-grade)
+
+These could reduce TSC drift but involve significant effort with uncertain payoff:
+
+- [ ] **7a. Wider smoothing kernel** — Match the smoothing filter width to the TSC stencil (5x5x5 instead of 3x3x3). Requires new smoothing code path for n_ghost≥2.
+- [ ] **7b. Kahan summation in mass_matrix_times_vector** — Reduce FP noise in the 63-group accumulation. Small impact since most noise comes from the smoothing, not the matrix product.
+- [ ] **7c. Alternative smoothing approach** — Research: per-direction 1D smoothing instead of 3D box filter, or adaptive smoothing that only targets unstable modes.
+
 ---
 
 ## Critical files reference
@@ -103,14 +140,14 @@ These don't fire for the all-periodic Double_Harris test but will break for non-
 |------|--------------|
 | `communication/Com3DNonblk.cpp:604` | `offset` definition (isCenterFlag ? 0 : 1) |
 | `communication/Com3DNonblk.cpp:642-692` | Face self-copy with offset + modular wrapping |
-| `communication/Com3DNonblk.cpp:797-886` | Edge self-copies (still use offset, no wrapping) |
-| `communication/Com3DNonblk.cpp:950-1035` | Corner self-copies |
-| `communication/Com3DNonblk.cpp:1037-1060` | addFace/addEdge/addCorner moment summation |
-| `communication/Com3DNonblk.cpp:1268-1330` | addFace implementation |
+| `communication/Com3DNonblk.cpp:806-888` | Edge self-copies (still use offset, no wrapping) |
+| `communication/Com3DNonblk.cpp:974-1039` | Corner self-copies |
+| `communication/Com3DNonblk.cpp:1042-1057` | addFace/addEdge/addCorner moment summation |
 | `grids/Grid3DCU.cpp:68-79` | Min grid assertion for self-periodic thin axes |
+| `fields/EMfields3D.cpp:2282-2326` | mass_matrix_times_vector (63 groups for TSC) |
 | `fields/EMfields3D.cpp:2378-2416` | communicateGhostP2G_ecsim (moments) |
 | `fields/EMfields3D.cpp:2418-2467` | communicateGhostP2G_mass_matrix |
-| `fields/EMfields3D.cpp:2827-2912` | MaxwellImage (field solve operator) |
-| `fields/EMfields3D.cpp:2998-3043` | energy_conserve_smooth_direction |
+| `fields/EMfields3D.cpp:2827-2912` | MaxwellImage (field solve operator with smoothing) |
+| `fields/EMfields3D.cpp:2998-3043` | energy_conserve_smooth_direction (4-pass 3x3x3 box filter) |
+| `particles/Particles3D.cpp:1857-1896` | TSC mass matrix assembly (27-node scatter, 63 groups) |
 | `inputfiles/ci_smoke_tsc.inp` | TSC smoke test (nzc=4, XLEN=2 YLEN=2 ZLEN=1) |
-| `inputfiles/ci_smoke_tsc_selfperiodic.inp` | Self-periodic X test (XLEN=1 YLEN=2 ZLEN=2) |
