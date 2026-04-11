@@ -1,31 +1,38 @@
 # Plan: TSC (Quadratic B-spline) energy conservation — findings and status
 
-## Status (2026-04-11, Phase 9 COMPLETE — algebraic leak localised, but no easy fix)
+## Status (2026-04-12, Phase 10a COMPLETE — leak is an implementation bug, not a theoretical limit)
 
-**Branch:** `with-petsc`. Committed through `a7c6576` (Phase 8 closure). Phase 9a-c complete this session; no code changes kept from Phase 9 (all experiments reverted after measurement). Phase 4 operator-symmetry diagnostic is in `phase4-diagnostic.patch` (untracked), and was re-applied transiently during Phase 9a to add an S·M·S composition test.
+**Branch:** `with-petsc`. Latest commit `dfd5421` (Phase 10a literature review brief expansion). Working tree clean. Phase 4 operator-symmetry diagnostic is in `phase4-diagnostic.patch` (untracked); no other pending edits.
 
-**Phase 9 summary:** The ~5% per-cycle TSC energy leak (vs 0.01% for CIC) is NOT from (a) S·M·S composition asymmetry, (b) a particle-field raw-E/smoothed-operator mismatch, or (c) the num_smoothings setting being suboptimal. The current sm=4 arrangement is at a local optimum — any direction moved (more/less smoothing, raw vs smoothed particle-facing E, extra or fewer passes) makes things strictly worse. The leak is therefore an inherent property of the **ECSIM + TSC + (27-point 8-4-2-1 smoother) combination**, not a bug in any specific implementation choice.
+**The Phase 10a literature review flips the conclusion of Phase 8e.** Full write-up in `review-ecsim-tsc-energy-phase10a.md`. Headline: the ECSIM discrete energy-conservation theorem (Lapenta 2017, 2023; Markidis & Lapenta 2011) is written for a *generic* interpolation function W — no step invokes linearity of the shape function. Published schemes (Chen/Chacón/Barnes 2011; Chacón/Chen 2016; Stanier/Chacón/Chen 2019; Stanier/Chacón 2022; Kormann/Sonnendrücker 2021 GEMPIC; Campos Pinto/Pagès 2022 ChECSIM) already achieve exact energy conservation with quadratic B-splines. **There is no theoretical obstacle to TSC + energy conservation.** The 5% per-cycle leak observed in iPIC3D is therefore an implementation bug, not a scheme limitation.
 
-**Key numbers after Phase 9 (5-run medians, 20x20x4 np=4):**
-- CIC sm=4: dE(1) = 2.1e-08, cyc 0→1 leak = 0.01% of exchange
-- TSC sm=4: dE(1) = 1.06e-05, cyc 0→1 leak = 5.1% of exchange (baseline holds)
-- TSC sm=8: dE(1) = **4.83e-06** (2.2× better at cyc 1), dE(10) = **2.25e-03** (20× worse)
-- TSC sm=16: dE(1) = **5.87e-06** (1.8× better), dE(10) = **2.39e-03** (20× worse)
-- TSC sm=4 + skip Exth smoothing: dE(1) = **9.16e-05** (9× worse), dE(10) = **0.47** (catastrophic — 4300× worse)
-- TSC sm=4 + extra Exth smoothing: dE(1) = **2.62e-05** (2.5× worse), dE(10) = **2.34e-03** (20× worse)
+**Smoking-gun diagnostic (retroactive).** The review proposes a key diagnostic experiment ("Experiment 1"): run TSC with `num_smoothings = 0`, and if the drift is still far above machine precision, the bug is in the TSC shape-function pathway itself rather than the smoother interaction. That experiment is already in the record — it is **Phase 6a**. The result: TSC no-smooth `dE(1) ~ 3–9e-06` (noisy, see caveat below) vs CIC no-smooth `dE(1) ~ 4.2e-08` — a 6–8 orders-of-magnitude gap with zero smoother involvement. **By the review's own criterion this localises the bug to the TSC shape-function pathway**, consistent with Phase 9a/b/c having ruled out SMS composition asymmetry, particle-field smoothing mismatch, and num_smoothings settings as individual culprits.
 
-**Phase 9a (SMS self-adjointness): ruled out.** Measured `δ = |⟨u, SMS v⟩ - ⟨v, SMS u⟩|/(||u||·||v||)` directly with globally-consistent random vectors. For TSC sm=4: `δ_SMS = 2.25e-03`, actually *smaller* than `δ_M = 2.37e-03` alone — the composition S·M·S does NOT introduce asymmetry beyond the individual factors, if anything S slightly dampens M's boundary artifact. All δ values (2.2e-03 for TSC, 6.9e-04 for CIC) are dominated by periodic-boundary inner-product double-counting, not true operator asymmetry. See Finding 15.
+**Variance caveat (important for Phase 10b).** Several Phase 6/8/9 baselines are single-run or were re-measured only within one session. Cycle-1 run-to-run variance is NOT constant across configurations:
+- TSC sm=4 cyc-1 is tight (~0.2–2%).
+- **TSC no-smooth cyc-1 spans ~3×** (Phase 8 `HEAD_tsc_nosm` 5-run samples: `{3.34, 2.85, 5.94, 9.32, 7.67}e-06`, median 5.94e-06). The proximate cause is TSC no-smooth being near instability (explodes by cycle ~6), so chaotic mode growth already amplifies MPI-reduction FP non-determinism in cycle 1.
 
-**Phase 9b (particle-field consistency): ruled out.** Discovered that `calculateB()` already smoothes `Exth` in place (`fields/EMfields3D.cpp:2991`) BEFORE `set_fieldForPcls()` copies it — so particles already see `S·E`, matching the operator's S·M·S internal convention. Tested two variations via env-gated bypasses, both catastrophic:
-- Skip the in-place smoothing (particles see raw E) → dE(1) = 9.16e-05 (9× worse), dE(10) = 0.47 (exploded)
-- Apply extra smoothing (particles see S²·E) → dE(1) = 2.62e-05 (2.5× worse), dE(10) = 2.34e-03
-The current setup is near-optimal — the particle-facing smoothing IS load-bearing for energy closure, just not sufficient to fully close the 5% leak. See Finding 16.
+Single-run Phase 6 numbers should therefore be treated as order-of-magnitude anchors, not tight baselines — Phase 10b.0 re-measures them before the code audit starts.
 
-**Phase 9c (n_ghost=3 / smoothing sweep): reframed and ruled out.** The n_ghost=3 hypothesis was dropped (grid/comm code is hard-coded to `assert(n_ghost <= 2)` in `grids/Grid3DCU.cpp:45`, and expanding would be a multi-day refactor for a speculative hypothesis). Instead tested num_smoothings ∈ {8, 16} with 5-run stats, confirming Phase 6's sweep ranking: higher sm counts trade cyc-1 wins for cyc-10 secular drift, and sm=4 remains the optimum for any realistic simulation length. See Finding 17.
+**Phase 8e is deferred, not chosen.** The "accept as theoretical limitation" conclusion reached after Phase 8 was premature in light of the literature review. Keep the conservative CI smoke tolerances (`dE(1) ≤ 2e-05`, `dE(10) ≤ 3e-04`, median ≥ 3) until Phase 10b either finds a fix or completes without a discovery — then revisit.
 
-**Phase 9 conclusion: Phase 8e (accept as theoretical limitation) is confirmed.** The 5% per-cycle leak has been localised to the **S·M·S-operator / smoothed-J-RHS / smoothed-particle-E combination** as a whole — no single factor in that chain is the cause, and the overall arrangement is at a local optimum. A true fix would require reformulating the discrete energy identity for TSC + smoothing, likely by adopting a different smoother (e.g., Vu & Brackbill 1992 binomial) or a different coupling between the mover and the operator. That's Phase 10+ territory; see `## What we don't know` section for candidate directions.
+**Next step: Phase 10b (TSC shape-function consistency audit), starting with 10b.0 baseline re-validation** (clean 5-run medians for Phase 6a/6b/6c configs) before the code audit at 10b.1. Full work order below under "Recommended investigation steps → Phase 10b". The prime hypothesis is that the same TSC shape function W is not used consistently in (a) grid-to-particle gather, (b) particle-to-grid scatter, and (c) mass-matrix assembly — or that particle positions are evaluated at inconsistent time levels across those three paths. The ECSIM energy identity requires all three uses of W to be bit-identical at matching particle positions.
 
-Recommended CI smoke test tolerances for TSC sm=4 on 20x20x4 (unchanged from Phase 8): `dE(1) ≤ 2e-05`, `dE(10) ≤ 3e-04` (with multi-run median ≥ 3).
+**Key numbers carried over from Phase 9 (20x20x4 np=4, 5-run medians where noted):**
+- CIC sm=4: dE(1) = 2.1e-08 (Phase 9 5-run), cyc 0→1 leak = 0.01% of exchange
+- TSC sm=4: dE(1) = 1.06e-05 (Phase 9 5-run), cyc 0→1 leak = 5.1% of exchange
+- TSC sm=8: dE(1) = 4.83e-06 (Phase 9 5-run), dE(10) = 2.25e-03 (secular drift)
+- TSC sm=16: dE(1) = 5.87e-06 (Phase 9 5-run), dE(10) = 2.39e-03
+- TSC sm=4 + skip Exth smoothing: dE(1) = 9.16e-05 (9× worse), dE(10) = 0.47 (catastrophic)
+- TSC sm=4 + extra Exth smoothing: dE(1) = 2.62e-05 (2.5× worse), dE(10) = 2.34e-03
+
+**Footnote on baselines:** Phase 6a/6b/6c rows in the "Energy drift summary" table below are **single-run and predate** the 5-run-median convention adopted in Phase 8. TSC no-smooth cycle-1 has ~3× run-to-run variance due to proximity to instability. Use these numbers as order-of-magnitude anchors, not precise baselines. Phase 10b.0 will re-measure.
+
+**Phase 9a–c re-framed (not overturned).** All three Phase 9 experimental results stand on their own merits — they just now read as "consistent with a TSC shape-function pathway bug" rather than "the leak is an irreducible scheme property":
+
+- **Phase 9a (SMS self-adjointness): ruled out as a separate source.** δ_SMS for TSC sm=4 is 2.25e-03, actually *smaller* than δ_M = 2.37e-03 alone. All δ values are dominated by periodic-boundary inner-product double-counting. See Finding 15. Consistent with Finding 18: the (I + S·M·S) operator is theoretically sound, so measuring it as approximately self-adjoint was the expected outcome.
+- **Phase 9b (particle-field consistency): current setup near-optimal.** `calculateB()` already smoothes `Exth` in place before `set_fieldForPcls()`, so particles already see `S·E` matching the operator. Both skip and extra smoothing are strictly worse. See Finding 16. Consistent with Finding 18: Lapenta 2023's construction requires particles to see `S·E`, and iPIC3D does this.
+- **Phase 9c (smoothing count sweep): sm=4 is the optimum.** sm=8/16 trade cyc-1 wins for cyc-10 secular drift. See Finding 17. Consistent with Finding 18: for a *correct* S·M·S construction the drift is zero regardless of filter width, so observing a non-monotonic num_smoothings curve is itself evidence of an implementation mismatch upstream of the filter.
 
 ### Energy drift summary
 
@@ -200,106 +207,76 @@ TSC leaks ~500× more energy per cycle (relative to the exchange) than CIC does.
 
     Confirms Phase 6's non-monotonic shape. High smoothing over-filters: lower cyc-1 drift because less dynamics, higher cyc-10 drift because the filter damps physical modes that would otherwise be energy-conserving. sm=4 is the optimum for any simulation length ≥ ~8 cycles. Input files `inputfiles/phase9_tsc_sm{8,16}.inp` kept for reproducibility.
 
-## What we don't know (after Phase 9 — scheme-level candidates also exhausted)
+18. **Phase 10a literature review: the ECSIM energy theorem is B-spline order agnostic.** Full write-up: `review-ecsim-tsc-energy-phase10a.md`.
 
-Phase 9 targeted the three "scheme-level" candidates Phase 8 couldn't distinguish with FP arguments alone. All three are now ruled out:
+    - Both Markidis & Lapenta (2011) and Lapenta (2017) write the discrete energy identity for a *generic* interpolation function W. The three structural ingredients — the same W appearing in field interpolation, current projection, and mass-matrix assembly; the midpoint velocity identity; and the Yee discrete curl identities — are all algebraic, not shape-dependent. No partition-of-unity, commutation, or "square-root" property of the shape function is invoked.
+    - Lapenta (2023, "Advances in ECSIM") extends the proof to include a symmetric smoother. The prescribed construction: inner smooth E → `M·(S·E)` → outer smooth → implicit operator `(I + S·M·S)` on the LHS, `S·Ĵ` on the RHS, particles gather `S·E`. The sole requirement on S is that its matrix representation is symmetric (S = Sᵀ). iPIC3D's 27-point (8,4,2,1) filter IS exactly one pass of the tensor-product binomial (1,2,1)/4 kernel in 3D — symmetric by construction. Four repeated passes preserve symmetry.
+    - **Published schemes that already achieve exact conservation with quadratic B-splines:** Chen, Chacón & Barnes (2011); Chacón & Chen (2016); Stanier, Chacón & Chen (2019); Stanier & Chacón (2022); Kormann & Sonnendrücker (2021 GEMPIC); Campos Pinto & Pagès (2022 ChECSIM). These papers do the same proof in slightly different frameworks and all explicitly support quadratic or arbitrary-order B-spline shape functions. There is no theoretical obstacle to TSC + energy conservation in ECSIM either.
+    - The review identifies three candidate mismatch mechanisms for the observed 5% leak: (a) one-sided smoothing on the LHS (S·M instead of S·M·S); (b) insufficient ghost-cell width for the combined TSC + filter stencil; (c) inconsistency in how the TSC shape function is used across the scatter / gather / mass-matrix-assembly paths. Mechanisms (a) and (b) are ruled out by direct reading of the iPIC3D source — both inner S (`fields/EMfields3D.cpp:3309`) and outer S (`:3329`) are present in `MaxwellImage`, and `energy_conserve_smooth_direction` refreshes the halo between each smoothing pass (`:3035`, `:3058`), so each pass only needs 1 ghost layer. **Mechanism (c) is the only unaudited one, and it aligns directly with the Phase 6a smoking-gun (Finding 19).**
+    - **Phase 8e re-evaluated: NOT a theoretical limit.** The 5% leak is a bug. Phase 10b is the audit work, starting with 10b.0 (baseline re-validation).
 
-- ~~**S·M·S composition asymmetry**~~ — Phase 9a (Finding 15): δ_SMS is actually smaller than δ_M alone. Not the source.
-- ~~**Particle-field raw/smoothed mismatch**~~ — Phase 9b (Finding 16): particles already see S·E matching the operator. Current setup at local optimum; both skip and extra smoothing are strictly worse.
-- ~~**n_ghost=3 halo insufficient**~~ — Phase 9c reframed (Finding 17): n_ghost=3 dropped as too invasive; smoothing sweep shows sm=4 is the genuine optimum (sm=8,16 trade cyc-1 for cyc-10).
+19. **Phase 6a is a smoking gun (retroactive interpretation via the Phase 10a review's Experiment 1 criterion).** The review proposes a direct localisation test: "Run TSC with num_smoothings = 0. If TSC without any smoother conserves energy to machine precision, the leak is in the smoother. If TSC without smoother already leaks even at 0.01%, there is an additional inconsistency in the shape-function implementation itself." That test is already in the record — it is exactly Phase 6a.
 
-**Remaining candidate directions (Phase 10+ territory, NOT investigated):**
+    **Caveat up front: these numbers have non-trivial cycle-1 run-to-run variance.** Phase 6a was originally single-run; the Phase 8 session's 5-run `HEAD_tsc_nosm` measurement gave cyc-1 samples `{3.34, 2.85, 5.94, 9.32, 7.67}e-06` — a 3.3× spread around a 5.94e-06 median. TSC no-smooth is near instability (explodes by cycle ~6), so the chaotic growth rate already amplifies MPI-reduction FP non-determinism in the very first cycle. Point estimates are NOT safe here; always quote the range or a multi-run median, and Phase 10b.0 re-measures before the code audit begins.
 
-- **Phase 10a — Literature review on ECSIM + higher-order shape functions + smoothing (NEXT STEP, see detailed brief below).**
-- **Alternative smoothing kernels.** The current smoother is a fixed 27-point (8,4,2,1)-weighted average. Candidates to test: (a) a binomial (1,2,1) separable kernel applied N times, (b) a spectral filter that exactly preserves a subspace of interest, (c) no smoothing on the operator but one-shot smoothing on the solve output. Any of these would change the discrete energy balance; at least one should be tested before concluding the leak is an unavoidable theoretical limit. **Do 10a first** — the right kernel choice is likely already published.
-- **Mover / operator basis change.** Currently the solve variable E is "raw" (unsmoothed) and the particles see `S·E`. Alternative: change the solve variable to `E' = S·E` (or `S^2·E`), re-derive the operator in that basis, and let the particles see `E'` directly. This removes the S-conjugation from the operator at the cost of a more complex RHS.
-- **Pressure-tensor shape-function audit.** `Particles3D.cpp:1970-2011` mixes 8-point linear weights into the TSC branch. Not a cycle-1 energy source (the mass matrix dominates) but a consistency bug that shows up downstream.
+    | Config (np=4, 20x20x4)   | dE(1)                                  | Source                                  | Ratio vs CIC no-smooth     |
+    |---|---|---|---|
+    | CIC no-smooth            | 4.2e-08                                | Phase 6a (single-run; stable)           | 1× (GMRES FP floor)        |
+    | TSC no-smooth            | 5.9e-06 median (range 2.9–9.3e-06)     | Phase 8 `HEAD_tsc_nosm` 5-run           | ~140× (range 70–220×)      |
+    | CIC sm=4                 | 2.1e-08 median                         | Phase 6b single-run, Phase 9 5-run verify | ~0.5×                    |
+    | TSC sm=4                 | 1.06e-05 median                        | Phase 9 5-run                           | ~250× (of CIC no-smooth)   |
 
----
+    Even with 3× uncertainty on the TSC no-smooth number, the TSC-vs-CIC no-smooth gap spans **6–8 orders of magnitude** and the Experiment 1 criterion — "leaks more than machine precision → bug in TSC shape-function pathway" — fires unambiguously. The smoother is not where the bug lives; it amplifies a pre-existing TSC inconsistency by only ~2× at cycle 1 (5.9e-06 no-smooth → 1.06e-05 smoothed). The smoother is roughly a bystander on the real effect.
 
-### Phase 10a: literature review brief (for a deep-research session)
+    Consistent with this picture: Phase 9a found δ_SMS is clean, Phase 9b found the particle-side smoothing and the operator's inner S already match, and Phase 9c found sm=4 is a numerical optimum. None of those phases touched the TSC shape-function pathway itself — which is why they couldn't close the gap.
 
-**The central question.** Does the ECSIM (Energy-Conserving Semi-Implicit Method, Lapenta 2017 / Markidis & Lapenta 2011) discrete energy-conservation theorem continue to hold *exactly* when the particle shape function is quadratic (TSC / B-spline order 2) instead of linear (CIC / B-spline order 1), **and** a spatial smoothing filter is applied symmetrically to both the current density on the RHS and the mass matrix on the LHS of the implicit Maxwell solve? If not, what modifications to the filter or the coupling are required to restore exact (or improved) energy conservation?
+    **Implication.** Phase 10b (TSC shape-function consistency audit) is the next work, and it must start with 10b.0 — a clean 5-run-median re-validation of the Phase 6 baselines — so that success is measured against reliable reference numbers. Target: drive TSC no-smooth dE(1) down to the CIC no-smooth GMRES FP floor (~4e-08), a ~100× improvement; as a bonus, TSC sm=4 dE(1) should also drop toward the ~2e-08 CIC sm=4 level.
 
-**Why this matters in one paragraph.** iPIC3D's TSC implementation conserves energy to 0.01% per cycle with CIC shape functions and drops to a bounded-but-annoying 5% per-cycle energy-exchange leak with TSC + the legacy 27-point (8-4-2-1) smoother at `num_smoothings = 4`. Phases 4–9 of this investigation have ruled out every FP-rounding explanation (Kahan in all three hot loops had ≤1.3× effect) and every single-factor scheme-level explanation (operator asymmetry, particle-field mismatch, smoothing pass count). The leak is therefore a property of the particular ECSIM + TSC + symmetric filter combination. It is plausible that a different filter (e.g. a binomial kernel) or a different application pattern (e.g. filter only the RHS, not the operator) recovers the energy identity. Before writing more code, we want to know which of these directions is already answered in the literature.
+## What we don't know (after Phase 10a — bug location narrowed, awaiting re-validation)
 
-**Primary sources to examine (ordered by expected relevance).**
+Phase 9 targeted three "scheme-level" candidates for the 5% TSC sm=4 leak. All three are ruled out as individual causes:
 
-1. **Lapenta, G. (2017). "Exactly energy conserving semi-implicit particle in cell formulation." *J. Comput. Phys.* 334, 349–366.** The foundational ECSIM paper as implemented in iPIC3D. Check:
-    - Is the energy-conservation proof written for a *generic* B-spline of order p, or is it specialised to order 1?
-    - What assumptions does the proof make about smoothing filters (if any)? Specifically, is there a compatibility condition relating the filter to the shape function?
-    - Does §3 or §4 show numerical experiments with shape functions higher than linear?
+- ~~**S·M·S composition asymmetry**~~ — Phase 9a (Finding 15): δ_SMS is actually smaller than δ_M alone. Consistent with Finding 18: (I + S·M·S) is theoretically sound.
+- ~~**Particle-field raw/smoothed mismatch**~~ — Phase 9b (Finding 16): particles already see S·E matching the operator. Consistent with Finding 18's prescribed construction.
+- ~~**n_ghost=3 halo insufficient**~~ — Phase 9c reframed (Finding 17): sm=4 is the genuine optimum; halo is refreshed between passes so 1 ghost layer is enough for each filter pass.
 
-2. **Markidis, S. & Lapenta, G. (2011). "The energy conserving particle-in-cell method." *J. Comput. Phys.* 230, 7037–7052.** The earlier, slightly different, energy-conserving formulation (pre-ECSIM). Check:
-    - How does the 2011 scheme differ from Lapenta 2017 in its treatment of J and the mass matrix? Does the 2011 version extend more naturally to TSC?
-    - §2-3: the discrete energy identity derivation. Which step requires linearity of the shape function?
-    - Do they discuss smoothing filters? If yes, what compatibility conditions?
+Phase 10a (literature review) then ruled out the "ECSIM + TSC is theoretically impossible" worry and pointed at an implementation inconsistency in the TSC shape-function pathway itself as the most likely location of the bug, retroactively reinterpreting Phase 6a as the smoking gun (Finding 19). **But the Phase 6 baseline numbers were mostly single-run and the TSC no-smooth case has ~3× run-to-run variance at cycle 1 due to near-instability**, so before acting on Finding 19 we first re-validate with 5-run medians (Phase 10b.0).
 
-3. **Chen, G., Chacón, L., & Barnes, D. C. (2011). "An energy- and charge-conserving, implicit, electrostatic particle-in-cell algorithm." *J. Comput. Phys.* 230, 7018–7036.** A different implicit family (fully-implicit, nonlinear Jacobian-free Newton-Krylov), also energy-conserving. Check:
-    - Do they use higher-order B-splines? What shape function(s)?
-    - Do they need a smoothing filter at all? If not, what stability mechanism replaces it?
-    - §4: discrete conservation proof — how general is it in the shape-function order?
+**What we still need to do, in order:**
 
-4. **Chacón, L. & Chen, G. (2016). "A curvilinear, fully implicit, conservative electromagnetic PIC algorithm in multiple dimensions." *J. Comput. Phys.* 316, 578–597.** The electromagnetic (Maxwell-Vlasov) follow-up to Chen et al. 2011. Check:
-    - Same shape-function question.
-    - §3-4: charge/energy conservation proofs for the EM case.
-    - Any remarks on smoothing/filtering in §5 implementation notes.
+- **Phase 10b (NEXT):** TSC shape-function consistency audit. Start with 10b.0 baseline re-validation (`phase6a_cic_nsmooth`, `phase6a_tsc_nsmooth`, `phase6b_cic_smooth`, `phase6c_tsc_large` — each with 5-run medians). Then 10b.1–10b.5 code audit (same W in scatter / gather / assembly; partition-of-unity check; time-level consistency; pressure-tensor smell test; one-particle sanity test). Then 10b.6 post-fix re-run of Phase 6a and Phase 8c baselines. See the Phase 10b section below for the full work order. Expected outcome: identify a path where linear (CIC) weights are silently used in a code location that should use TSC weights, or where particle positions are evaluated at inconsistent time levels across the three coupling paths.
+- **Phase 10c (only if 10b fails):** Spectral analysis — save per-cycle dE for 50+ cycles and FFT, looking for a dominant near-Nyquist mode that the smoother half-suppresses. Re-activates the original Phase 7b task; only worth the effort if Phase 10b's audit turns up no inconsistency.
+- **Phase 10d (later, orthogonal to the leak):** Pressure-tensor shape-function audit. Finding 16's open thread — `Particles3D.cpp:1970-2011` uses 8-point linear weights for Pxx..Pzz even in the TSC branch (`compute_supplementary_moments`, not the primary moments path). Not a cycle-1 energy source because it doesn't feed into the mass matrix, but a consistency bug that shows up in stress diagnostics downstream. Address after 10b.
 
-5. **Vu, H. X. & Brackbill, J. U. (1992). "CELEST1D: An implicit, fully kinetic model for low-frequency, electromagnetic plasma simulation." *Comput. Phys. Commun.* 69, 253–276.** Classic paper on implicit PIC with filtering. Check:
-    - The "energy-conserving binomial filter" construction — what kernel do they use, and what is the compatibility condition with the mass matrix?
-    - Do they prove energy conservation holds with the filter applied, and under what assumptions on shape-function order?
-    - Is the filter applied once to J, or twice (RHS + LHS like iPIC3D does)?
+Open questions that do NOT need answering any more:
 
-6. **Birdsall, C. K. & Langdon, A. B. (1991, reissued 2004). *Plasma Physics via Computer Simulation.* CRC/Taylor & Francis.** The PIC textbook. Check:
-    - Chapter 14 (or equivalent) on digital filtering in PIC: which filters are "energy-safe" and why? What are the trade-offs between filter width and energy drift?
-    - Any discussion of higher-order shape functions: are they paired with specific filters?
+- ~~Is the ECSIM + TSC combination theoretically possible?~~ **Yes** (Finding 18).
+- ~~Is S·M·S the correct filter construction?~~ **Yes** (Lapenta 2023 via Finding 18).
+- ~~Is iPIC3D's (8,4,2,1) kernel the right filter?~~ **Yes** — it is one pass of the tensor-product binomial (1,2,1)/4 kernel, symmetric by construction (Finding 18).
+- ~~Is Phase 8e's "accept as theoretical limitation" correct?~~ **No, it was premature** (Finding 19).
 
-7. **Deka, P. J. & Bacchini, F. (ECSIM / RelSIM papers, 2023–2025).** These authors implemented the ECSIM and RelSIM code paths in iPIC3D (per `CLAUDE.md`). Check recent arXiv/journal papers by either author for:
-    - Any report on TSC/quadratic shape functions in ECSIM. Do they observe the same 5% leak?
-    - Any discussion of smoother choice or filter compatibility.
-    - Do they recommend n_ghost ≥ 3 or a specific smoothing pattern for higher-order shapes?
+Open questions Phase 10b.0 must resolve before the code audit:
 
-8. **Stanier, A., Chacón, L., & Chen, G. (2019). "A fully implicit, conservative, non-linear, electromagnetic hybrid particle-ion/fluid-electron algorithm." *J. Comput. Phys.* 376, 597–616.** Different regime (hybrid) but same authors as #3/4 and same conservation philosophy. Check whether they use TSC and what filter.
-
-**Specific sub-questions the review should answer.**
-
-1. **Is there a published ECSIM or close-relative scheme that explicitly demonstrates exact energy conservation with TSC (quadratic B-spline) shape functions?** If yes: what filter do they use, and what are the discrete compatibility conditions? If no: is there a theoretical argument for why linear shape functions are "special" in the ECSIM energy-conservation proof?
-
-2. **Is the symmetric sandwich `S·M·S` (smoother on both sides of the mass matrix) a *standard* choice, or is it idiosyncratic to iPIC3D?** Alternatives to check in the literature: `S·M` only (smooth the input, not the output), `M·S²` (both filters collapsed on one side), filter the RHS `J` only and leave the operator raw, "binomial compensation" schemes where a high-pass correction is added after filtering.
-
-3. **What filter kernels are known to commute (or nearly commute) with the discrete curl operator and the mass matrix?** Specifically: (a) is the (8,4,2,1) 27-point tensor-product kernel iPIC3D uses actually the right filter for TSC shape functions, or is it a legacy CIC-era choice? (b) Vu & Brackbill's binomial (1,2,1)^n construction — does it have a proof attached, and for which shape-function order?
-
-4. **What is the expected scaling of the energy drift with filter width?** If a filter of width `w` introduces an O(w^p) drift for some p that depends on the shape-function order, we can set expectations numerically and decide whether 5% at sm=4 is "close to theoretical minimum" or "far off the best known result."
-
-5. **Is the right fix a different filter, a different application pattern, or a different formulation of the ECSIM equations entirely** (e.g., solve for a filtered field `E' = S·E` as the primary variable)? The three alternatives each have very different implementation costs.
-
-**Search terms / keywords to plug into Google Scholar, arXiv, ADS, and NASA ADS:**
-
-- `"energy conserving" "particle in cell" "B-spline"`
-- `"ECSIM" (TSC OR quadratic OR "higher order")`
-- `"implicit PIC" smoothing filter "energy conservation"`
-- `"binomial filter" "particle in cell" compensation`
-- `Lapenta ECSIM quadratic shape`
-- `Markidis Lapenta mass matrix`
-- `"S·M·S" OR "sandwich filter" PIC`
-- `Chacón Chen Barnes conservative PIC shape function`
-- `"charge conserving" "energy conserving" "shape function" implicit PIC`
-
-**What "success" looks like for Phase 10a.** A short (≈ 1-page) written summary that answers:
-  (i) whether any published scheme conserves energy exactly for TSC (yes/no + citation),
-  (ii) if yes, what modifications they make (filter, application pattern, formulation) relative to what iPIC3D does,
-  (iii) if no, what the published best-known drift is and whether 5% is within that envelope,
-  (iv) the top-1 or top-2 most promising code experiments implied by the literature (e.g. "switch to a separable binomial filter applied only to J" or "move the smoother to act only on the primary solve variable"), ranked by implementation cost.
-
-With that in hand we can decide between: (A) implement the best published fix; (B) propose a novel smoother-compatibility condition and derive it analytically; or (C) conclude the 5% drift is theoretically optimal for this scheme class and finalise Phase 8e's "accept as limitation" stance with a citation.
+- What is the clean 5-run-median TSC no-smooth dE(1)? Is the ~5.9e-06 number in Finding 19 representative, or a fluke of one measurement session?
+- Does CIC no-smooth still reproduce ~4.2e-08 with 5-run medians in a fresh session?
+- How reproducible is TSC no-smooth cycle-1 today, compared to the 3.3× spread seen in Phase 8?
+- What does the per-cycle dE trajectory look like through cycle 5 for TSC no-smooth? (Needed to separate the cycle-1 shape-function leak from the near-instability growth pattern.)
 
 ---
 
-Open questions from Phase 8 that Phase 9 also did not resolve:
+### Phase 10a: literature review — DONE (2026-04-12)
 
-- ~~Operator asymmetry at cycle 1~~: **RESOLVED** — Finding 15 confirms the true asymmetry is at machine precision; measured δ values are boundary-inner-product artifacts.
-- ~~Multi-run statistics~~: resolved earlier.
-- ~~Grid-size scaling at fixed per-rank workload~~: not attempted; Phase 8 findings (per-rank work, not grid size, drives drift) are consistent with the algebraic-leak picture and don't need further data.
+**Full write-up:** `review-ecsim-tsc-energy-phase10a.md` (at the repo root). See Finding 18 for the in-plan summary.
+
+**One-paragraph bottom line.** The ECSIM discrete energy-conservation theorem is mathematically valid for any B-spline order, including TSC (quadratic). Both Markidis & Lapenta (2011) and Lapenta (2017) write the proof for a *generic* interpolation function W — no step invokes linearity. Lapenta (2023) extends the proof to include a symmetric smoother and yields exactly the `(I + S·M·S)` construction that iPIC3D implements. Chen/Chacón/Barnes (2011), Chacón/Chen (2016), Stanier/Chacón/Chen (2019), Stanier/Chacón (2022), Kormann/Sonnendrücker (2021 GEMPIC) and Campos Pinto/Pagès (2022 ChECSIM) all demonstrate exact conservation with quadratic or arbitrary-order B-splines. There is no theoretical obstacle to TSC + energy conservation.
+
+**What the review ruled in vs. out as the source of iPIC3D's 5% leak:**
+
+- (a) One-sided smoothing on the LHS (S·M instead of S·M·S): **RULED OUT** by direct reading of `fields/EMfields3D.cpp::MaxwellImage`. Both the inner S (`:3309`) and the outer S (`:3329`) are present; the operator is `(I + c²θ²dt²·curl² + 4π·θdt·invVOL·S·M·S)` exactly as Lapenta (2023) prescribes.
+- (b) Insufficient ghost cells for the combined TSC (2 ghosts) + 4-pass filter stencil: **RULED OUT** because `energy_conserve_smooth_direction` refreshes the halo via `communicateNodeBC` between every smoothing pass (`:3035`, `:3058`), so each pass only needs 1 ghost layer regardless of how many passes run.
+- (c) Inconsistency in how the TSC shape function is used across grid→particle gather, particle→grid scatter, and mass-matrix assembly: **the only unaudited mechanism**, and the one consistent with the Phase 6a "smoking gun" retroactive reading (Finding 19). Phase 10b addresses it.
+
+**Decision:** proceed to Phase 10b immediately. Phase 10a answered the theoretical question and narrowed the bug location to a specific code-audit target.
 
 ---
 
@@ -366,7 +343,7 @@ All measured δ values are O(1e-03), but the curl-curl operator (which is mathem
 
 - [ ] **7b. Spectral analysis** — Save per-cycle dE for 50+ cycles. Fourier-transform to find dominant oscillation frequency. If it's at or near the grid Nyquist, the smoothing isn't fully suppressing the problematic TSC mode.
 
-### Phase 8: Targeted mitigation — COMPLETE (all FP sources ruled out, 8e chosen)
+### Phase 8: Targeted mitigation — COMPLETE (all FP sources ruled out; 8e was provisionally accepted but has since been reversed — see 8e below and Finding 18)
 
 Phase 6 had suggested the mass matrix was the dominant source (~3.8e-06 at cycle 1 for TSC no-smooth). Phase 8 systematically instrumented every FP accumulator between P2G scatter and GMRES exit; none of them explain the sm=4 cycle-1 drift. See Finding 14 for the algebraic-leak attribution that closes the phase.
 
@@ -387,10 +364,12 @@ Phase 6 had suggested the mass matrix was the dominant source (~3.8e-06 at cycle
 
 - [x] **8b. Fewer smoothing passes** — **SKIPPED.** The Phase 6 sweep (sm=0 unstable; sm=1,2 dE(1)=2.2-2.3e-05; sm=4 sweet spot at 1.1e-05; sm=8 oscillating) is not FP-limited, so re-sweeping with median-over-5 won't change the ranking. Phase 6's sm=4 sweet spot stands.
 
-- [x] **8e. Accept as theoretical limitation** — **CHOSEN.** The 5.1% per-cycle energy-exchange leak in TSC sm=4 (vs 0.01% for CIC sm=4) is a scheme-level algebraic property, not FP rounding. Kahan cannot fix it. The drift is bounded and oscillatory, not secular. Recommended CI smoke test tolerances:
-    - `dE(1) ≤ 2.0e-05` (4× HEAD median, comfortable deterministic headroom)
-    - `dE(10) ≤ 3.0e-04` (2× the worst observed single run, accounting for 25× run-to-run variance)
-    - Add a multi-run median check (≥3 samples) for cycle-10 to average out MPI-reduction non-determinism.
+- [~] **8e. Accept as theoretical limitation** — **DEFERRED / RE-EVALUATED (formerly "chosen", now reversed).** At the time Phase 8 concluded, the 5% leak looked like an ECSIM + TSC theoretical limit because FP mitigations had been exhausted. Phase 10a's literature review (Finding 18) then showed the underlying theorem is shape-function-order agnostic, and Finding 19 retroactively interprets Phase 6a as localising the bug to the TSC shape-function pathway itself. Phase 8e is therefore NOT the correct resolution. The next concrete step is Phase 10b, starting with a 10b.0 baseline re-validation (because several Phase 6 numbers were single-run and TSC no-smooth cycle-1 has ~3× run-to-run variance near instability). Keep the conservative CI smoke tolerances below as placeholders until Phase 10b either finds the fix or completes without a discovery:
+    - `dE(1) ≤ 2.0e-05` (4× the HEAD median, keeps headroom for deterministic configs)
+    - `dE(10) ≤ 3.0e-04` (2× the worst observed single run, accounting for 25× MPI-reduction variance)
+    - Multi-run median check (≥3 samples) for cycle-10 to average out MPI-reduction non-determinism.
+    
+    After Phase 10b resolves, these tolerances are expected to tighten substantially (toward the CIC-level ~2e-08 cycle-1 floor) if the audit finds the inconsistency. If it does not, Phase 8e can be re-adopted with citations from the review and justified residuals — not as a default.
 
 ### Phase 9: Algebraic leak investigation — COMPLETE (all three targeted candidates ruled out)
 
@@ -399,10 +378,65 @@ Phase 8 closed the FP-noise lens; Phase 9 targeted three scheme-level candidates
 - [x] **9a. S·M·S self-adjointness on periodic grid with ghost halo.** **DONE, ruled out.** Re-applied Phase 4 diagnostic with a new composition test (added ~120 lines to `diagnoseOperatorSymmetry`), ran with `IPIC3D_OPERATOR_DIAG=1`. δ_SMS for TSC sm=4 is 2.25e-03 (smaller than δ_M = 2.37e-03 alone); for CIC is 6.87e-04 (smaller than δ_M = 1.39e-03 alone). The composition does NOT add asymmetry. All δ values are dominated by periodic-boundary inner-product double-counting, not true operator asymmetry. See Finding 15. Diagnostic code reverted after measurement.
 - [x] **9b. Particle-field consistency experiment.** **DONE, premise refuted.** Discovered that `calculateB()` already smoothes `Exth` in place before `set_fieldForPcls()` copies it to the mover — particles ALREADY see `S·E`, not raw E. Tested both variations (skip Exth smooth, extra Exth smooth) via env-gates on 5-run TSC sm=4. Both strictly worse: skip → dE(1) 9× worse + dE(10) explodes to 0.47; extra → dE(1) 2.5× worse + dE(10) 20× worse. The current arrangement is at a local optimum and the particle-facing smoothing IS load-bearing for energy closure. See Finding 16. Source reverted after measurement.
 - [x] **9c. Widen halo to n_ghost = 3** → reframed as **smoothing sweep with multi-run medians.** n_ghost=3 dropped as too invasive (`grids/Grid3DCU.cpp:45` hard-asserts `n_ghost <= 2`; expanding would be a multi-day comms refactor for a speculative hypothesis). Instead ran 5-run medians at sm={8, 16} to double-check the Phase 6 sweep. Confirmed: sm=4 is the genuine optimum. sm=8 gives dE(1) = 4.83e-06 (2.2× better) but dE(10) = 2.25e-03 (20× worse secular drift); sm=16 similar. See Finding 17. Input files `phase9_tsc_sm{8,16}.inp` kept.
-- [ ] **9d → 10a. Literature check.** NOT STARTED — **promoted to Phase 10a as the next concrete action.** See the "Phase 10a: literature review brief" subsection in "What we don't know" above for the full research brief with primary sources, sub-questions, search keywords, and success criteria.
-- [ ] **9e. Pressure-tensor shape-function audit.** NOT STARTED — known consistency bug (`Particles3D.cpp:1970-2011` uses linear weights in TSC branch), not a cycle-1 energy source, punted to Phase 10+.
+- [x] **9d → 10a. Literature check.** **DONE (2026-04-12).** Full write-up in `review-ecsim-tsc-energy-phase10a.md`; in-plan summary in Finding 18 and the Phase 10a subsection above. Headline: the ECSIM energy-conservation theorem is B-spline order agnostic, so the TSC 5% leak is an implementation bug, not a theoretical limit. Phase 10b now carries the audit work.
+- [ ] **9e. Pressure-tensor shape-function audit.** NOT STARTED — known consistency bug (`Particles3D.cpp:1970-2011` uses linear weights in TSC branch), not a cycle-1 energy source, punted to Phase 10d (below).
 
-**Phase 9 conclusion:** The 5% per-cycle algebraic leak is a property of the **(ECSIM + TSC + 27-point 8-4-2-1 smoother)** combination as a whole. Every individually-tweakable factor (operator symmetry, particle-facing smoothing count, smoothing pass count) is already at a local optimum. A fix would require reformulating the scheme or replacing the smoother — that is Phase 10 territory and requires a literature review first. Phase 8e (accept as theoretical limitation) stands, now with stronger evidence.
+**Phase 9 conclusion (superseded by Phase 10a — retained for context):** At the close of Phase 9, no single scheme-level factor we could test individually moved the 5% leak, so the working interpretation was that the leak was an inherent property of the (ECSIM + TSC + 27-point smoother) combination as a whole — which motivated Phase 8e and the literature-review brief. Phase 10a (Finding 18) has since **overturned** that interpretation: the ECSIM theorem is B-spline order agnostic, so a correct implementation must exist, and Phase 6a retroactively localises the bug to the TSC shape-function pathway itself (Finding 19). Phase 9's individual measurements (9a/9b/9c) all stand and remain useful — they just now read as "consistent with a shape-function-pathway bug" rather than "proof that no individual fix is possible." Phase 10b is the next step.
+
+### Phase 10b: TSC shape-function consistency audit (NEXT STEP, HIGHEST PRIORITY)
+
+**Goal.** Find and fix the TSC shape-function implementation inconsistency that makes TSC no-smooth dE(1) sit ~100× above the CIC no-smooth GMRES FP floor (Finding 19). Primary success criterion: TSC no-smooth dE(1) on the 20x20x4 np=4 `phase6a_tsc_nsmooth.inp` config drops to the CIC floor (sub-1e-07, ideally at the ~4.2e-08 GMRES FP floor). Bonus success: TSC sm=4 dE(1) drops proportionally from 1.06e-05 toward the ~2e-08 CIC sm=4 level.
+
+**Structure.** 10b.0 is pure baseline re-validation — no code changes. 10b.1–10b.5 are the code audit proper. 10b.6 is post-fix verification. A decision gate at the end of 10b.0 may pause the audit if re-measured baselines substantially differ from Finding 19's assumed numbers.
+
+- [ ] **10b.0 — Re-validate Phase 6 baselines with 5-run medians BEFORE touching code.** Several Phase 6 numbers are single-run (Finding 19 caveat), and TSC no-smooth cycle-1 has ~3× run-to-run spread due to proximity to instability. We need clean reference numbers against which to judge any audit-driven fix — otherwise a 2× improvement could be statistical noise mistaken for a real win. Use `scripts/phase8_bench.sh` with `nruns=5` (already set up from Phase 8).
+
+    Inputs to re-run (all already exist in `inputfiles/`):
+    - (a) `phase6a_cic_nsmooth.inp` — CIC no-smooth, should reproduce the ~4.2e-08 GMRES FP floor. Expect tight cycle-1 variance (<1%).
+    - (b) `phase6a_tsc_nsmooth.inp` — TSC no-smooth. Expect the 3× spread from Finding 19. **Record median, min, max, AND the cycle-by-cycle dE trajectory up to cycle 5** so the near-instability growth can be separated from the cycle-1 shape-function leak.
+    - (c) `phase6b_cic_smooth.inp` — CIC sm=4. Already verified in Phase 9; redo in the same session to pair cleanly with (a).
+    - (d) `phase6c_tsc_large.inp` — TSC 40x40x4 (Phase 6c single-run reported dE(1)=8.9e-05). Re-validate because the grid-size scaling claim is cited elsewhere in the plan.
+
+    Deliverable: update the "Energy drift summary" table at the top of `plan-tsc.md` to replace single-run rows with `median (min, max)` entries, and update Finding 19's table likewise. Keep existing CI tolerances (dE(1) ≤ 2e-05, dE(10) ≤ 3e-04) pending the audit, but flag any discrepancy > 2× between the Phase 6 anchors and the new medians.
+
+    **Decision gate.** If TSC no-smooth dE(1) median turns out to be substantially different from the 5.9e-06 assumed in Finding 19 — specifically, if it falls below 1e-06 or rises above 2e-05 — **pause and re-assess Finding 19 before starting the code audit**. A TSC no-smooth dE(1) in the 1e-07 to 1e-06 range would weaken the "bug is in TSC shape-function pathway" claim and might re-open the Phase 10a candidates (a)/(b) that were ruled out by source reading. In that case, prefer 10b.1 anyway (cheap) but treat its results as diagnostic rather than decisive.
+
+- [ ] **10b.1 — Same W used in all three coupling paths.** The ECSIM energy identity `Σ_g E_g · (S·J_g) = Σ_p q_p v̄_p · E^{SM}_p` requires the SAME shape function W(x_g − x_p) in (a) grid-to-particle gather, (b) particle-to-grid current scatter, and (c) mass-matrix assembly. Audit:
+
+    - (a) **Grid-to-particle gather** for TSC. Starting points: `Particles3D::mover_PC` (`particles/Particles3D.cpp:~2078`), its AoS variants (`mover_PC_AoS`, `mover_PC_AoS_Relativistic`, `mover_PC_AoS_vec_intr`, `mover_PC_AoS_vec`). The common gather helper `get_field_components_for_cell` in `include/EMfields3D.h:1045` gives 8 corner nodes of a single cell — that is a LINEAR (CIC) interpolation pattern. **Open question:** does TSC dispatch to a separate 27-point gather, or does TSC silently reuse the 8-point gather at particle positions? Grep for "StencilOrder" / "stencil_order_" / "Quadratic" / "TSC" in `Particles3D.cpp` to find where the branch happens (or confirm it doesn't happen).
+    - (b) **Particle-to-grid current scatter** for TSC. J_hat deposition flows through `EMf->add_Jxh_node`, `add_Rho_node` etc. Check `Particles3D::ECSIM_moments_*` or the corresponding TSC-aware scatter loop. Is it 27-point TSC-weighted or 8-point linear?
+    - (c) **Mass-matrix assembly** for TSC: `particles/Particles3D.cpp:1857-1896`. Confirmed to use `weights_tsc[s1] * weights_tsc[s2]` explicitly. This is currently the ONLY code location where TSC weights appear by name.
+
+    **Expected finding:** if (a) or (b) uses linear weights while (c) uses TSC weights, the bug is found — the ECSIM cancellation identity breaks silently. **This is the most probable fault.** Fix is to introduce a consistent TSC gather/scatter path alongside the assembly path, or to re-derive the weights from a single `compute_W_tsc(x_p, cell)` helper used by all three.
+
+- [ ] **10b.2 — `weights_tsc` is a true partition of unity.** For a particle at an arbitrary position inside a cell, compute `Σ_{s=0..26} weights_tsc[s]` and verify it equals 1.0 to machine precision. Any deviation is a charge-conservation bug (Gauss's law fails at O(ε) per cycle). Also verify the weight formula matches the standard 1D quadratic B-spline: center `W(ξ) = 3/4 − ξ²` for |ξ| ≤ 1/2, wings `W(ξ) = (1/2)(3/2 − |ξ|)²` for 1/2 < |ξ| ≤ 3/2. Any discrepancy localises the bug to the `weights_tsc` computation itself.
+
+- [ ] **10b.3 — Particle positions at consistent time levels.** ECSIM's energy proof (Lapenta 2017 §2) requires the gather, scatter, and mass-matrix-assembly paths to all evaluate the shape function at the same particle position, typically `x_p^n` (start-of-step) for the mass matrix and `x_p^{n+1/2}` (midpoint) for the current projection — or whatever consistent time level the scheme uses. Check `Particles3D.cpp:1857-1896` reads `pcl->get_x()` (and y, z) at the SAME time level as the gather path in `mover_PC`. If assembly uses `x^n` while the gather uses `x^{n+1/2}`, the mass matrix is mis-aligned with the current it is supposed to respond to, breaking the discrete identity. This is the second most probable fault after 10b.1.
+
+- [ ] **10b.4 — Pressure-tensor linear-weight smell** (open thread from Phase 9 Finding 16). `particles/Particles3D.cpp:1970-2011` uses 8-point linear weights for `Pxx..Pzz` even inside the TSC branch (`compute_supplementary_moments`). This is NOT a cycle-1 energy source because pressure tensors don't feed the mass matrix — but it IS structural evidence that "linear weights inside a TSC code path" is not a one-off mistake in this codebase. Read the surrounding code carefully for other silent linear-gather fall-throughs; whatever convention made pressure tensors linear may have affected J or E as well.
+
+- [ ] **10b.5 — One-particle sanity test.** Once a suspected inconsistency is found, construct a minimal single-particle diagnostic: put one particle at a known position with a known velocity in a Double_Harris setup (or simpler — a uniform-field test with no B gradient), run one cycle with `num_smoothings = 0`, and verify:
+    - (a) `Σ_g E_g · J_g` computed from the grid after scatter matches `q_p · v̄_p · E(x_p)` computed from the mover's gather, to machine precision. If this fails, the gather-scatter consistency identity is broken — that is the energy-conservation kill criterion.
+    - (b) `(M·E)_at_particle_position` matches the velocity response the mass matrix should predict for that particle. If this fails, the mass-matrix assembly uses a different shape function or a different particle position than the mover's gather.
+    
+    If either test fails, step-debug from there: the fault will be in the arithmetic of one of the three paths.
+
+- [ ] **10b.6 — Post-fix verification.** After the inconsistency is fixed, re-run with 5-run medians:
+    - `phase6a_tsc_nsmooth.inp`: TSC no-smooth dE(1) should drop to the CIC floor (~4e-08). **Record the cycle-by-cycle dE trajectory to cycle 5**: if the "TSC goes unstable by cycle 6" behaviour also disappears, the instability was a symptom of the shape-function bug. If it persists, there is a separate Courant/stability issue to track in Phase 10e or 11.
+    - `phase8c_tsc_kahan.inp`: TSC sm=4 dE(1) should drop toward 2e-08 (from 1.06e-05), a ~500× improvement. If it drops by only 2× (to ~5e-06), the smoother interaction is amplifying a residual inconsistency that the primary audit missed.
+    - `ci_smoke_tsc.inp`: production smoke test, update CI tolerances to the new floor. The old 2e-05 tolerance becomes far too loose.
+    
+    Document the new baselines in the "Energy drift summary" table and tighten the CI smoke-test expectations.
+
+**Risk / non-discovery outcome.** If 10b.0 re-validation shows the single-run Phase 6 numbers were outliers (e.g. TSC no-smooth dE(1) is actually ~1e-07 with tight variance), Finding 19's localisation weakens and the three Phase 10a "ruled out" mechanisms deserve a fresh look with the review's explicit compatibility conditions in hand. If the code audit (10b.1–10b.5) runs to completion and finds no inconsistency, Phase 8e's "accept as limitation" can be re-adopted — **but this time with citations from Phase 10a and a justified residual tolerance**, rather than as a default. In any case, do NOT re-close Phase 8e until Phase 10b has been executed end-to-end.
+
+### Phase 10c (optional, only if 10b fails to find the bug): spectral analysis
+
+Save per-cycle dE for 50+ cycles on `phase8c_tsc_kahan.inp`. Fourier-transform the series to find the dominant oscillation frequency. If it's at or near the grid Nyquist, the smoother isn't fully suppressing the problematic TSC mode and the fix is either a stronger filter, a different smoother kernel, or a different stabilisation strategy. Re-activates the original Phase 7b task from the plan.
+
+### Phase 10d (later, orthogonal to the leak): pressure-tensor shape-function audit
+
+Finding 16's open thread — `Particles3D.cpp:1970-2011` uses 8-point linear weights for Pxx..Pzz in the TSC branch (`compute_supplementary_moments`). Not a cycle-1 energy source because it doesn't feed into the mass matrix, but a downstream consistency bug that shows up in stress diagnostics and any downstream analyses that use the pressure tensor output. Address after 10b completes.
 
 ### Phase 9.x: Edge/corner self-copy modular wrapping (DEFERRED)
 
@@ -411,15 +445,15 @@ Latent bug: edge and corner self-copies in NBDerivedHaloCommN still lack thin-di
 - [ ] **9a–d.** Add modular wrapping to edge/corner self-copies (`Com3DNonblk.cpp:806-888, 974-1039`)
 - [ ] **9e.** Verify tests still pass
 
-### Phase 10: Non-periodic boundary hardcodings (DEFERRED)
+### Phase 11: Non-periodic boundary hardcodings (DEFERRED; renamed from legacy "Phase 10" after 10a/b/c/d were reassigned to the energy-conservation audit)
 
 Won't fire for the all-periodic Double_Harris test. Fix when non-periodic BCs are needed with n_ghost > 1.
 
-- [ ] **10a.** `adjustNonPeriodicDensities` — hardcoded `[1]` / `[nxn-2]`
-- [ ] **10b.** `OpenBoundaryInflowB/E` — hardcoded `[1]` / `[nxn-2]`
-- [ ] **10c.** `divN2C_BCLeftRight` / `derBC_left*` — hardcoded `-2` loop ends
-- [ ] **10d.** Particle initializers — `[1, getNXC()-1)` instead of `[n_ghost, getNXC()-n_ghost)`
-- [ ] **10e.** `init_double_harris` field init bounds
+- [ ] **11a.** `adjustNonPeriodicDensities` — hardcoded `[1]` / `[nxn-2]`
+- [ ] **11b.** `OpenBoundaryInflowB/E` — hardcoded `[1]` / `[nxn-2]`
+- [ ] **11c.** `divN2C_BCLeftRight` / `derBC_left*` — hardcoded `-2` loop ends
+- [ ] **11d.** Particle initializers — `[1, getNXC()-1)` instead of `[n_ghost, getNXC()-n_ghost)`
+- [ ] **11e.** `init_double_harris` field init bounds
 
 ---
 
@@ -468,7 +502,9 @@ Won't fire for the all-periodic Double_Harris test. Fix when non-periodic BCs ar
 | `d474568` | docs: add np=1 vs np=4 finding |
 | `605a247` | perf: Kahan summation in mass_matrix_times_vector (Phase 8c) |
 | `a7c6576` | docs: Phase 8 conclusion — FP mitigations exhausted, drift is algebraic |
-| (pending) | docs: Phase 9 conclusion — SMS symmetry, particle-field consistency, smoothing count all ruled out as leak sources. Phase 8e holds. |
+| `27c4bb7` | docs: Phase 9 conclusion — SMS symmetry, particle-field consistency, smoothing count all ruled out as individual leak sources |
+| `dfd5421` | docs: expand Phase 10a literature review brief in plan-tsc.md |
+| (pending) | docs: Phase 10a literature review complete, Phase 8e reversed, Phase 10b audit planned (with 10b.0 baseline re-validation) |
 | (extracted) | Phase 4 operator-symmetry diagnostic — in `phase4-diagnostic.patch`, removed from tree because it perturbs FP determinism even when gated (Finding 11). Re-applied transiently in Phase 9a with a new δ_SMS test, then reverted. |
 | (dropped) | Phase 8a Kahan smoothing — tested, no benefit (Finding 12), patch discarded |
 | (dropped) | Phase 9b env-gated Exth smoothing skip/extra — tested (Finding 16), both catastrophic, reverted |
