@@ -210,10 +210,90 @@ Phase 9 targeted the three "scheme-level" candidates Phase 8 couldn't distinguis
 
 **Remaining candidate directions (Phase 10+ territory, NOT investigated):**
 
-- **ECSIM theory for higher-order shape functions.** Markidis & Lapenta 2011 prove exact energy conservation for linear (CIC) B-splines. Whether the proof extends to quadratic (TSC) B-splines with the current 27-point (8-4-2-1) smoother is an open literature question. Candidates: Vu & Brackbill 1992 (energy-conserving binomial filter for PIC), Lapenta's subsequent ECSIM papers for hybrid/multi-scale variants. Worth a literature review before further code experiments.
-- **Alternative smoothing kernels.** The current smoother is a fixed 27-point (8,4,2,1)-weighted average. Candidates to test: (a) a binomial (1,2,1) separable kernel applied N times, (b) a spectral filter that exactly preserves a subspace of interest, (c) no smoothing on the operator but one-shot smoothing on the solve output. Any of these would change the discrete energy balance; at least one should be tested before concluding the leak is an unavoidable theoretical limit.
+- **Phase 10a — Literature review on ECSIM + higher-order shape functions + smoothing (NEXT STEP, see detailed brief below).**
+- **Alternative smoothing kernels.** The current smoother is a fixed 27-point (8,4,2,1)-weighted average. Candidates to test: (a) a binomial (1,2,1) separable kernel applied N times, (b) a spectral filter that exactly preserves a subspace of interest, (c) no smoothing on the operator but one-shot smoothing on the solve output. Any of these would change the discrete energy balance; at least one should be tested before concluding the leak is an unavoidable theoretical limit. **Do 10a first** — the right kernel choice is likely already published.
 - **Mover / operator basis change.** Currently the solve variable E is "raw" (unsmoothed) and the particles see `S·E`. Alternative: change the solve variable to `E' = S·E` (or `S^2·E`), re-derive the operator in that basis, and let the particles see `E'` directly. This removes the S-conjugation from the operator at the cost of a more complex RHS.
 - **Pressure-tensor shape-function audit.** `Particles3D.cpp:1970-2011` mixes 8-point linear weights into the TSC branch. Not a cycle-1 energy source (the mass matrix dominates) but a consistency bug that shows up downstream.
+
+---
+
+### Phase 10a: literature review brief (for a deep-research session)
+
+**The central question.** Does the ECSIM (Energy-Conserving Semi-Implicit Method, Lapenta 2017 / Markidis & Lapenta 2011) discrete energy-conservation theorem continue to hold *exactly* when the particle shape function is quadratic (TSC / B-spline order 2) instead of linear (CIC / B-spline order 1), **and** a spatial smoothing filter is applied symmetrically to both the current density on the RHS and the mass matrix on the LHS of the implicit Maxwell solve? If not, what modifications to the filter or the coupling are required to restore exact (or improved) energy conservation?
+
+**Why this matters in one paragraph.** iPIC3D's TSC implementation conserves energy to 0.01% per cycle with CIC shape functions and drops to a bounded-but-annoying 5% per-cycle energy-exchange leak with TSC + the legacy 27-point (8-4-2-1) smoother at `num_smoothings = 4`. Phases 4–9 of this investigation have ruled out every FP-rounding explanation (Kahan in all three hot loops had ≤1.3× effect) and every single-factor scheme-level explanation (operator asymmetry, particle-field mismatch, smoothing pass count). The leak is therefore a property of the particular ECSIM + TSC + symmetric filter combination. It is plausible that a different filter (e.g. a binomial kernel) or a different application pattern (e.g. filter only the RHS, not the operator) recovers the energy identity. Before writing more code, we want to know which of these directions is already answered in the literature.
+
+**Primary sources to examine (ordered by expected relevance).**
+
+1. **Lapenta, G. (2017). "Exactly energy conserving semi-implicit particle in cell formulation." *J. Comput. Phys.* 334, 349–366.** The foundational ECSIM paper as implemented in iPIC3D. Check:
+    - Is the energy-conservation proof written for a *generic* B-spline of order p, or is it specialised to order 1?
+    - What assumptions does the proof make about smoothing filters (if any)? Specifically, is there a compatibility condition relating the filter to the shape function?
+    - Does §3 or §4 show numerical experiments with shape functions higher than linear?
+
+2. **Markidis, S. & Lapenta, G. (2011). "The energy conserving particle-in-cell method." *J. Comput. Phys.* 230, 7037–7052.** The earlier, slightly different, energy-conserving formulation (pre-ECSIM). Check:
+    - How does the 2011 scheme differ from Lapenta 2017 in its treatment of J and the mass matrix? Does the 2011 version extend more naturally to TSC?
+    - §2-3: the discrete energy identity derivation. Which step requires linearity of the shape function?
+    - Do they discuss smoothing filters? If yes, what compatibility conditions?
+
+3. **Chen, G., Chacón, L., & Barnes, D. C. (2011). "An energy- and charge-conserving, implicit, electrostatic particle-in-cell algorithm." *J. Comput. Phys.* 230, 7018–7036.** A different implicit family (fully-implicit, nonlinear Jacobian-free Newton-Krylov), also energy-conserving. Check:
+    - Do they use higher-order B-splines? What shape function(s)?
+    - Do they need a smoothing filter at all? If not, what stability mechanism replaces it?
+    - §4: discrete conservation proof — how general is it in the shape-function order?
+
+4. **Chacón, L. & Chen, G. (2016). "A curvilinear, fully implicit, conservative electromagnetic PIC algorithm in multiple dimensions." *J. Comput. Phys.* 316, 578–597.** The electromagnetic (Maxwell-Vlasov) follow-up to Chen et al. 2011. Check:
+    - Same shape-function question.
+    - §3-4: charge/energy conservation proofs for the EM case.
+    - Any remarks on smoothing/filtering in §5 implementation notes.
+
+5. **Vu, H. X. & Brackbill, J. U. (1992). "CELEST1D: An implicit, fully kinetic model for low-frequency, electromagnetic plasma simulation." *Comput. Phys. Commun.* 69, 253–276.** Classic paper on implicit PIC with filtering. Check:
+    - The "energy-conserving binomial filter" construction — what kernel do they use, and what is the compatibility condition with the mass matrix?
+    - Do they prove energy conservation holds with the filter applied, and under what assumptions on shape-function order?
+    - Is the filter applied once to J, or twice (RHS + LHS like iPIC3D does)?
+
+6. **Birdsall, C. K. & Langdon, A. B. (1991, reissued 2004). *Plasma Physics via Computer Simulation.* CRC/Taylor & Francis.** The PIC textbook. Check:
+    - Chapter 14 (or equivalent) on digital filtering in PIC: which filters are "energy-safe" and why? What are the trade-offs between filter width and energy drift?
+    - Any discussion of higher-order shape functions: are they paired with specific filters?
+
+7. **Deka, P. J. & Bacchini, F. (ECSIM / RelSIM papers, 2023–2025).** These authors implemented the ECSIM and RelSIM code paths in iPIC3D (per `CLAUDE.md`). Check recent arXiv/journal papers by either author for:
+    - Any report on TSC/quadratic shape functions in ECSIM. Do they observe the same 5% leak?
+    - Any discussion of smoother choice or filter compatibility.
+    - Do they recommend n_ghost ≥ 3 or a specific smoothing pattern for higher-order shapes?
+
+8. **Stanier, A., Chacón, L., & Chen, G. (2019). "A fully implicit, conservative, non-linear, electromagnetic hybrid particle-ion/fluid-electron algorithm." *J. Comput. Phys.* 376, 597–616.** Different regime (hybrid) but same authors as #3/4 and same conservation philosophy. Check whether they use TSC and what filter.
+
+**Specific sub-questions the review should answer.**
+
+1. **Is there a published ECSIM or close-relative scheme that explicitly demonstrates exact energy conservation with TSC (quadratic B-spline) shape functions?** If yes: what filter do they use, and what are the discrete compatibility conditions? If no: is there a theoretical argument for why linear shape functions are "special" in the ECSIM energy-conservation proof?
+
+2. **Is the symmetric sandwich `S·M·S` (smoother on both sides of the mass matrix) a *standard* choice, or is it idiosyncratic to iPIC3D?** Alternatives to check in the literature: `S·M` only (smooth the input, not the output), `M·S²` (both filters collapsed on one side), filter the RHS `J` only and leave the operator raw, "binomial compensation" schemes where a high-pass correction is added after filtering.
+
+3. **What filter kernels are known to commute (or nearly commute) with the discrete curl operator and the mass matrix?** Specifically: (a) is the (8,4,2,1) 27-point tensor-product kernel iPIC3D uses actually the right filter for TSC shape functions, or is it a legacy CIC-era choice? (b) Vu & Brackbill's binomial (1,2,1)^n construction — does it have a proof attached, and for which shape-function order?
+
+4. **What is the expected scaling of the energy drift with filter width?** If a filter of width `w` introduces an O(w^p) drift for some p that depends on the shape-function order, we can set expectations numerically and decide whether 5% at sm=4 is "close to theoretical minimum" or "far off the best known result."
+
+5. **Is the right fix a different filter, a different application pattern, or a different formulation of the ECSIM equations entirely** (e.g., solve for a filtered field `E' = S·E` as the primary variable)? The three alternatives each have very different implementation costs.
+
+**Search terms / keywords to plug into Google Scholar, arXiv, ADS, and NASA ADS:**
+
+- `"energy conserving" "particle in cell" "B-spline"`
+- `"ECSIM" (TSC OR quadratic OR "higher order")`
+- `"implicit PIC" smoothing filter "energy conservation"`
+- `"binomial filter" "particle in cell" compensation`
+- `Lapenta ECSIM quadratic shape`
+- `Markidis Lapenta mass matrix`
+- `"S·M·S" OR "sandwich filter" PIC`
+- `Chacón Chen Barnes conservative PIC shape function`
+- `"charge conserving" "energy conserving" "shape function" implicit PIC`
+
+**What "success" looks like for Phase 10a.** A short (≈ 1-page) written summary that answers:
+  (i) whether any published scheme conserves energy exactly for TSC (yes/no + citation),
+  (ii) if yes, what modifications they make (filter, application pattern, formulation) relative to what iPIC3D does,
+  (iii) if no, what the published best-known drift is and whether 5% is within that envelope,
+  (iv) the top-1 or top-2 most promising code experiments implied by the literature (e.g. "switch to a separable binomial filter applied only to J" or "move the smoother to act only on the primary solve variable"), ranked by implementation cost.
+
+With that in hand we can decide between: (A) implement the best published fix; (B) propose a novel smoother-compatibility condition and derive it analytically; or (C) conclude the 5% drift is theoretically optimal for this scheme class and finalise Phase 8e's "accept as limitation" stance with a citation.
+
+---
 
 Open questions from Phase 8 that Phase 9 also did not resolve:
 
@@ -319,7 +399,7 @@ Phase 8 closed the FP-noise lens; Phase 9 targeted three scheme-level candidates
 - [x] **9a. S·M·S self-adjointness on periodic grid with ghost halo.** **DONE, ruled out.** Re-applied Phase 4 diagnostic with a new composition test (added ~120 lines to `diagnoseOperatorSymmetry`), ran with `IPIC3D_OPERATOR_DIAG=1`. δ_SMS for TSC sm=4 is 2.25e-03 (smaller than δ_M = 2.37e-03 alone); for CIC is 6.87e-04 (smaller than δ_M = 1.39e-03 alone). The composition does NOT add asymmetry. All δ values are dominated by periodic-boundary inner-product double-counting, not true operator asymmetry. See Finding 15. Diagnostic code reverted after measurement.
 - [x] **9b. Particle-field consistency experiment.** **DONE, premise refuted.** Discovered that `calculateB()` already smoothes `Exth` in place before `set_fieldForPcls()` copies it to the mover — particles ALREADY see `S·E`, not raw E. Tested both variations (skip Exth smooth, extra Exth smooth) via env-gates on 5-run TSC sm=4. Both strictly worse: skip → dE(1) 9× worse + dE(10) explodes to 0.47; extra → dE(1) 2.5× worse + dE(10) 20× worse. The current arrangement is at a local optimum and the particle-facing smoothing IS load-bearing for energy closure. See Finding 16. Source reverted after measurement.
 - [x] **9c. Widen halo to n_ghost = 3** → reframed as **smoothing sweep with multi-run medians.** n_ghost=3 dropped as too invasive (`grids/Grid3DCU.cpp:45` hard-asserts `n_ghost <= 2`; expanding would be a multi-day comms refactor for a speculative hypothesis). Instead ran 5-run medians at sm={8, 16} to double-check the Phase 6 sweep. Confirmed: sm=4 is the genuine optimum. sm=8 gives dE(1) = 4.83e-06 (2.2× better) but dE(10) = 2.25e-03 (20× worse secular drift); sm=16 similar. See Finding 17. Input files `phase9_tsc_sm{8,16}.inp` kept.
-- [ ] **9d. Literature check.** NOT STARTED — candidate for Phase 10. Markidis & Lapenta 2011, Lapenta subsequent ECSIM papers, Vu & Brackbill 1992 (binomial filter). See "What we don't know" section.
+- [ ] **9d → 10a. Literature check.** NOT STARTED — **promoted to Phase 10a as the next concrete action.** See the "Phase 10a: literature review brief" subsection in "What we don't know" above for the full research brief with primary sources, sub-questions, search keywords, and success criteria.
 - [ ] **9e. Pressure-tensor shape-function audit.** NOT STARTED — known consistency bug (`Particles3D.cpp:1970-2011` uses linear weights in TSC branch), not a cycle-1 energy source, punted to Phase 10+.
 
 **Phase 9 conclusion:** The 5% per-cycle algebraic leak is a property of the **(ECSIM + TSC + 27-point 8-4-2-1 smoother)** combination as a whole. Every individually-tweakable factor (operator symmetry, particle-facing smoothing count, smoothing pass count) is already at a local optimum. A fix would require reformulating the scheme or replacing the smoother — that is Phase 10 territory and requires a literature review first. Phase 8e (accept as theoretical limitation) stands, now with stronger evidence.
