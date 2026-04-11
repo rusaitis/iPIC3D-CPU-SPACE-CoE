@@ -14,6 +14,8 @@ NOTES-preconditioner.md
 NOTES-solve-sequence.md
 plan-*.md
 review*.md
+/phase*_results.txt
+/phase*_results.json
 
 # Pixi
 .pixi/

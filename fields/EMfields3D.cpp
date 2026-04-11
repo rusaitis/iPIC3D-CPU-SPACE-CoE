@@ -2662,7 +2662,13 @@ void EMfields3D::calculateE()
         // Restart=40 chosen 2026-04-09 from empirical sweep (plan-preconditioners.md §Phase 9b):
         // r=40 gives +5-20% wall-clock vs r=20 on stiff cases (dt≥0.75) and matches v1 baseline on
         // easy cases (dt<0.5). Total iter budget kept at 1000 by halving max-restart from 50 to 25.
-        GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, 40, 25, GMREStol, this);
+        // Phase 10f: if input param NiterGMRES > 0 is set, force m=N, max_iter=1 (hard-cap Krylov
+        // iterations at exactly N, no restart) for the GMRES-iter bisection experiment.
+        const int niter_override = col->getNiterGMRES();
+        if (niter_override > 0)
+            GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, niter_override, 1, GMREStol, this);
+        else
+            GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, 40, 25, GMREStol, this);
     }
 
     #ifdef __PROFILE_FIELDS__
@@ -3034,20 +3040,52 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
     //  the only one that's correct for n_ghost > 1.
     communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
 
-    int k = 0;
+    const int kernel = col->getSmoothKernelInt();   // 0 = binomial (3-pt), 1 = binomial5 (5-pt)
+
+    //* binomial5 reaches ±2 cells in each direction, so at least 2 ghost layers must exist.
+    if (kernel == 1 && n_ghost_ < 2) {
+        if (vct->getCartesian_rank() == 0)
+            cout << "ERROR: SmoothKernel=binomial5 requires n_ghost >= 2 (current = " << n_ghost_ << ")" << endl;
+        MPI_Abort(MPI_COMM_WORLD, -1);
+    }
 
     for (int icount = 0; icount < num_smoothings; icount++)
     {
-        for (int i = n_ghost_; i < nx - n_ghost_; i++)
-            for (int j = n_ghost_; j < ny - n_ghost_; j++)
-                for (int k = n_ghost_; k < nz - n_ghost_; k++)
-                    temp[i][j][k] = 0.015625 * (8.0*data[i][j][k]
-                                              + 4.0 * (data[i-1][j][k] + data[i+1][j][k] + data[i][j-1][k] + data[i][j+1][k] + data[i][j][k-1] + data[i][j][k+1])     //* Faces
-                                              + 2.0 * (data[i-1][j-1][k] + data[i+1][j-1][k] + data[i-1][j+1][k] + data[i+1][j+1][k]                                  //* Edges
-                                                    +  data[i-1][j][k-1] + data[i+1][j][k-1] + data[i][j-1][k-1] + data[i][j+1][k-1]                                  //* Edges
-                                                    +  data[i-1][j][k+1] + data[i+1][j][k+1] + data[i][j-1][k+1] + data[i][j+1][k+1])                                 //* Edges
-                                              + 1.0 * (data[i-1][j-1][k-1] + data[i+1][j-1][k-1] + data[i-1][j+1][k-1] + data[i+1][j+1][k-1]                          //* Corners
-                                                    +  data[i-1][j-1][k+1] + data[i+1][j-1][k+1] + data[i-1][j+1][k+1] + data[i+1][j+1][k+1]));                       //* Corners
+        if (kernel == 0)
+        {
+            //* 3-point binomial (1,2,1)/4 per direction → 27-point tensor product / 64
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++)
+                        temp[i][j][k] = 0.015625 * (8.0*data[i][j][k]
+                                                  + 4.0 * (data[i-1][j][k] + data[i+1][j][k] + data[i][j-1][k] + data[i][j+1][k] + data[i][j][k-1] + data[i][j][k+1])     //* Faces
+                                                  + 2.0 * (data[i-1][j-1][k] + data[i+1][j-1][k] + data[i-1][j+1][k] + data[i+1][j+1][k]                                  //* Edges
+                                                        +  data[i-1][j][k-1] + data[i+1][j][k-1] + data[i][j-1][k-1] + data[i][j+1][k-1]                                  //* Edges
+                                                        +  data[i-1][j][k+1] + data[i+1][j][k+1] + data[i][j-1][k+1] + data[i][j+1][k+1])                                 //* Edges
+                                                  + 1.0 * (data[i-1][j-1][k-1] + data[i+1][j-1][k-1] + data[i-1][j+1][k-1] + data[i+1][j+1][k-1]                          //* Corners
+                                                        +  data[i-1][j-1][k+1] + data[i+1][j-1][k+1] + data[i-1][j+1][k+1] + data[i+1][j+1][k+1]));                       //* Corners
+        }
+        else // kernel == 1: binomial5
+        {
+            //* Phase 10i: 5-point binomial (1,4,6,4,1)/16 per direction → 125-point tensor product / 4096
+            //* Half-width = 2 cells (vs 1 for the 3-point kernel), i.e. doubled smoothing radius per pass.
+            static const double c5[5] = {1.0, 4.0, 6.0, 4.0, 1.0};
+            const double inv4096 = 1.0 / 4096.0;
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++) {
+                        double sum = 0.0;
+                        for (int di = -2; di <= 2; ++di) {
+                            const double wi = c5[di + 2];
+                            for (int dj = -2; dj <= 2; ++dj) {
+                                const double wij = wi * c5[dj + 2];
+                                for (int dk = -2; dk <= 2; ++dk)
+                                    sum += wij * c5[dk + 2] * data[i + di][j + dj][k + dk];
+                            }
+                        }
+                        temp[i][j][k] = sum * inv4096;
+                    }
+        }
 
         for (int i = n_ghost_; i < nx - n_ghost_; i++)
             for (int j = n_ghost_; j < ny - n_ghost_; j++)

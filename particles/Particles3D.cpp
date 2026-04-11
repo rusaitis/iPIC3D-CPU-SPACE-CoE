@@ -2074,8 +2074,11 @@ void Particles3D::compute_supplementary_moments(Field * EMf)
 
 //! ============================================================================= !//
 
+//! DEPRECATED: legacy IMM mover, unreachable in ECSIM runs.
+//! ParticlesMover() dispatches to ECSIM_velocity/ECSIM_position (see main/iPIC3Dlib.cpp:624).
+//! Retained for reference; safe to delete.
 //! IMM - Implicit moment method - mover with a Predictor-Corrector scheme !//
-void Particles3D::mover_PC(Field * EMf) 
+void Particles3D::mover_PC(Field * EMf)
 {
     #pragma omp parallel
     {
@@ -2254,6 +2257,7 @@ void Particles3D::mover_PC(Field * EMf)
     }
 }
 
+//! DEPRECATED: legacy IMM mover (AoS), unreachable in ECSIM runs. Safe to delete.
 void Particles3D::mover_PC_AoS(Field * EMf)
 {
 	#pragma omp parallel
@@ -2409,6 +2413,7 @@ void Particles3D::mover_PC_AoS(Field * EMf)
 	}
 }
 
+//! DEPRECATED: legacy IMM mover (relativistic AoS), unreachable in ECSIM runs. Safe to delete.
 void Particles3D::mover_PC_AoS_Relativistic(Field * EMf)
 {
     // The local average number of PC iterations
@@ -2620,6 +2625,7 @@ void Particles3D::mover_PC_AoS_Relativistic(Field * EMf)
 }
 }
 
+//! DEPRECATED: legacy IMM mover (MIC intrinsics), unreachable in ECSIM runs. Safe to delete.
 // move the particle using MIC vector intrinsics
 void Particles3D::mover_PC_AoS_vec_intr(Field * EMf)
 {
@@ -2751,6 +2757,7 @@ void Particles3D::mover_PC_AoS_vec_intr(Field * EMf)
  #endif
 }
 
+//! DEPRECATED: legacy IMM mover (vectorized AoS), unreachable in ECSIM runs. Safe to delete.
 void Particles3D::mover_PC_AoS_vec(Field * EMf)
 {
 #pragma omp parallel
@@ -2891,6 +2898,7 @@ void Particles3D::mover_PC_AoS_vec(Field * EMf)
 }
 }
 
+//! DEPRECATED: unimplemented stub (body is just eprintf + return 0), zero call sites. Safe to delete.
 /** relativistic mover with a Predictor-Corrector scheme */
 int Particles3D::mover_relativistic(Field * EMf)
 {

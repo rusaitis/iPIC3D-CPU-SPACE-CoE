@@ -1,0 +1,72 @@
+###! Phase 10e: TSC sm=4, 80x80x4, 64 cycles — grid-size growth-rate scan.
+###! Same Lx/Ly/Lz as 20x20 (Δx quartered), same sm=4, same GMREStol, same npcel=3.
+###! Purpose: measure exponential growth rate of the TSC instability vs resolution.
+
+Case                           = Double_Harris
+SimulationName                 = Phase10e_TSC_80
+SaveDirName                    = /tmp/ipic3d_phase10e_tsc_80
+RestartDirName                 = /tmp/ipic3d_phase10e_tsc_80
+
+WriteMethod                    = shdf5
+restart_status                 = 0
+
+DiagnosticsOutputCycle         = 1
+FieldOutputCycle               = 0
+ParticlesOutputCycle           = 0
+RestartOutputCycle             = 0
+
+nparam                         = 2
+custom_parameters              = 0.4        0.25
+
+B0x                            = 0.097
+B0y                            = 0.0
+B0z                            = 0.0
+
+StencilOrder                   = Quadratic
+PrecType                       = None
+
+dt                             = 0.125
+ncycles                        = 64
+th                             = 0.5
+c                              = 1.0
+GMREStol                       = 1E-15
+
+Smooth                         = 1
+num_smoothings                 = 4
+SmoothCycle                    = 1
+
+Lx                             = 30.0
+Ly                             = 30.0
+Lz                             = 1.0
+
+nxc                            = 80
+nyc                            = 80
+nzc                            = 4
+
+XLEN                           = 2
+YLEN                           = 2
+ZLEN                           = 1
+
+ns                  = 4
+
+rhoINIT             = 1.0           1.0             1.0             1.0
+rhoINJECT           = 0.0           0.0             0.0             0.0
+
+npcelx              = 3             3               3               3
+npcely              = 3             3               3               3
+npcelz              = 3             3               3               3
+NpMaxNpRatio        = 6.0
+
+qom                 = -256.0        1.0            -256.0          1.0
+
+uth                 = 0.06          0.0063          0.06           0.0063
+vth                 = 0.02          0.0063          0.02           0.0063
+wth                 = 0.02          0.0063          0.02           0.0063
+
+u0                  = 0.0           0.0             0.0             0.0
+v0                  = 0.0           0.0             0.0             0.0
+w0                  = 0.00325       -0.01624        0.0             0.0
+
+PERIODICX                      = 1
+PERIODICY                      = 1
+PERIODICZ                      = 1

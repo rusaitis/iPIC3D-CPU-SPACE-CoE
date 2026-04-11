@@ -107,8 +107,20 @@ void Collective::ReadInput(string inputfile)
         th              = config.read<double>    ("th", 0.5);
 
         Smooth          = config.read<bool>      ("Smooth", 0);            // (1 = true, i.e, smooth OR 0 = false)
-        SmoothCycle     = config.read<int>       ("SmoothCycle", 1); 
+        SmoothCycle     = config.read<int>       ("SmoothCycle", 1);
         config.readInto(num_smoothings, "num_smoothings", 0);
+
+        //* Phase 10i: smoother kernel selection (see Collective.h for semantics)
+        SmoothKernel    = config.read<string>    ("SmoothKernel", "binomial");
+        if (SmoothKernel == "binomial")
+            smoothKernelInt = 0;
+        else if (SmoothKernel == "binomial5")
+            smoothKernelInt = 1;
+        else {
+            cout << "ERROR: Unknown SmoothKernel '" << SmoothKernel
+                 << "'. Valid values: binomial, binomial5." << endl;
+            MPI_Abort(MPI_COMM_WORLD, -1);
+        }
 
         SaveDirName     = config.read<string>    ("SaveDirName", "data");
         RestartDirName  = config.read<string>    ("RestartDirName", "data");
@@ -155,6 +167,7 @@ void Collective::ReadInput(string inputfile)
         PoissonMAres                = config.read<double>   ("PoissonMAres", 0.01);
         PoissonMArho                = config.read<double>   ("PoissonMArho", 0.01);
         GMREStol                    = config.read<double>   ("GMREStol", 1e-8);
+        NiterGMRES                  = config.read<int>      ("NiterGMRES", -1);
         SolverType                  = config.read<string>   ("SolverType", "GMRES");
         PrecMatrix                  = config.read<bool>     ("PrecMatrix", false);
         PrecDiagnostics             = config.read<bool>     ("PrecDiagnostics", false);
@@ -1434,7 +1447,7 @@ void Collective::Print()
     cout << "Field solver type                      = " << getSolverType() << endl << endl;
 
     if (Smooth == 1)
-        cout << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s)" << endl<< endl;
+        cout << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s) using kernel '" << SmoothKernel << "'" << endl<< endl;
     else
         cout << "Smoothing is disabled" << endl << endl;
     
@@ -1506,7 +1519,7 @@ void Collective::save()
     my_file << "Tolerance of the field (GMRes) solver  = " << getGMREStol() << endl;
     my_file << "Field solver type                      = " << getSolverType() << endl << endl;
     if (Smooth == 1)
-        my_file << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s)" << endl<< endl;
+        my_file << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s) using kernel '" << SmoothKernel << "'" << endl<< endl;
     else
         my_file << "Smoothing is disabled" << endl << endl;
     

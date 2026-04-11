@@ -178,6 +178,7 @@ class Collective
 
     double getVinj()                    const{ return (Vinj); }
     double getGMREStol()                const{ return (GMREStol); }
+    int    getNiterGMRES()              const{ return (NiterGMRES); }
     string getSolverType()              const{ return (SolverType); }
     bool getPrecMatrix()                const{ return (PrecMatrix); }
     bool getPrecDiagnostics()           const{ return (PrecDiagnostics); }
@@ -207,6 +208,8 @@ class Collective
 
     int getSmoothCycle()                const { return SmoothCycle; }
     int getNumSmoothings()              const { return num_smoothings; }
+    string getSmoothKernel()            const { return SmoothKernel; }
+    int    getSmoothKernelInt()         const { return smoothKernelInt; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -243,6 +246,13 @@ class Collective
     
     //* Smoothing parameters
     double Smooth; int num_smoothings; int SmoothCycle;
+
+    //* Phase 10i: choice of binomial smoother kernel applied to E/J in energy_conserve_smooth_direction.
+    //*   "binomial"  (default) -> (1,2,1)/4 per-dim tensor product, 27-point 3D, 1-cell half-width.
+    //*   "binomial5"            -> (1,4,6,4,1)/16 per-dim tensor product, 125-point 3D, 2-cell half-width.
+    //*                             Needs n_ghost >= 2 (already the TSC default).
+    string SmoothKernel;
+    int    smoothKernelInt;     // 0 = binomial (3-pt), 1 = binomial5 (5-pt)
 
     int CurrentCycle;
     int zeroCurrent;
@@ -410,6 +420,11 @@ class Collective
 
     //* Tolerance for GMRES solver
     double GMREStol;
+
+    //* Krylov restart length for the built-in GMRES (Phase 10f bisection knob).
+    //* -1 (default) -> legacy hardcoded m=40, max_iter=25 (up to 1000 Krylov steps).
+    //*  N > 0       -> force m=N, max_iter=1 (exactly N Krylov steps, no restart).
+    int NiterGMRES;
 
     //* Field solver type: "GMRES" (default) or "PETSc"
     string SolverType;

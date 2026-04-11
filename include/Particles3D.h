@@ -112,10 +112,12 @@ class Particles3D:public Particles3Dcomm
 
     //? ============================================================================ ? //
 
-    /** mover with the esplicit non relativistic scheme */
+    /** DEPRECATED — ghost declaration, NO definition in .cpp. Safe to delete this line. */
     void mover_explicit(Field * EMf);
    
-    /** mover with a Predictor-Corrector Scheme */
+    /** DEPRECATED — legacy IMM mover, unreachable in ECSIM runs.
+     *  ParticlesMover() dispatches to ECSIM_velocity/ECSIM_position.
+     *  Retained for reference; safe to delete. */
     void mover_PC(Field * EMf);
     
     //* ECSIM (RelSIM) - velocity and position update
@@ -133,19 +135,20 @@ class Particles3D:public Particles3Dcomm
     //* ECSIM - fix dimension of the problem
     void fixPosition();
 
-    /** array-of-structs version of mover_PC */
+    /** DEPRECATED — legacy IMM mover (AoS). Unreachable in ECSIM runs; safe to delete. */
     void mover_PC_AoS(Field * EMf);
-    /** Relativistic array-of-structs version of mover_PC with adaptive Subcycling and PC*/
+    /** DEPRECATED — legacy IMM mover (relativistic AoS). Unreachable in ECSIM runs; safe to delete. */
     void mover_PC_AoS_Relativistic(Field * EMf);
-    /* vectorized version of previous */
+    /** DEPRECATED — legacy IMM mover (vectorized AoS). Unreachable in ECSIM runs; safe to delete. */
     void mover_PC_AoS_vec(Field * EMf);
-    /* mic particle mover */
+    /** DEPRECATED — legacy IMM mover (MIC intrinsics). Unreachable in ECSIM runs; safe to delete. */
     void mover_PC_AoS_vec_intr(Field * EMf);
-    /* this computes garbage */
+    /** DEPRECATED — ghost declaration, NO definition in .cpp. Safe to delete this line.
+     *  Original comment noted: "this computes garbage". */
     void mover_PC_AoS_vec_onesort(Field * EMf);
-    /** vectorized version of mover_PC **/
+    /** DEPRECATED — ghost declaration, NO definition in .cpp. Safe to delete this line. */
     void mover_PC_vectorized(Field * EMf);
-    /** relativistic mover with a Predictor-Corrector scheme */
+    /** DEPRECATED — legacy IMM relativistic mover, zero call sites. Safe to delete. */
     int mover_relativistic(Field * EMf);
    
     private:
