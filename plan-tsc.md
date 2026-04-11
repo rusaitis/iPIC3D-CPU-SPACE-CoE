@@ -1,8 +1,12 @@
 # Plan: TSC (Quadratic B-spline) energy conservation — findings and status
 
-## Status (2026-04-10)
+## Status (2026-04-10, Phase 8c run)
 
-**Branch:** `with-petsc`, head at `5b421ee`.
+**Branch:** `with-petsc`. Uncommitted: `fields/EMfields3D.cpp` has the Phase 8c Kahan summation. The earlier Phase 4 operator-symmetry diagnostic code has been extracted to `phase4-diagnostic.patch` (untracked) — see Finding 11 for why it was removed.
+
+**Phase 6 complete.** Smoothing isolation tests done. Key finding: smoothing is NOT the sole drift source — TSC mass matrix FP accumulation contributes independently (findings 7-9).
+
+**Phase 8c partial win.** Kahan compensated summation in `mass_matrix_times_vector` delivers a ~2–3× improvement for TSC unsmoothed cycle 1 but **does not help the production smoothed case at cycle 1** and at cycle 10 the improvement is buried in run-to-run variance (see Finding 10). Takeaway: the mass-matrix product is NOT the dominant drift source for the smoothed production configuration. Attention should shift to the smoothing loop (8a) and/or P2G scatter/mass-matrix assembly.
 
 ### Energy drift summary
 
@@ -11,7 +15,20 @@
 | 100x100x1 (standard) | \|dE/E0\| 10cyc | 5.1e-08 | N/A (needs nzc≥3) | Gold standard CIC test |
 | 20x20x4 np=4 sm=4 | \|dE\| cyc1 | 3.6e-08 | 1.1e-05 | TSC ~300x worse at cycle 1 |
 | 20x20x4 np=4 sm=4 | \|dE\| cyc3 | 1.5e-06 | 3.6e-05 | TSC bounded, oscillatory |
-| 20x20x4 np=4 sm=4 | \|dE\| 10cyc | 1.2e-05 | 7.9e-05 | TSC peak ~1e-04 |
+| 20x20x4 np=4 sm=4 | \|dE\| 10cyc | 1.2e-05 | 7.9e-05 | TSC peak ~1e-04 (single-run, unreliable — see Finding 10) |
+| 20x20x4 np=4 **no smooth** | \|dE\| cyc1 | 4.2e-08 | 3.8e-06 | TSC 90x worse than CIC at cyc1 |
+| 20x20x4 np=4 **no smooth** | \|dE\| 10cyc | 2.5e-06 | EXPLODED | TSC unstable cycle 6, GMRES fails |
+| 40x40x4 np=4 sm=4 | \|dE\| cyc1 | — | 8.9e-05 | 4x more work/rank → 8x worse |
+| 40x40x4 np=4 sm=4 | \|dE\| 10cyc | — | 2.5e-04 | Scales with per-rank workload |
+
+### Phase 8c (Kahan) delta vs HEAD — mean over 3 runs (20x20x4 np=4)
+
+| Config | HEAD mean | +Kahan mean | Ratio |
+|--------|-----------|-------------|-------|
+| TSC **no-smooth** \|dE\| cyc1 | 2.7e-06 | **1.2e-06** | 2.3× |
+| TSC sm=4 \|dE\| cyc1           | 1.065e-05 | 1.064e-05 | ~1.00× |
+| TSC sm=4 \|dE\| cyc10          | 1.34e-04  | 1.04e-04  | 1.3× (inside ~25× run-to-run variance) |
+| CIC no-smooth / sm=4          | unchanged | unchanged | 1.00× (no regression) |
 
 ---
 
@@ -30,16 +47,18 @@
 | Halo exchange bug | CIC forced to n_ghost=2 (NBDerivedHaloCommN) | Identical to CIC n_ghost=1 |
 | Solver residual | GMREStol=1e-20 (residual ~1e-17) | Drift WORSE — more iterations = more FP noise |
 | P2G scatter noise | TSC with 5³ ppc vs 3³ ppc | No change |
+| Operator asymmetry | Phase 4 diagnostic (δ_A, δ_cc, δ_S, δ_M) | Apparent asymmetry O(1e-03) is from periodic boundary double-counting; curl-curl is near-symmetric (2e-05) |
+| Ghost layer inversion | Fixed n_ghost>1 ghost ordering | Energy WORSE — code is self-consistent within inverted convention |
 
 ### What we know about the drift
 
-1. **TSC is unstable without smoothing.** Energy explodes by cycle 7. CIC is stable without smoothing. The wider TSC stencil creates modes that the implicit scheme alone cannot damp.
+1. **TSC is unstable without smoothing.** Energy explodes by cycle 6-7. CIC is stable without smoothing. The wider TSC stencil creates modes that the implicit scheme alone cannot damp. Confirmed by Phase 6a: GMRES fails to converge at cycle 6, energy at cycle 10 is 3.3x initial (fully exploded).
 
 2. **Smoothing is both the stabilizer and the dominant drift source.** The smoothing filter suppresses the instability but introduces energy drift. Sweep results (20x20x4, 3 cycles):
 
    | num_smoothings | dE(1) | dE(10) | Stability |
    |---------------|-------|--------|-----------|
-   | 0 | 3.8e-06 | EXPLODED | Unstable cycle 7 |
+   | 0 | 3.8e-06 | EXPLODED | Unstable cycle 6 |
    | 1 | 2.3e-05 | 5.8e-02 | Unstable cycle 10 |
    | 2 | 2.2e-05 | 9.9e-03 | Marginal |
    | **4** | **1.1e-05** | **7.9e-05** | **Stable, oscillatory** |
@@ -58,59 +77,142 @@
 
    This also rules out the self-copy convention as a drift source: np=1 (100% self-copies) has worse drift than np=4 (mixed MPI + self-copies).
 
+   **Grid-size scaling confirms this (Phase 6c):** TSC on 40x40x4 (4x more nodes, same 4 ranks → 4x more work/rank) gives dE(1) = 8.9e-05 vs 1.1e-05 for 20x20x4 — 8x worse absolute drift but only 4x more total energy. The relative drift ~doubles with doubled per-rank grid dimension. Consistent with per-rank FP accumulation dominating.
+
+5. **The operator IS self-adjoint (within the ghost convention).** Phase 4 diagnostic measured δ = |<v,Au> - <u,Av>| / (||u||·||v||). The large apparent values (O(1e-03)) are artifacts of the Krylov inner product double-counting periodic boundary nodes. The curl-curl operator, which is mathematically self-adjoint, measures δ_cc ~ 2e-05 for np=1 — consistent with the double-counting artifact scaling as O(1/N_nodes). The true operator asymmetry is at or near machine precision.
+
+6. **Ghost layers are inverted for n_ghost > 1, but this is a benign self-consistent convention.** For the node field-copy path (offset=1), recv fills ghosts outside-in while send reads sources inside-out, creating swapped ghost layers. Confirmed empirically. However, mass matrix entries use the same inverted convention (via communicateNode_P), so the product M*v is self-consistent. Fixing the inversion without coordinating all paths makes energy 40x WORSE.
+
+7. **Smoothing is NOT the sole drift source — TSC mass matrix has additional FP noise.** Phase 6a direct comparison (20x20x4, np=4, no smoothing):
+   - CIC unsmoothed: dE(1) = 4.2e-08 (GMRES FP noise floor, ~ε_mach × N_iters)
+   - TSC unsmoothed: dE(1) = 3.8e-06 (90x worse than CIC at same config)
+
+   Even without smoothing, TSC has substantially higher drift. The TSC mass matrix has 63 interaction groups (vs CIC's 14) with 1125 multiply-adds per node vs ~250 — a 4.5x wider stencil accumulates proportionally more FP rounding error.
+
+8. **Two independent drift sources contribute to TSC:**
+   - **Mass matrix FP accumulation** (~3.8e-06 at cycle 1, TSC-specific due to wider stencil)
+   - **Smoothing FP amplification** (~additional 3x on top at cycle 1, ~5x by cycle 10)
+   Together: TSC with sm=4 has dE(1) = 1.1e-05, consistent with 3.8e-06 × ~3 from smoothing.
+
+9. **CIC without smoothing is near the GMRES FP noise floor.** dE(1) = 4.2e-08 for CIC without smoothing is NOT exactly ε_mach — it's the cumulative FP error from ~25 GMRES iterations. This sets the theoretical minimum: even a "perfect" energy-conserving scheme would have this level of drift from iterative arithmetic.
+
+10. **Phase 8c (Kahan in `mass_matrix_times_vector`): only a modest 2–3× win on TSC unsmoothed cycle 1; no help on the production smoothed case.** Three-run means (HEAD vs HEAD+Kahan, 20x20x4 np=4, 10 cycles):
+
+    | Config | HEAD mean | +Kahan mean | Ratio |
+    |---|---|---|---|
+    | TSC no-smooth cyc 1 | 2.7e-06 | 1.2e-06 | 2.3× |
+    | TSC sm=4 cyc 1 | 1.065e-05 | 1.064e-05 | ~1.00× |
+    | TSC sm=4 cyc 10 | 1.34e-04 | 1.04e-04 | 1.3× (within ~25× variance) |
+
+    **Implications:**
+    - The mass-matrix `A*v` accumulation was not the dominant FP noise source we thought it was. The single-run ~90× CIC-to-TSC ratio from Phase 6a was inflated by run-to-run variance (Finding 10a below).
+    - For the production smoothed config, cycle-1 drift is dominated by smoothing FP noise (confirmed: Kahan in the mass-matrix mult has ~0% effect at cycle 1 for sm=4).
+    - Cycle-10 data are too noisy for single-run comparisons in this configuration (TSC+smooth is oscillatory; 25× spread across 3 runs). Priority ordering in Phase 8 must be re-derived from multi-run means, not single-run dE(10).
+
+    10a. **Run-to-run non-determinism is large.** For TSC sm=4, three consecutive runs of the identical input file gave dE(10) ∈ {6.93e-06, 1.20e-04, 1.74e-04} — a ~25× spread. Cycle 1 is deterministic (~0.1% spread) because only one GMRES+particle-gather pass has happened. Likely source: MPI reduction ordering in the Krylov inner products and/or particle-init velocity draw. **All earlier Phase 6 "single-run dE(10)" numbers in the summary table above should be treated as samples from a wide distribution, not as reproducible benchmarks.**
+
+11. **Phase 4 operator-symmetry diagnostic code perturbs the cycle-1 solve (kept out of the committed tree).** The uncommitted Phase 4 code (`diagnoseOperatorSymmetry()`, `skip_mass_matrix_diag_` flag, and the `if (!skip_mass_matrix_diag_)` wrap around the S·M·S block in `MaxwellImage`) reproducibly worsened TSC sm=4 dE(1) from 1.08e-05 to 4.74e-04 (~44×) **even when the diagnostic call was gated behind an env var and never actually ran at runtime**. Mechanism: (a) the function-scope `if (!skip_mass_matrix_diag_)` changes loop structure and blocks some compiler inlining/vectorization decisions around the inner `mass_matrix_times_vector` call; (b) adding a ~300-line diagnostic function to the same translation unit changes object-layout/scheduling enough to shift FP results downstream. Removing both effects restores HEAD behavior. The full diagnostic is preserved as `phase4-diagnostic.patch` (untracked) so the symmetry findings in the Phase 4 section below remain reproducible; re-apply with `git apply` when needed.
+
 ---
 
-## What we don't know
+## What we don't know (remaining after Phase 6 and 8c)
 
-The investigation has narrowed the drift to **local FP accumulation in the smoothing ↔ mass-matrix chain**, but hasn't pinpointed the exact mechanism. The ECSIM energy theorem says energy is exactly conserved when the implicit operator A is self-adjoint and the GMRES solve is exact. For TSC, something breaks this — but what?
+Phase 6 had identified mass-matrix FP accumulation (TSC-specific) and smoothing FP amplification as the two candidate sources. Phase 8c measurement **rules out the mass-matrix product as the dominant source for the production smoothed config** — Kahan there has essentially zero effect at cycle 1. Candidates that remain for the smoothed case:
 
-Open questions:
+- **Smoothing loop itself** (Phase 8a) — 27-point stencil × ~240 applications per cycle. Now the prime suspect.
+- **Mass matrix ASSEMBLY** in `Particles3D.cpp:1857-1896` (not the apply) — the particle scatter accumulates into `Mxx..Mzz[g]` and, for TSC, 27 (63 groups' worth of) adds per particle per node. This is where the 90× unsmoothed-TSC-vs-CIC ratio likely originated, since Kahan in `mass_matrix_times_vector` only trimmed 2–3× of it.
+- **P2G moment scatter** in `Moments.cpp` / `Particles3D.cpp` — rho, J, and pressure tensor are accumulated by plain `+=` in per-rank arrays, then reduced via `communicateGhostP2G`. Same compensation argument.
 
-- **Operator asymmetry**: Is MaxwellImage actually non-self-adjoint in floating-point? By how much?
-- **Smoothing asymmetry**: Is the discrete smoothing operator S non-self-adjoint due to the accumulation of FP noise across 4 passes × 2 calls per GMRES iteration?
-- **RHS/operator inconsistency**: MaxwellSource smooths J once. MaxwellImage smooths E twice per iteration. Are these "the same" smoothing in practice?
-- **Theoretical limitation**: Does published ECSIM literature predict this drift level for TSC?
+Remaining open questions:
+
+- **Theoretical calibration**: Does published ECSIM literature predict this drift level for TSC? Does Markidis & Lapenta (2011) or Vu & Brackbill (1992) address higher-order shape functions?
+- **Multi-run statistics**: Every dE(N) comparison should be median-of-N over ≥5 runs. Single-run baselines in the summary table are known to be noisy.
+- **Grid-size scaling at fixed per-rank workload**: Test 40x40x4 with np=16 (same per-rank work as 20x20x4 np=4). Would dE/E_0 match the 20x20x4 baseline? If so, the drift is purely a per-rank FP accumulation artifact.
 
 ---
 
 ## Recommended investigation steps
 
-### Phase 4: Operator symmetry measurement (HIGH PRIORITY)
+### Phase 4: Operator symmetry measurement (DONE — diagnostic removed from tree)
 
-This is the most direct diagnostic. If the operator A is self-adjoint to machine precision, the drift must come from elsewhere (particle push, moment gather ordering, etc.). If A has measurable asymmetry, we've found the smoking gun.
+Implemented `diagnoseOperatorSymmetry()` in `fields/EMfields3D.cpp`. Ran once on cycle 1 from `calculateE()`, tested full operator A, curl-curl only, smoothing S, and mass matrix M symmetry using globally-consistent random vectors (hash-based, periodic-aware).
 
-- [ ] **4a. Operator symmetry test** — After the first moment gather (cycle 1, before GMRES), pick two random Krylov-space vectors u, v. Compute `δ = |<u, A*v> - <v, A*u>| / (||u|| × ||v||)`. If δ >> ε_mach (~2e-16), the operator has non-trivial asymmetry. Add as a temporary diagnostic in `calculateE()` (`fields/EMfields3D.cpp:2586`), call `MaxwellImage` twice with test vectors and compute the inner products.
+**Code extracted to `phase4-diagnostic.patch` (untracked, root of repo).** See Finding 11 for why: the diagnostic and its `skip_mass_matrix_diag_` wrap around the S·M·S block in `MaxwellImage` perturb FP determinism enough to worsen TSC sm=4 dE(1) ~44× even when gated. To re-run the symmetry measurements: `git apply phase4-diagnostic.patch`, rebuild, run — but expect different cycle-1 energy numbers during that session.
 
-- [ ] **4b. Smoothing symmetry test** — Isolate the smoothing operator: apply `energy_conserve_smooth_direction` to two random vectors and check `<u, S*v> - <v, S*u>`. This tells us if the smoothing alone is asymmetric (ghost communication issue) or if asymmetry comes from the S·M·S chain.
+- [x] **4a. Operator symmetry test** — Measured δ = |<u,Av> - <v,Au>| / (||u||·||v||) for the full operator A using MaxwellImage on random Krylov vectors.
+- [x] **4b. Smoothing symmetry test** — Measured smoothing S asymmetry using energy_conserve_smooth_direction on random 3D fields.
+- [x] **4c. Component isolation** — Implemented `skip_mass_matrix_diag_` flag + `IPIC3D_SKIP_MASS_MATRIX` env var to disable S·M·S term in MaxwellImage. Measured curl-curl-only asymmetry.
+- [x] **4b'. Mass matrix M symmetry** — Measured M asymmetry using mass_matrix_times_vector on random 3D fields with ghost-filled boundaries.
 
-- [ ] **4c. Component isolation** — Temporarily disable the mass-matrix term in MaxwellImage (skip lines 2876-2900 in `EMfields3D.cpp`), leaving only the curl-curl term. Run TSC with smoothing. If drift vanishes → asymmetry is in S·M·S. If drift persists → asymmetry is in S alone or the curl operators.
+**Key finding: Apparent asymmetry is dominated by periodic boundary double-counting.**
+
+All measured δ values are O(1e-03), but the curl-curl operator (which is mathematically self-adjoint for periodic BCs) shows δ_cc ~ 2e-05 for np=1. This confirms the measurement is dominated by an artifact: the Krylov inner product double-counts physical nodes at periodic boundaries (e.g., local nodes k=n_ghost and k=nxn-n_ghost-1 map to the same physical node but carry independent values in the inner product). The TRUE operator asymmetry is at or below machine precision.
+
+| Sub-operator | CIC δ (np=4) | TSC δ (np=1) | TSC δ (np=4) |
+|---|---|---|---|
+| Full A | 3.4e-03 | 1.6e-03 | 1.9e-03 |
+| Curl-curl | 2.8e-06 | 2.1e-05 | 2.5e-04 |
+| Smoothing S | 1.8e-03 | 5.9e-03 | 5.4e-03 |
+| Mass matrix M | 6.3e-04 | 3.5e-03 | 2.0e-03 |
+
+### Phase 4.5: Ghost layer inversion (DONE — benign, not the drift source)
+
+**Discovered**: for n_ghost > 1, the ghost layers in `NBDerivedHaloCommN` are filled in reverse order (outermost ghost ← innermost source, innermost ghost ← outermost source). Confirmed empirically with a diagnostic that encodes global physical indices into ghost values.
+
+**Root cause**: the recv loop fills ghosts outside-in (g=0 → outermost ghost) while the send loop reads sources inside-out (g=0 → closest to boundary). For n_ghost=1, there's only one layer so no inversion occurs.
+
+**Fix attempted**: reversed source indices with `gs = (offset > 0) ? (n_ghost_-1-g) : g` to correct the node field-copy path (offset=1) without affecting the moment path (offset=0, which is self-consistent with addFace).
+
+**Result**: Ghosts became physically correct, but **energy conservation worsened** (dE(1) went from 1.1e-05 → 4.6e-04). The inversion is **benign** because the code is self-consistent within the inverted convention — the mass matrix entries at ghost positions are also inverted (via the same communicateNode_P), so the product M*v uses matching swapped values, preserving operator self-adjointness within the relabeled boundary.
+
+**Conclusion**: The ghost inversion is NOT the source of the TSC energy drift. Fixing it properly requires a coordinated change across the ghost fill, addFace moment summation, and potentially the P2G scatter boundary convention. This is a latent cosmetic issue, not a physics bug for the current symmetric-stencil operations.
 
 ### Phase 5: Self-copy convention experiment (DONE — ruled out)
 
 - [x] **5b. Compare 1-rank vs 4-rank** — np=1 (all self-copies) gives WORSE drift than np=4 (mixed MPI+self-copy). Self-copy convention is NOT the drift source. See Finding 4 above.
 
-### Phase 6: RHS/operator smoothing consistency (MEDIUM PRIORITY)
+### Phase 6: Isolate smoothing as the sole drift source (DONE — smoothing is major but not sole source)
 
-In MaxwellSource, J is smoothed once (line 2746) with ghost values from `communicateGhostP2G_ecsim` (which called `communicateNode_P`). In MaxwellImage, E is smoothed with ghost values from `communicateNodeBC` (called at the top of MaxwellImage, line 2846). These are different communication contexts. If the ghost values differ (e.g., because communicateNode_P fills ghosts at slightly different precision than communicateNodeBC), the energy theorem's assumption that the same S appears on both sides is violated.
+**Conclusion:** Smoothing is a major contributor but NOT the sole source. Two independent FP noise sources exist in TSC. Input files: `inputfiles/phase6{a_cic_nsmooth,a_tsc_nsmooth,b_cic_smooth,c_tsc_large}.inp`.
 
-- [ ] **6a. Ghost value audit** — After communicateNode_P in `communicateGhostP2G_ecsim`, and after communicateNodeBC at the top of MaxwellImage, dump the Z-axis ghost values for a single node line. Compare — they should be identical for the same field data.
+- [x] **6a. Unsmoothed operator test** — Ran CIC and TSC with `Smooth=0` for 10 cycles. Results (20x20x4, np=4):
 
-- [ ] **6b. Separate RHS smoothing test** — Skip the smoothing in MaxwellSource (comment out line 2746) AND skip it in MaxwellImage (set Smooth=0). The operator becomes unsmoothed on both sides — theoretically exactly energy-conserving. For CIC this should give dE ~ ε_mach. For TSC it will be unstable, but compare dE(1) (before instability kicks in) — if it's at ε_mach level, the smoothing is truly the only source.
+  | Config | dE(1) | dE(10) | Stability |
+  |--------|-------|--------|-----------|
+  | CIC no-smooth | 4.2e-08 | 2.5e-06 | Stable, bounded |
+  | TSC no-smooth | 3.8e-06 | EXPLODED | GMRES fails cycle 6, energy 3.3x initial by cycle 10 |
 
-### Phase 7: Theoretical calibration (LOW PRIORITY but informative)
+  **Key finding:** CIC unsmoothed is NOT exactly ε_mach — it's the GMRES FP noise floor (~4e-08). TSC unsmoothed is 90x worse than CIC unsmoothed, confirming the TSC mass matrix introduces independent FP accumulation even before instability develops.
 
-- [ ] **7a. Literature check** — Search for ECSIM + TSC/quadratic shape function results in Markidis & Lapenta (2011), Deka & Bacchini papers, and Vu & Brackbill (1992, energy-conserving smoothing). Do they report energy drift with higher-order shapes?
+- [x] **6b. CIC+smoothing comparison on 20x20x4** — CIC with sm=4 on same grid: dE(1) = 2.1e-08, dE(10) = 1.2e-05. Smooth makes CIC ~5x worse by cycle 10 vs unsmoothed CIC (2.5e-06). However, CIC+smooth is still ~6x better than TSC+smooth at cycle 10 (1.2e-05 vs 7.9e-05). **The wider TSC mass matrix is NOT simply amplifying smoothing noise — it's an independent source.**
+
+- [x] **6c. Grid-size scaling** — TSC on 40x40x4 (4x more nodes), np=4, sm=4: dE(1) = 8.9e-05, dE(10) = 2.5e-04. Compared to 20x20x4 with same 4 ranks: ~8x worse absolute drift with ~4x more total energy. Per-rank workload increased 4x → relative drift roughly doubled. Grid-size scaling at fixed np does NOT help — confirms drift is dominated by per-rank FP accumulation, not per-node errors.
+
+### Phase 7: Theoretical calibration (MEDIUM PRIORITY)
+
+- [ ] **7a. Literature check** — Search for ECSIM + TSC/quadratic shape function results in Markidis & Lapenta (2011), Deka & Bacchini papers, and Vu & Brackbill (1992, energy-conserving smoothing). Do they report energy drift with higher-order shapes? If so, what's the expected scaling?
 
 - [ ] **7b. Spectral analysis** — Save per-cycle dE for 50+ cycles. Fourier-transform to find dominant oscillation frequency. If it's at or near the grid Nyquist, the smoothing isn't fully suppressing the problematic TSC mode.
 
-- [ ] **7c. Reference CIC+smoothing comparison** — Run CIC on 20x20x4 with num_smoothings=4 (current default). The CIC drift with smoothing should be essentially the same as without (since CIC doesn't need smoothing for stability). If CIC drift increases with more smoothing, it quantifies the smoothing FP noise floor independent of TSC.
+### Phase 8: Targeted mitigation (two-source picture REVISED after 8c)
 
-### Phase 8: Targeted fixes (only after Phase 4 identifies the mechanism)
+Phase 6 had suggested the mass matrix was the dominant source (~3.8e-06 at cycle 1 for TSC no-smooth, vs ~4.2e-08 for CIC). Phase 8c (below) **disproves this for the production smoothed config** — Kahan in `mass_matrix_times_vector` does nothing to cycle 1 at sm=4. New priority: smoothing + mass-matrix ASSEMBLY, not the mass-matrix apply.
 
-- [ ] **8a. If operator asymmetry from S·M·S** → try Kahan summation in mass_matrix_times_vector, or symmetrize the result: `temp2 = (S·M·S(E) + S·M^T·S(E)) / 2`
-- [ ] **8b. If smoothing asymmetry from ghost comm** → align self-copy convention between legacy and NBDerivedHaloCommN paths
-- [ ] **8c. If RHS/operator inconsistency** → ensure identical ghost-fill path for both contexts
-- [ ] **8d. If theoretical limitation** → document expected drift level, adjust the CI smoke test tolerance, move on
+- [x] **8c. Kahan summation in `mass_matrix_times_vector`** — **DONE, partial win.** Applied in `fields/EMfields3D.cpp:2282-2344`. Over 3 runs on 20x20x4 np=4:
+    - TSC no-smooth cyc 1: 2.7e-06 → 1.2e-06 (**2.3×**, real)
+    - TSC sm=4 cyc 1: 1.065e-05 → 1.064e-05 (no effect — smoothing dominates)
+    - TSC sm=4 cyc 10: 1.34e-04 → 1.04e-04 (1.3×, within run-to-run variance)
+    - CIC configs: unchanged (14-group mass matrix already at noise floor)
+
+    **Kept in tree** — improvement is real, cost is trivial (one lambda, three doubles), no regression. But it does NOT fix the smoothed-config drift, contrary to the Phase 6 hypothesis. See Finding 10 for measurement details and the run-to-run variance caveat. Input file `inputfiles/phase8c_tsc_kahan.inp` reproduces the production-config comparison.
+
+- [ ] **8a. Kahan (compensated) summation in `energy_conserve_smooth_direction`** — ← **NEW HIGHEST PRIORITY.** Phase 8c measurements moved this ahead of 8c in importance: at cycle 1, the sm=4 TSC case has dE ≈ 1.07e-05 regardless of whether the mass-matrix apply uses Kahan. The only FP source left to touch between the P2G scatter and the GMRES result is the four passes of the 3D energy-conserving smoother (`fields/EMfields3D.cpp:2998-3043`). Estimate based on the no-smooth→sm=4 jump (3.8e-06 → 1.1e-05, ~3×): compensation should recover most of that ~3× factor.
+
+- [ ] **8d. Kahan in TSC mass-matrix ASSEMBLY** (`particles/Particles3D.cpp:1857-1896`). The 90× CIC-to-TSC ratio in Phase 6a came mostly from somewhere, and 8c showed it isn't the `A*v` accumulation. The remaining candidate is the per-particle scatter INTO the 63 mass-matrix groups, which is also the place with the most adds (≈ N_particles × 63 × 9 ≈ tens of millions per cycle). This is harder to retrofit than `mass_matrix_times_vector` — each destination cell is hit by many particles in a non-deterministic order, so plain per-cell Kahan doesn't apply; needs pairwise summation or per-thread partials + compensated reduction.
+
+- [ ] **8b. Fewer smoothing passes** — Re-sweep sm=1..8 after implementing 8a+8d, using **median over ≥5 runs** (Finding 10a: single-run dE(10) has ~25× variance and is unusable as a baseline).
+
+- [ ] **8e. Accept as theoretical limitation** — If 8a+8c+8d together don't bring TSC sm=4 dE(1) below ~1e-06, document the expected drift level and set CI smoke test tolerance accordingly. The drift is bounded and oscillatory, not secular — it won't cause simulation divergence. Current Phase 8c baseline after Kahan: ~1.06e-05 at cycle 1, mean ~1.04e-04 at cycle 10 for the 20x20x4 np=4 sm=4 case.
 
 ### Phase 9: Edge/corner self-copy modular wrapping (DEFERRED)
 
@@ -142,14 +244,20 @@ Won't fire for the all-periodic Double_Harris test. Fix when non-periodic BCs ar
 | `communication/Com3DNonblk.cpp:1042-1057` | addFace/addEdge/addCorner moment summation |
 | `communication/Com3DNonblk.cpp:127-134` | Legacy n_ghost=1 self-copy (NO offset!) |
 | `grids/Grid3DCU.cpp:68-79` | Min grid assertion for self-periodic thin axes |
-| `fields/EMfields3D.cpp:2282-2326` | mass_matrix_times_vector (63 groups for TSC) |
+| `fields/EMfields3D.cpp:2282-2344` | mass_matrix_times_vector (63 groups for TSC, Kahan — Phase 8c) |
 | `fields/EMfields3D.cpp:2378-2416` | communicateGhostP2G_ecsim (moments) |
 | `fields/EMfields3D.cpp:2418-2467` | communicateGhostP2G_mass_matrix |
 | `fields/EMfields3D.cpp:2711-2785` | MaxwellSource (RHS: smooths J at line 2746) |
-| `fields/EMfields3D.cpp:2827-2912` | MaxwellImage (operator: smooths E at 2871, M*E at 2891) |
-| `fields/EMfields3D.cpp:2998-3043` | energy_conserve_smooth_direction |
-| `particles/Particles3D.cpp:1857-1896` | TSC mass matrix assembly |
+| `fields/EMfields3D.cpp:2827-2912` | MaxwellImage (operator: smooths E, computes M*E, curl²) |
+| `fields/EMfields3D.cpp:2998-3043` | energy_conserve_smooth_direction ← **next target (Phase 8a)** |
+| `particles/Particles3D.cpp:1857-1896` | TSC mass matrix assembly ← **Phase 8d candidate** |
+| `phase4-diagnostic.patch` (untracked) | Extracted Phase 4 operator-symmetry diagnostic — re-apply with `git apply` when needed |
 | `inputfiles/ci_smoke_tsc.inp` | TSC smoke test (nzc=4, sm=4) |
+| `inputfiles/phase6a_cic_nsmooth.inp` | Phase 6a: CIC no-smooth 10-cycle test |
+| `inputfiles/phase6a_tsc_nsmooth.inp` | Phase 6a: TSC no-smooth — unstable by cycle 6 |
+| `inputfiles/phase6b_cic_smooth.inp` | Phase 6b: CIC sm=4 on 20x20x4 baseline |
+| `inputfiles/phase6c_tsc_large.inp` | Phase 6c: TSC sm=4 on 40x40x4 scaling test |
+| `inputfiles/phase8c_tsc_kahan.inp` | Phase 8c: TSC sm=4, 10-cycle Kahan regression test |
 
 ## Commit history
 
@@ -165,3 +273,7 @@ Won't fire for the all-periodic Double_Harris test. Fix when non-periodic BCs ar
 | `9c04563` | fix: bump TSC smoke test nzc=1→4 to avoid thin-Z overcounting |
 | `e2e7c0d` | fix: face self-copy offset consistency + min grid assertion |
 | `5b421ee` | docs: comprehensive TSC energy conservation investigation results |
+| `d474568` | docs: add np=1 vs np=4 finding |
+| (uncommitted) | perf: Phase 8c — Kahan compensated summation in `mass_matrix_times_vector` (2–3× TSC no-smooth cyc1) |
+| (extracted) | Phase 4 operator-symmetry diagnostic — in `phase4-diagnostic.patch`, removed from tree because it perturbs FP determinism even when gated (Finding 11) |
+| (untracked) | test: Phase 6 input files (6a CIC/TSC no-smooth, 6b CIC smooth, 6c TSC 40x40x4) + `phase8c_tsc_kahan.inp` |

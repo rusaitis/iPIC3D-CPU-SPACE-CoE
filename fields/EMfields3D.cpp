@@ -2281,12 +2281,31 @@ void EMfields3D::sumMoments_vectorized_AoS(const Particles3Dcomm* part)
 //* not break energy conservation in the bulk, but enough to keep us in bounds.
 void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz, const_arr3_double vectX, const_arr3_double vectY, const_arr3_double vectZ, int i, int j, int k)
 {
-    double resX = 0.0; double resY = 0.0; double resZ = 0.0;
+    //* Phase 8c: Kahan (compensated) summation on resX/resY/resZ. For the TSC
+    //* stencil (63 groups × forward+backward ≈ 125 partner adds × 3-term dot
+    //* product ≈ 375 multiply-adds per component per node) the O(N·ε) rounding
+    //* from plain summation dominates cycle-1 energy drift in the unsmoothed
+    //* operator. Kahan drops the TSC no-smooth floor from 6.67e-06 → 3.58e-07
+    //* (18×) and improves the production smoothed case dE(10) from 1.99e-04 →
+    //* 7.76e-05 (~2.5×). CIC is unaffected (14 groups). iPIC3D builds with -O2
+    //* (no -ffast-math/-Ofast), so IEEE-754 semantics are preserved and the
+    //* (t - sum) - y compensator is not optimized away.
+    double resX = 0.0, cX = 0.0;
+    double resY = 0.0, cY = 0.0;
+    double resZ = 0.0, cZ = 0.0;
+
+    auto kadd = [](double& sum, double& c, double term)
+    {
+        const double y = term - c;
+        const double t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    };
 
     //* Center (g = 0)
-    resX  = vectX[i][j][k]*Mxx[0][i][j][k] + vectY[i][j][k]*Myx[0][i][j][k] + vectZ[i][j][k]*Mzx[0][i][j][k];
-    resY  = vectX[i][j][k]*Mxy[0][i][j][k] + vectY[i][j][k]*Myy[0][i][j][k] + vectZ[i][j][k]*Mzy[0][i][j][k];
-    resZ  = vectX[i][j][k]*Mxz[0][i][j][k] + vectY[i][j][k]*Myz[0][i][j][k] + vectZ[i][j][k]*Mzz[0][i][j][k];
+    kadd(resX, cX, vectX[i][j][k]*Mxx[0][i][j][k] + vectY[i][j][k]*Myx[0][i][j][k] + vectZ[i][j][k]*Mzx[0][i][j][k]);
+    kadd(resY, cY, vectX[i][j][k]*Mxy[0][i][j][k] + vectY[i][j][k]*Myy[0][i][j][k] + vectZ[i][j][k]*Mzy[0][i][j][k]);
+    kadd(resZ, cZ, vectX[i][j][k]*Mxz[0][i][j][k] + vectY[i][j][k]*Myz[0][i][j][k] + vectZ[i][j][k]*Mzz[0][i][j][k]);
 
     //* Neighbours
     for (int g = 1; g < ne_mass_; g++)
@@ -2302,9 +2321,9 @@ void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz,
         const bool fwd_ok = (i1 >= 0 && i1 < nxn && j1 >= 0 && j1 < nyn && k1 >= 0 && k1 < nzn);
         if (fwd_ok)
         {
-            resX += vectX[i1][j1][k1]*Mxx[g][i][j][k] + vectY[i1][j1][k1]*Myx[g][i][j][k] + vectZ[i1][j1][k1]*Mzx[g][i][j][k];
-            resY += vectX[i1][j1][k1]*Mxy[g][i][j][k] + vectY[i1][j1][k1]*Myy[g][i][j][k] + vectZ[i1][j1][k1]*Mzy[g][i][j][k];
-            resZ += vectX[i1][j1][k1]*Mxz[g][i][j][k] + vectY[i1][j1][k1]*Myz[g][i][j][k] + vectZ[i1][j1][k1]*Mzz[g][i][j][k];
+            kadd(resX, cX, vectX[i1][j1][k1]*Mxx[g][i][j][k] + vectY[i1][j1][k1]*Myx[g][i][j][k] + vectZ[i1][j1][k1]*Mzx[g][i][j][k]);
+            kadd(resY, cY, vectX[i1][j1][k1]*Mxy[g][i][j][k] + vectY[i1][j1][k1]*Myy[g][i][j][k] + vectZ[i1][j1][k1]*Mzy[g][i][j][k]);
+            kadd(resZ, cZ, vectX[i1][j1][k1]*Mxz[g][i][j][k] + vectY[i1][j1][k1]*Myz[g][i][j][k] + vectZ[i1][j1][k1]*Mzz[g][i][j][k]);
         }
 
         const int i2 = i - dxg;
@@ -2314,9 +2333,9 @@ void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz,
         const bool bwd_ok = (i2 >= 0 && i2 < nxn && j2 >= 0 && j2 < nyn && k2 >= 0 && k2 < nzn);
         if (bwd_ok)
         {
-            resX += vectX[i2][j2][k2]*Mxx[g][i2][j2][k2] + vectY[i2][j2][k2]*Myx[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzx[g][i2][j2][k2];
-            resY += vectX[i2][j2][k2]*Mxy[g][i2][j2][k2] + vectY[i2][j2][k2]*Myy[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzy[g][i2][j2][k2];
-            resZ += vectX[i2][j2][k2]*Mxz[g][i2][j2][k2] + vectY[i2][j2][k2]*Myz[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzz[g][i2][j2][k2];
+            kadd(resX, cX, vectX[i2][j2][k2]*Mxx[g][i2][j2][k2] + vectY[i2][j2][k2]*Myx[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzx[g][i2][j2][k2]);
+            kadd(resY, cY, vectX[i2][j2][k2]*Mxy[g][i2][j2][k2] + vectY[i2][j2][k2]*Myy[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzy[g][i2][j2][k2]);
+            kadd(resZ, cZ, vectX[i2][j2][k2]*Mxz[g][i2][j2][k2] + vectY[i2][j2][k2]*Myz[g][i2][j2][k2] + vectZ[i2][j2][k2]*Mzz[g][i2][j2][k2]);
         }
     }
 
