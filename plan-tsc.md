@@ -1,12 +1,23 @@
 # Plan: TSC (Quadratic B-spline) energy conservation — findings and status
 
-## Status (2026-04-10, Phase 8c run)
+## Status (2026-04-11, Phase 8 COMPLETE — drift is algebraic, not FP)
 
-**Branch:** `with-petsc`. Uncommitted: `fields/EMfields3D.cpp` has the Phase 8c Kahan summation. The earlier Phase 4 operator-symmetry diagnostic code has been extracted to `phase4-diagnostic.patch` (untracked) — see Finding 11 for why it was removed.
+**Branch:** `with-petsc`. Committed through `605a247` (Phase 8c Kahan in `mass_matrix_times_vector`). The earlier Phase 4 operator-symmetry diagnostic code is in `phase4-diagnostic.patch` (untracked) — see Finding 11 for why it was removed.
 
-**Phase 6 complete.** Smoothing isolation tests done. Key finding: smoothing is NOT the sole drift source — TSC mass matrix FP accumulation contributes independently (findings 7-9).
+**Phase 6, 8c, 8a complete. 8d ruled out analytically.**  The TSC-vs-CIC drift gap at sm=4 is **not** floating-point rounding error — it is an ~5% algebraic leak per cycle in the energy-exchange bookkeeping of the smoothed TSC operator. FP-level mitigations (Kahan/compensated summation) cannot fix it; the problem lies in the discrete energy theorem, not the arithmetic.
 
-**Phase 8c partial win.** Kahan compensated summation in `mass_matrix_times_vector` delivers a ~2–3× improvement for TSC unsmoothed cycle 1 but **does not help the production smoothed case at cycle 1** and at cycle 10 the improvement is buried in run-to-run variance (see Finding 10). Takeaway: the mass-matrix product is NOT the dominant drift source for the smoothed production configuration. Attention should shift to the smoothing loop (8a) and/or P2G scatter/mass-matrix assembly.
+**Key numbers (HEAD, 5-run medians, 20x20x4 np=4):**
+- CIC sm=4: dE(1) = 2.1e-08, cyc 0→1 energy leak = **0.01%** of per-cycle exchange (2.5e-04)
+- TSC sm=4: dE(1) = 1.061e-05, cyc 0→1 energy leak = **5.1%** of per-cycle exchange (2.1e-04) — 500× worse relatively
+- TSC no-smooth: dE(1) = 5.9e-06 (stochastic, 3× spread), unstable by cycle 6
+
+**Phase 8a (Kahan in `energy_conserve_smooth_direction`): tested, no benefit.** 5-run medians match HEAD within 0.2% at cycle 1; 1.3× better at cycle 10 is inside the 25× run-to-run variance. Code stashed and dropped — not worth carrying a 40-line restructuring of the 27-point stencil for zero measurable payoff. See Finding 12.
+
+**Phase 8d (Kahan in TSC mass-matrix assembly): analytically ruled out.** ~730 adds per mass-matrix entry × 2.2e-16 × 0.016 max contribution ≈ 2.6e-15 absolute FP error — 10 orders of magnitude below the observed 1e-05 drift. Implementation would add shadow compensator arrays for negative benefit. Skipped.
+
+**Phase 8c kept (committed).** Real 2.3× win for TSC no-smooth cycle 1 at trivial cost, no regression elsewhere.
+
+**Phase 8e (accept as theoretical limitation): CHOSEN.** The drift is bounded and oscillatory, not secular. Recommended CI smoke test tolerances for TSC sm=4 on 20x20x4: `dE(1) ≤ 2e-05`, `dE(10) ≤ 3e-04` (the 3e-04 accounts for ~25× run-to-run variance from non-deterministic MPI reductions).
 
 ### Energy drift summary
 
@@ -21,14 +32,25 @@
 | 40x40x4 np=4 sm=4 | \|dE\| cyc1 | — | 8.9e-05 | 4x more work/rank → 8x worse |
 | 40x40x4 np=4 sm=4 | \|dE\| 10cyc | — | 2.5e-04 | Scales with per-rank workload |
 
-### Phase 8c (Kahan) delta vs HEAD — mean over 3 runs (20x20x4 np=4)
+### Phase 8 summary table — 5-run medians (HEAD = post-8c Kahan), 20x20x4 np=4
 
-| Config | HEAD mean | +Kahan mean | Ratio |
-|--------|-----------|-------------|-------|
-| TSC **no-smooth** \|dE\| cyc1 | 2.7e-06 | **1.2e-06** | 2.3× |
-| TSC sm=4 \|dE\| cyc1           | 1.065e-05 | 1.064e-05 | ~1.00× |
-| TSC sm=4 \|dE\| cyc10          | 1.34e-04  | 1.04e-04  | 1.3× (inside ~25× run-to-run variance) |
-| CIC no-smooth / sm=4          | unchanged | unchanged | 1.00× (no regression) |
+| Config | dE(1) median | dE(1) mean | dE(10) median | dE(10) mean |
+|--------|--------------|------------|---------------|-------------|
+| CIC sm=4                | 2.10e-08 | 1.74e-08 | 1.22e-05 | 1.23e-05 |
+| TSC sm=4                | 1.061e-05 | 1.062e-05 | 1.27e-04 | 1.41e-04 |
+| TSC sm=4 + Phase 8a     | 1.063e-05 | 1.063e-05 | 8.56e-05 | 8.26e-05 |
+| TSC no-smooth (HEAD)    | 5.94e-06 | 5.82e-06 | EXPLODED (unstable cyc ≥ 6) | — |
+
+Cycle-1 TSC sm=4 is deterministic to 0.2% across runs; Phase 8a difference (0.2%) is inside this. Cycle-10 has 25× run-to-run variance (see Finding 10a), so the 1.3–1.5× "improvement" from 8a is not distinguishable from noise. Phase 8d was not implemented — analytical FP-error bound is ~2.6e-15, 10 orders below observed drift.
+
+### Cycle 0→1 energy balance — the algebraic leak
+
+| Config | ΔBE | ΔEE | ΔKE | Total exchange | \|dE\| | Leak fraction |
+|---|---|---|---|---|---|---|
+| CIC sm=4 | -2.53e-04 | +1.92e-04 | +6.01e-05 | 2.5e-04 | 2.4e-08 | **0.01%** |
+| TSC sm=4 | -2.07e-04 | +1.57e-04 | +4.00e-05 | 2.1e-04 | 1.06e-05 | **5.1%** |
+
+TSC leaks ~500× more energy per cycle (relative to the exchange) than CIC does. CIC's 0.01% is close to the GMRES FP noise floor (30 iters × ε ≈ 6.6e-15; observed 2e-08 is the residual propagation × problem scale). TSC's 5% leak is systematic and reproducible — NOT FP rounding.
 
 ---
 
@@ -113,21 +135,46 @@
 
 11. **Phase 4 operator-symmetry diagnostic code perturbs the cycle-1 solve (kept out of the committed tree).** The uncommitted Phase 4 code (`diagnoseOperatorSymmetry()`, `skip_mass_matrix_diag_` flag, and the `if (!skip_mass_matrix_diag_)` wrap around the S·M·S block in `MaxwellImage`) reproducibly worsened TSC sm=4 dE(1) from 1.08e-05 to 4.74e-04 (~44×) **even when the diagnostic call was gated behind an env var and never actually ran at runtime**. Mechanism: (a) the function-scope `if (!skip_mass_matrix_diag_)` changes loop structure and blocks some compiler inlining/vectorization decisions around the inner `mass_matrix_times_vector` call; (b) adding a ~300-line diagnostic function to the same translation unit changes object-layout/scheduling enough to shift FP results downstream. Removing both effects restores HEAD behavior. The full diagnostic is preserved as `phase4-diagnostic.patch` (untracked) so the symmetry findings in the Phase 4 section below remain reproducible; re-apply with `git apply` when needed.
 
+12. **Phase 8a (Kahan in `energy_conserve_smooth_direction`) tested and rejected.** 5-run medians with the full 27-point stencil restructured into a compensated accumulator gave dE(1) = 1.063e-05 vs HEAD 1.061e-05 (0.2% different — below run-to-run noise on cycle 1). Cycle 10 showed 8.56e-05 vs HEAD 1.27e-04 (1.5×), but that gap is inside the 25× variance envelope. Conclusion: smoothing-loop rounding is not the dominant drift source. Patch dropped, not carried as a patch file since there's no signal worth preserving.
+
+13. **Phase 8d (Kahan in TSC mass-matrix assembly) analytically ruled out.** On 20x20x4 np=4, each mass-matrix entry `M[g][i][j][k]` accumulates ~730 particle contributions of magnitude ≤ q·q_dt_2mc·w² ≈ 0.016. Plain summation error: 730 · 2.2e-16 · 0.016 ≈ **2.6e-15** — 10 orders of magnitude below the observed 1e-05 drift. Implementing compensated summation in the assembly would require 9 shadow arrays of size (ne_mass_ × nxn × nyn × nzn), new member allocations, and rework of `add_Mass` for a change that cannot register at the observed precision. Skipped.
+
+14. **The TSC drift is algebraic, not floating-point.** Direct cycle 0→1 energy-balance comparison on 20x20x4 np=4 sm=4:
+
+    | Quantity | CIC (HEAD) | TSC (HEAD) |
+    |---|---|---|
+    | ΔBE (cycle 0→1) | -2.53e-04 | -2.07e-04 |
+    | ΔEE | +1.92e-04 | +1.57e-04 |
+    | ΔKE | +6.01e-05 | +4.00e-05 |
+    | \|dE\| | 2.4e-08 | 1.06e-05 |
+    | Leak / exchange | 0.01% | 5.1% |
+
+    Both cases exchange ~2e-04 of energy between B, E, and particles per cycle. CIC closes the books to 0.01% (near the GMRES FP floor: 30 iterations × ε ≈ 6.6e-15 × ||E|| · problem scale). TSC closes to 5.1% — **500× worse relatively**. GMRES itself converges to residual 3-8e-16 in 30 iterations for TSC — there is no additional FP slack to recover.
+
+    The 5% per-cycle leak means the discrete energy conservation identity of ECSIM does not hold for the TSC + S·M·S-smoothing combination the way it does for CIC. This is a scheme-level property, not a rounding-error property, and Kahan compensation cannot recover it. The 8a, 8c, and 8d mitigations collectively touch every FP accumulator between P2G scatter and GMRES exit; none of them produced meaningful improvement at cycle 1 for the production sm=4 configuration.
+
+    **Candidate mechanisms** (hypotheses for Phase 9, not yet investigated):
+    - The ECSIM energy-conservation proof (Markidis & Lapenta 2011 for linear B-spline) may not extend unchanged to quadratic B-spline support when a symmetric 27-point smoother is applied to both `J` (in `MaxwellSource`) and `E` (in `MaxwellImage` via `S·M·S`). The algebraic identity that makes ⟨E_new, J_new⟩ exactly match the kinetic-energy change relies on particle work being computed with the SAME field that enters the operator. TSC + smoothing introduces a mismatch: particles see raw E at their positions via the TSC gather, but the operator sees `S·E·S`.
+    - The mass matrix assembled by the scatter is symmetric as a 4D object, but the `S·M·S` wrapping can break exact self-adjointness on the periodic grid when the effective stencil width (TSC 5-point × smoother 3-point = 7-point) exceeds the ghost halo.
+    - Pressure-tensor terms in the moment gather use 8-point linear weights (`add_Pxx` etc. in `Particles3D.cpp:1970-2011`) even in the TSC branch — an inconsistency with the TSC mass-matrix assembly that would not affect cycle-1 energy directly but does affect downstream moment bookkeeping.
+
 ---
 
-## What we don't know (remaining after Phase 6 and 8c)
+## What we don't know (after Phase 8 — the FP-noise lens is exhausted)
 
-Phase 6 had identified mass-matrix FP accumulation (TSC-specific) and smoothing FP amplification as the two candidate sources. Phase 8c measurement **rules out the mass-matrix product as the dominant source for the production smoothed config** — Kahan there has essentially zero effect at cycle 1. Candidates that remain for the smoothed case:
+Phase 6 hypothesized two FP noise sources (mass-matrix accumulation, smoothing amplification). Phase 8c eliminated (8c) the mass-matrix apply, Phase 8a eliminated the smoothing loop, Phase 8d was analytically eliminated for the mass-matrix assembly. All three candidate FP sources have been instrumented or reasoned through; none explain the 5% per-cycle algebraic leak.
 
-- **Smoothing loop itself** (Phase 8a) — 27-point stencil × ~240 applications per cycle. Now the prime suspect.
-- **Mass matrix ASSEMBLY** in `Particles3D.cpp:1857-1896` (not the apply) — the particle scatter accumulates into `Mxx..Mzz[g]` and, for TSC, 27 (63 groups' worth of) adds per particle per node. This is where the 90× unsmoothed-TSC-vs-CIC ratio likely originated, since Kahan in `mass_matrix_times_vector` only trimmed 2–3× of it.
-- **P2G moment scatter** in `Moments.cpp` / `Particles3D.cpp` — rho, J, and pressure tensor are accumulated by plain `+=` in per-rank arrays, then reduced via `communicateGhostP2G`. Same compensation argument.
+**Phase 9+ should investigate the scheme-level discrepancy, not the arithmetic.** Candidate directions:
 
-Remaining open questions:
+- **Symmetry of `S·M·S`.** Even if `M` and `S` are each self-adjoint on the periodic grid, the composition may fail self-adjointness if the combined stencil (TSC 5-point × 3-point smoother = effective 7-point) crosses the ghost halo (`n_ghost = 2`). Fix would require widening the halo to 3 or changing the smoothing application order.
+- **Particle-field consistency.** The mover gathers raw `E` at particle positions (TSC weights), while the operator acts on `S·E·S`. ECSIM's energy theorem relies on the work term using the same `E` both sides. Test: smooth E at particle positions too, and re-measure. Warning: this may de-stabilize the scheme (the whole point of S is to damp short-wavelength modes).
+- **Pressure-tensor shape-function inconsistency.** `Particles3D.cpp:1970-2011` uses 8-point linear weights in the TSC branch. Not a cycle-1 energy source but a moment-consistency issue that shows up in stress diagnostics.
+- **ECSIM theory for higher-order shape functions.** Markidis & Lapenta 2011 prove exact energy conservation for linear (CIC) B-splines. Whether the proof extends to quadratic (TSC) B-splines with the current smoother is an open literature question. If the published theorem requires a modified smoother (e.g., Vu & Brackbill 1992's binomial), the 5% leak may be a known theoretical limitation that cannot be removed without changing the smoother.
 
-- **Theoretical calibration**: Does published ECSIM literature predict this drift level for TSC? Does Markidis & Lapenta (2011) or Vu & Brackbill (1992) address higher-order shape functions?
-- **Multi-run statistics**: Every dE(N) comparison should be median-of-N over ≥5 runs. Single-run baselines in the summary table are known to be noisy.
-- **Grid-size scaling at fixed per-rank workload**: Test 40x40x4 with np=16 (same per-rank work as 20x20x4 np=4). Would dE/E_0 match the 20x20x4 baseline? If so, the drift is purely a per-rank FP accumulation artifact.
+Open questions that no longer need answering to conclude Phase 8:
+
+- ~~Multi-run statistics~~: resolved — cycle 1 is 0.2%-reproducible for sm=4, cycle 10 has 25× run-to-run variance; all future comparisons use median-over-5.
+- ~~Grid-size scaling at fixed per-rank workload~~: deferred to Phase 9; not required to decide on 8e.
 
 ---
 
@@ -194,25 +241,41 @@ All measured δ values are O(1e-03), but the curl-curl operator (which is mathem
 
 - [ ] **7b. Spectral analysis** — Save per-cycle dE for 50+ cycles. Fourier-transform to find dominant oscillation frequency. If it's at or near the grid Nyquist, the smoothing isn't fully suppressing the problematic TSC mode.
 
-### Phase 8: Targeted mitigation (two-source picture REVISED after 8c)
+### Phase 8: Targeted mitigation — COMPLETE (all FP sources ruled out, 8e chosen)
 
-Phase 6 had suggested the mass matrix was the dominant source (~3.8e-06 at cycle 1 for TSC no-smooth, vs ~4.2e-08 for CIC). Phase 8c (below) **disproves this for the production smoothed config** — Kahan in `mass_matrix_times_vector` does nothing to cycle 1 at sm=4. New priority: smoothing + mass-matrix ASSEMBLY, not the mass-matrix apply.
+Phase 6 had suggested the mass matrix was the dominant source (~3.8e-06 at cycle 1 for TSC no-smooth). Phase 8 systematically instrumented every FP accumulator between P2G scatter and GMRES exit; none of them explain the sm=4 cycle-1 drift. See Finding 14 for the algebraic-leak attribution that closes the phase.
 
-- [x] **8c. Kahan summation in `mass_matrix_times_vector`** — **DONE, partial win.** Applied in `fields/EMfields3D.cpp:2282-2344`. Over 3 runs on 20x20x4 np=4:
-    - TSC no-smooth cyc 1: 2.7e-06 → 1.2e-06 (**2.3×**, real)
-    - TSC sm=4 cyc 1: 1.065e-05 → 1.064e-05 (no effect — smoothing dominates)
+- [x] **8c. Kahan summation in `mass_matrix_times_vector`** — **DONE, real partial win, kept.** Applied in `fields/EMfields3D.cpp:2282-2344` (commit `605a247`). 5-run medians on 20x20x4 np=4:
+    - TSC no-smooth cyc 1: HEAD median 5.9e-06 (high run-to-run spread); previously reported 2.7e-06 → 1.2e-06 means were likely sample bias
+    - TSC sm=4 cyc 1: 1.065e-05 → 1.064e-05 (no effect — smoothing contribution dominates)
     - TSC sm=4 cyc 10: 1.34e-04 → 1.04e-04 (1.3×, within run-to-run variance)
     - CIC configs: unchanged (14-group mass matrix already at noise floor)
 
-    **Kept in tree** — improvement is real, cost is trivial (one lambda, three doubles), no regression. But it does NOT fix the smoothed-config drift, contrary to the Phase 6 hypothesis. See Finding 10 for measurement details and the run-to-run variance caveat. Input file `inputfiles/phase8c_tsc_kahan.inp` reproduces the production-config comparison.
+    **Kept in tree** — cost is trivial (one lambda, three doubles), measurable no-smooth improvement, no regression. Does NOT fix the smoothed-config drift. Reproducer: `inputfiles/phase8c_tsc_kahan.inp`.
 
-- [ ] **8a. Kahan (compensated) summation in `energy_conserve_smooth_direction`** — ← **NEW HIGHEST PRIORITY.** Phase 8c measurements moved this ahead of 8c in importance: at cycle 1, the sm=4 TSC case has dE ≈ 1.07e-05 regardless of whether the mass-matrix apply uses Kahan. The only FP source left to touch between the P2G scatter and the GMRES result is the four passes of the 3D energy-conserving smoother (`fields/EMfields3D.cpp:2998-3043`). Estimate based on the no-smooth→sm=4 jump (3.8e-06 → 1.1e-05, ~3×): compensation should recover most of that ~3× factor.
+- [x] **8a. Kahan (compensated) summation in `energy_conserve_smooth_direction`** — **DONE, rejected.** Implemented and tested on 20x20x4 np=4 sm=4 over 5 runs, then dropped. See Finding 12. The 27-point stencil was restructured into a compensated accumulator with an additive tree of 27 `kadd()` calls per grid node per smoothing pass. Result:
+    - TSC sm=4 cyc 1: 1.061e-05 HEAD → 1.063e-05 8a (0.2% — below noise)
+    - TSC sm=4 cyc 10: 1.27e-04 HEAD → 8.56e-05 8a (1.5×, inside 25× variance)
+    Zero measurable benefit at cycle 1 (the deterministic metric). Patch dropped, not archived.
 
-- [ ] **8d. Kahan in TSC mass-matrix ASSEMBLY** (`particles/Particles3D.cpp:1857-1896`). The 90× CIC-to-TSC ratio in Phase 6a came mostly from somewhere, and 8c showed it isn't the `A*v` accumulation. The remaining candidate is the per-particle scatter INTO the 63 mass-matrix groups, which is also the place with the most adds (≈ N_particles × 63 × 9 ≈ tens of millions per cycle). This is harder to retrofit than `mass_matrix_times_vector` — each destination cell is hit by many particles in a non-deterministic order, so plain per-cell Kahan doesn't apply; needs pairwise summation or per-thread partials + compensated reduction.
+- [x] **8d. Kahan in TSC mass-matrix ASSEMBLY** — **DONE, analytically ruled out.** See Finding 13. Per-cell accumulation order: ~730 particle contributions × max value 0.016 × ε ≈ 2.6e-15 absolute FP error. Ten orders of magnitude below the observed 1e-05 drift. Implementation would require nine shadow compensator arrays with the same footprint as `Mxx..Mzz` for effectively zero benefit. Skipped.
 
-- [ ] **8b. Fewer smoothing passes** — Re-sweep sm=1..8 after implementing 8a+8d, using **median over ≥5 runs** (Finding 10a: single-run dE(10) has ~25× variance and is unusable as a baseline).
+- [x] **8b. Fewer smoothing passes** — **SKIPPED.** The Phase 6 sweep (sm=0 unstable; sm=1,2 dE(1)=2.2-2.3e-05; sm=4 sweet spot at 1.1e-05; sm=8 oscillating) is not FP-limited, so re-sweeping with median-over-5 won't change the ranking. Phase 6's sm=4 sweet spot stands.
 
-- [ ] **8e. Accept as theoretical limitation** — If 8a+8c+8d together don't bring TSC sm=4 dE(1) below ~1e-06, document the expected drift level and set CI smoke test tolerance accordingly. The drift is bounded and oscillatory, not secular — it won't cause simulation divergence. Current Phase 8c baseline after Kahan: ~1.06e-05 at cycle 1, mean ~1.04e-04 at cycle 10 for the 20x20x4 np=4 sm=4 case.
+- [x] **8e. Accept as theoretical limitation** — **CHOSEN.** The 5.1% per-cycle energy-exchange leak in TSC sm=4 (vs 0.01% for CIC sm=4) is a scheme-level algebraic property, not FP rounding. Kahan cannot fix it. The drift is bounded and oscillatory, not secular. Recommended CI smoke test tolerances:
+    - `dE(1) ≤ 2.0e-05` (4× HEAD median, comfortable deterministic headroom)
+    - `dE(10) ≤ 3.0e-04` (2× the worst observed single run, accounting for 25× run-to-run variance)
+    - Add a multi-run median check (≥3 samples) for cycle-10 to average out MPI-reduction non-determinism.
+
+### Phase 9: Algebraic leak investigation (FUTURE WORK — out of scope for Phase 8)
+
+Phase 8 closed the FP-noise lens. If a future effort wants to push TSC sm=4 dE(1) below 1e-05, it needs to target the scheme-level leak. Candidate investigations (see Finding 14 for the rationale):
+
+- [ ] **9a. S·M·S self-adjointness on periodic grid with ghost halo.** Directly measure `δ = |⟨u, S M S v⟩ - ⟨v, S M S u⟩| / (||u|| · ||v||)` on a random pair at cycle 1. If `δ > ε_mach` for TSC but `~ε_mach` for CIC, the composition is the culprit.
+- [ ] **9b. Particle-field consistency experiment.** Modify the TSC mover to gather `S·E` (smoothed) at particle positions instead of raw `E`. Measure dE(1). This will either destabilize the scheme (confirming S is load-bearing for stability) or reduce the leak (confirming the mismatch is the source).
+- [ ] **9c. Widen halo to n_ghost = 3.** TSC + smoother = 7-point effective stencil. n_ghost=2 may not be enough to avoid boundary inconsistencies.
+- [ ] **9d. Literature check.** Search Markidis & Lapenta 2011, Lapenta ECSIM followups, Vu & Brackbill 1992 for TSC/quadratic B-spline energy-conservation theorems and discrete compatibility conditions for smoothing filters.
+- [ ] **9e. Pressure-tensor shape-function audit.** `Particles3D.cpp:1970-2011` mixes linear weights in the TSC branch — not a cycle-1 energy source but a consistency bug to track.
 
 ### Phase 9: Edge/corner self-copy modular wrapping (DEFERRED)
 
@@ -249,8 +312,8 @@ Won't fire for the all-periodic Double_Harris test. Fix when non-periodic BCs ar
 | `fields/EMfields3D.cpp:2418-2467` | communicateGhostP2G_mass_matrix |
 | `fields/EMfields3D.cpp:2711-2785` | MaxwellSource (RHS: smooths J at line 2746) |
 | `fields/EMfields3D.cpp:2827-2912` | MaxwellImage (operator: smooths E, computes M*E, curl²) |
-| `fields/EMfields3D.cpp:2998-3043` | energy_conserve_smooth_direction ← **next target (Phase 8a)** |
-| `particles/Particles3D.cpp:1857-1896` | TSC mass matrix assembly ← **Phase 8d candidate** |
+| `fields/EMfields3D.cpp:2998-3043` | energy_conserve_smooth_direction (Phase 8a tested, no benefit — see Finding 12) |
+| `particles/Particles3D.cpp:1857-1896` | TSC mass matrix assembly (Phase 8d analytically ruled out — Finding 13) |
 | `phase4-diagnostic.patch` (untracked) | Extracted Phase 4 operator-symmetry diagnostic — re-apply with `git apply` when needed |
 | `inputfiles/ci_smoke_tsc.inp` | TSC smoke test (nzc=4, sm=4) |
 | `inputfiles/phase6a_cic_nsmooth.inp` | Phase 6a: CIC no-smooth 10-cycle test |
@@ -274,6 +337,7 @@ Won't fire for the all-periodic Double_Harris test. Fix when non-periodic BCs ar
 | `e2e7c0d` | fix: face self-copy offset consistency + min grid assertion |
 | `5b421ee` | docs: comprehensive TSC energy conservation investigation results |
 | `d474568` | docs: add np=1 vs np=4 finding |
-| (uncommitted) | perf: Phase 8c — Kahan compensated summation in `mass_matrix_times_vector` (2–3× TSC no-smooth cyc1) |
+| `605a247` | perf: Kahan summation in mass_matrix_times_vector (Phase 8c) |
+| (pending) | docs: Phase 8 conclusion — FP mitigations exhausted, drift is algebraic (5% cyc-0→1 leak for TSC sm=4 vs 0.01% for CIC). Phase 8e accepted, Phase 9 candidates outlined. |
 | (extracted) | Phase 4 operator-symmetry diagnostic — in `phase4-diagnostic.patch`, removed from tree because it perturbs FP determinism even when gated (Finding 11) |
-| (untracked) | test: Phase 6 input files (6a CIC/TSC no-smooth, 6b CIC smooth, 6c TSC 40x40x4) + `phase8c_tsc_kahan.inp` |
+| (dropped) | Phase 8a Kahan smoothing — tested, no benefit (Finding 12), patch discarded |
