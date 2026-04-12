@@ -2691,6 +2691,13 @@ void EMfields3D::calculateE()
     time_com.stop();
     #endif
 
+    //* Phase 10m: post-`calculateE` Helmholtz low-pass on the time-centered field Eth.
+    //* Applied BEFORE Ex/Ey/Ez are derived from Eth, so the time-advanced E inherits the
+    //* filtering automatically. Decoupled from MaxwellImage's S·M·S — the implicit operator
+    //* structure is unchanged, sidestepping the Phase 10k drop-in failure mode.
+    if (col->getPostSolveHelmholtz())
+        post_solve_filter_E(Exth, Eyth, Ezth, nxn, nyn, nzn);
+
     //* E(x,y,z) = -(1.0 - th)/th * E(x,y,z) + 1.0/th * Eth(x,y,z): scale the electric field values
     addscale(1.0/th, -(1.0 - th)/th, Ex, Exth, nxn, nyn, nzn);
     addscale(1.0/th, -(1.0 - th)/th, Ey, Eyth, nxn, nyn, nzn);
@@ -3020,7 +3027,7 @@ void EMfields3D::calculateB()
 
 //! ===================================== Smoothing ===================================== !//
 
-void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir)
+void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir, int kernel_override)
 {
     const Collective *col = &get_col();
     const VirtualTopology3D *vct = &get_vct();
@@ -3040,13 +3047,134 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
     //  the only one that's correct for n_ghost > 1.
     communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
 
-    const int kernel = col->getSmoothKernelInt();   // 0 = binomial (3-pt), 1 = binomial5 (5-pt)
+    //* Phase 10m: kernel_override lets the post-solve Helmholtz hook reuse this method
+    //* without requiring callers to mutate the global Collective state.
+    const int kernel = (kernel_override >= 0) ? kernel_override : col->getSmoothKernelInt();   // 0 = binomial, 1 = binomial5, 2 = helmholtz, 3 = binomial5_refresh
 
     //* binomial5 reaches ±2 cells in each direction, so at least 2 ghost layers must exist.
     if (kernel == 1 && n_ghost_ < 2) {
         if (vct->getCartesian_rank() == 0)
             cout << "ERROR: SmoothKernel=binomial5 requires n_ghost >= 2 (current = " << n_ghost_ << ")" << endl;
         MPI_Abort(MPI_COMM_WORLD, -1);
+    }
+
+    //* Phase 10k: Helmholtz low-pass branch — early return since it has its own iteration structure.
+    //*   Solve (I - α ∇²) S_new = S_old via short CG. The operator is SPD and self-adjoint, so
+    //*   applying it identically to E and J preserves the energy-conservation argument. Default
+    //*   α = (max(Lx,Ly,Lz)/(2π))² puts the half-power point at the domain fundamental k = 2π/L_max,
+    //*   which is exactly the unstable mode identified in Phase 10j (Finding 27).
+    if (kernel == 2)
+    {
+        double alpha = col->getHelmholtzAlpha();
+        if (alpha <= 0.0) {
+            double Lmax = Lx;
+            if (Ly > Lmax) Lmax = Ly;
+            if (Lz > Lmax) Lmax = Lz;
+            const double inv_two_pi = 1.0 / (2.0 * M_PI);
+            alpha = (Lmax * inv_two_pi) * (Lmax * inv_two_pi);
+        }
+        const int niter = col->getHelmholtzNiter();
+
+        //* 7-point Laplacian coefficients of A = I - α ∇²_h.
+        const double cx = alpha / (dx * dx);
+        const double cy = alpha / (dy * dy);
+        const double cz = alpha / (dz * dz);
+        const double cd = 1.0 + 2.0 * (cx + cy + cz);   // diagonal of A
+
+        //* CG buffers (interior + ghost; the inner stencil only writes interior).
+        double ***xCG = newArr3(double, nx, ny, nz);
+        double ***rCG = newArr3(double, nx, ny, nz);
+        double ***pCG = newArr3(double, nx, ny, nz);
+        double ***ApCG = newArr3(double, nx, ny, nz);
+
+        //* Zero everything (ghost layers stay 0 except for x which mirrors data).
+        for (int i = 0; i < nx; i++)
+            for (int j = 0; j < ny; j++)
+                for (int k = 0; k < nz; k++) {
+                    xCG[i][j][k]  = data[i][j][k];   // initial guess x_0 = b (cheap; A ≈ I)
+                    rCG[i][j][k]  = 0.0;
+                    pCG[i][j][k]  = 0.0;
+                    ApCG[i][j][k] = 0.0;
+                }
+
+        //* r = b - A x_0; with x_0 = data and ghosts of x_0 valid, this is r = α ∇² data.
+        for (int i = n_ghost_; i < nx - n_ghost_; i++)
+            for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                for (int k = n_ghost_; k < nz - n_ghost_; k++) {
+                    const double Ax = cd * xCG[i][j][k]
+                                    - cx * (xCG[i-1][j][k] + xCG[i+1][j][k])
+                                    - cy * (xCG[i][j-1][k] + xCG[i][j+1][k])
+                                    - cz * (xCG[i][j][k-1] + xCG[i][j][k+1]);
+                    rCG[i][j][k] = data[i][j][k] - Ax;
+                    pCG[i][j][k] = rCG[i][j][k];
+                }
+
+        //* Inner-product helper: sum over interior nodes only, then MPI_SUM across ranks.
+        //* CG correctness needs only consistency, not physical interpretation, so the
+        //* (small) periodic-boundary double counting is harmless.
+        auto interior_dot = [&](double*** u, double*** v) -> double {
+            double local = 0.0;
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++)
+                        local += u[i][j][k] * v[i][j][k];
+            double global = 0.0;
+            MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_SUM, vct->getFieldComm());
+            return global;
+        };
+
+        double rsold = interior_dot(rCG, rCG);
+
+        for (int it = 0; it < niter; it++) {
+            //* p needs valid ghosts before the stencil matvec.
+            communicateNodeBC(nx, ny, nz, pCG, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
+
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++) {
+                        ApCG[i][j][k] = cd * pCG[i][j][k]
+                                      - cx * (pCG[i-1][j][k] + pCG[i+1][j][k])
+                                      - cy * (pCG[i][j-1][k] + pCG[i][j+1][k])
+                                      - cz * (pCG[i][j][k-1] + pCG[i][j][k+1]);
+                    }
+
+            const double pAp = interior_dot(pCG, ApCG);
+            if (pAp <= 0.0) break;                       // breakdown safeguard
+            const double alpha_cg = rsold / pAp;
+
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++) {
+                        xCG[i][j][k] += alpha_cg * pCG[i][j][k];
+                        rCG[i][j][k] -= alpha_cg * ApCG[i][j][k];
+                    }
+
+            const double rsnew = interior_dot(rCG, rCG);
+            if (rsnew < 1e-30) break;                    // converged
+
+            const double beta = rsnew / rsold;
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++)
+                        pCG[i][j][k] = rCG[i][j][k] + beta * pCG[i][j][k];
+
+            rsold = rsnew;
+        }
+
+        //* Copy converged x back to data and refresh halo.
+        for (int i = n_ghost_; i < nx - n_ghost_; i++)
+            for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                for (int k = n_ghost_; k < nz - n_ghost_; k++)
+                    data[i][j][k] = xCG[i][j][k];
+
+        communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
+
+        delArr3(xCG, nx, ny);
+        delArr3(rCG, nx, ny);
+        delArr3(pCG, nx, ny);
+        delArr3(ApCG, nx, ny);
+        delArr3(temp, nxn, nyn);
+        return;
     }
 
     for (int icount = 0; icount < num_smoothings; icount++)
@@ -3065,7 +3193,7 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
                                                   + 1.0 * (data[i-1][j-1][k-1] + data[i+1][j-1][k-1] + data[i-1][j+1][k-1] + data[i+1][j+1][k-1]                          //* Corners
                                                         +  data[i-1][j-1][k+1] + data[i+1][j-1][k+1] + data[i-1][j+1][k+1] + data[i+1][j+1][k+1]));                       //* Corners
         }
-        else // kernel == 1: binomial5
+        else if (kernel == 1) // binomial5
         {
             //* Phase 10i: 5-point binomial (1,4,6,4,1)/16 per direction → 125-point tensor product / 4096
             //* Half-width = 2 cells (vs 1 for the 3-point kernel), i.e. doubled smoothing radius per pass.
@@ -3085,6 +3213,45 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
                         }
                         temp[i][j][k] = sum * inv4096;
                     }
+        }
+        else // kernel == 3: binomial5_refresh
+        {
+            //* Phase 10l: decompose each pass into two narrow (1,2,1)/4 sweeps with a halo
+            //* refresh in between. By the convolution identity (1,2,1)*(1,2,1) = (1,4,6,4,1)
+            //* this should equal binomial sm=2N bit-for-bit on an infinite grid; the only place
+            //* it can differ from plain binomial5 is the inter-pass halo refresh, which is
+            //* exactly Finding 26's hypothesised culprit.
+
+            //* First narrow pass: data → temp
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++)
+                        temp[i][j][k] = 0.015625 * (8.0*data[i][j][k]
+                                                  + 4.0 * (data[i-1][j][k] + data[i+1][j][k] + data[i][j-1][k] + data[i][j+1][k] + data[i][j][k-1] + data[i][j][k+1])
+                                                  + 2.0 * (data[i-1][j-1][k] + data[i+1][j-1][k] + data[i-1][j+1][k] + data[i+1][j+1][k]
+                                                        +  data[i-1][j][k-1] + data[i+1][j][k-1] + data[i][j-1][k-1] + data[i][j+1][k-1]
+                                                        +  data[i-1][j][k+1] + data[i+1][j][k+1] + data[i][j-1][k+1] + data[i][j+1][k+1])
+                                                  + 1.0 * (data[i-1][j-1][k-1] + data[i+1][j-1][k-1] + data[i-1][j+1][k-1] + data[i+1][j+1][k-1]
+                                                        +  data[i-1][j-1][k+1] + data[i+1][j-1][k+1] + data[i-1][j+1][k+1] + data[i+1][j+1][k+1]));
+
+            //* Copy temp → data and refresh halo (the load-bearing inter-pass exchange).
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++)
+                        data[i][j][k] = temp[i][j][k];
+            communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
+
+            //* Second narrow pass: data → temp (final copy + refresh happens below).
+            for (int i = n_ghost_; i < nx - n_ghost_; i++)
+                for (int j = n_ghost_; j < ny - n_ghost_; j++)
+                    for (int k = n_ghost_; k < nz - n_ghost_; k++)
+                        temp[i][j][k] = 0.015625 * (8.0*data[i][j][k]
+                                                  + 4.0 * (data[i-1][j][k] + data[i+1][j][k] + data[i][j-1][k] + data[i][j+1][k] + data[i][j][k-1] + data[i][j][k+1])
+                                                  + 2.0 * (data[i-1][j-1][k] + data[i+1][j-1][k] + data[i-1][j+1][k] + data[i+1][j+1][k]
+                                                        +  data[i-1][j][k-1] + data[i+1][j][k-1] + data[i][j-1][k-1] + data[i][j+1][k-1]
+                                                        +  data[i-1][j][k+1] + data[i+1][j][k+1] + data[i][j-1][k+1] + data[i][j+1][k+1])
+                                                  + 1.0 * (data[i-1][j-1][k-1] + data[i+1][j-1][k-1] + data[i-1][j+1][k-1] + data[i+1][j+1][k-1]
+                                                        +  data[i-1][j-1][k+1] + data[i+1][j-1][k+1] + data[i-1][j+1][k+1] + data[i+1][j+1][k+1]));
         }
 
         for (int i = n_ghost_; i < nx - n_ghost_; i++)
@@ -3110,6 +3277,17 @@ void EMfields3D::energy_conserve_smooth(arr3_double data_X, arr3_double data_Y, 
         energy_conserve_smooth_direction(data_Y, nx, ny, nz, 1);
         energy_conserve_smooth_direction(data_Z, nx, ny, nz, 2);
     }
+}
+
+void EMfields3D::post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field, arr3_double Ez_field, int nx, int ny, int nz)
+{
+    //* Phase 10m: post-`calculateE` Helmholtz low-pass. Reuses `energy_conserve_smooth_direction`
+    //* with kernel_override=2 (helmholtz) so the binomial smoother stays in its structural slot
+    //* inside MaxwellImage and the Helmholtz acts only as a once-per-cycle dissipation step on E.
+    //* α and inner CG iter count come from `HelmholtzAlpha` / `HelmholtzNiter`.
+    energy_conserve_smooth_direction(Ex_field, nx, ny, nz, 0, /*kernel_override=*/2);
+    energy_conserve_smooth_direction(Ey_field, nx, ny, nz, 1, /*kernel_override=*/2);
+    energy_conserve_smooth_direction(Ez_field, nx, ny, nz, 2, /*kernel_override=*/2);
 }
 
 

@@ -174,7 +174,14 @@ public:
 
     //* Energy-conserving smoothing
     void energy_conserve_smooth(arr3_double data_X, arr3_double data_Y, arr3_double data_Z, int nx, int ny, int nz);
-    void energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir);
+    //* kernel_override: -1 (default) -> use col->getSmoothKernelInt();
+    //*                  >=0          -> force this kernel (Phase 10m: post-solve Helmholtz reuse)
+    void energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir, int kernel_override = -1);
+
+    //* Phase 10m: post-`calculateE` Helmholtz low-pass applied once per cycle to (Ex, Ey, Ez)
+    //* OUTSIDE the implicit operator. Decoupled from `S·M·S` so it does not restructure
+    //* `MaxwellImage` the way Phase 10k's drop-in attempt did.
+    void post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field, arr3_double Ez_field, int nx, int ny, int nz);
 
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();

@@ -210,6 +210,9 @@ class Collective
     int getNumSmoothings()              const { return num_smoothings; }
     string getSmoothKernel()            const { return SmoothKernel; }
     int    getSmoothKernelInt()         const { return smoothKernelInt; }
+    double getHelmholtzAlpha()          const { return HelmholtzAlpha; }
+    int    getHelmholtzNiter()          const { return HelmholtzNiter; }
+    bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -251,8 +254,26 @@ class Collective
     //*   "binomial"  (default) -> (1,2,1)/4 per-dim tensor product, 27-point 3D, 1-cell half-width.
     //*   "binomial5"            -> (1,4,6,4,1)/16 per-dim tensor product, 125-point 3D, 2-cell half-width.
     //*                             Needs n_ghost >= 2 (already the TSC default).
+    //* Phase 10k: low-k–aware Helmholtz filter:
+    //*   "helmholtz" -> (I - α ∇²) S_new = S_old, solved per-call by a few CG iterations.
+    //*                  α has units of length²; default 0 -> auto = (max(Lx,Ly,Lz)/(2π))²
+    //*                  which puts the half-power point at the domain fundamental k = 2π/L.
+    //* Phase 10l: bin5 decomposed into bin × halo refresh × bin (Finding 26 follow-up).
+    //*   "binomial5_refresh" -> per pass: (1,2,1)/4 → communicateNodeBC → (1,2,1)/4.
+    //*                          Equals binomial sm=2N bit-for-bit if Finding 26 is right
+    //*                          (the missing piece in plain binomial5 is the inter-pass halo refresh).
     string SmoothKernel;
-    int    smoothKernelInt;     // 0 = binomial (3-pt), 1 = binomial5 (5-pt)
+    int    smoothKernelInt;     // 0 = binomial (3-pt), 1 = binomial5 (5-pt), 2 = helmholtz, 3 = binomial5_refresh
+
+    //* Phase 10k Helmholtz smoother knobs
+    double HelmholtzAlpha;      // 0 (default) -> auto from box size; >0 -> explicit α
+    int    HelmholtzNiter;      // inner CG iterations per smoother call (default 12)
+
+    //* Phase 10m: enable a once-per-cycle Helmholtz low-pass filter applied to (Ex, Ey, Ez)
+    //* AFTER `calculateE()` returns and BEFORE `calculateB()` and the particle push.
+    //* Decoupled from `MaxwellImage`'s S·M·S, so the implicit operator structure
+    //* (which Phase 10k showed is fragile to long-range filters) is unchanged.
+    bool   PostSolveHelmholtz;
 
     int CurrentCycle;
     int zeroCurrent;

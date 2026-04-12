@@ -16,6 +16,8 @@ plan-*.md
 review*.md
 /phase*_results.txt
 /phase*_results.json
+/phase*_dmd*.json
+/phase*_dmd*.png
 
 # Pixi
 .pixi/

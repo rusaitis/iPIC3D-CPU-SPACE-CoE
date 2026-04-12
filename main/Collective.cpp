@@ -110,17 +110,30 @@ void Collective::ReadInput(string inputfile)
         SmoothCycle     = config.read<int>       ("SmoothCycle", 1);
         config.readInto(num_smoothings, "num_smoothings", 0);
 
-        //* Phase 10i: smoother kernel selection (see Collective.h for semantics)
+        //* Phase 10i/10k/10l: smoother kernel selection (see Collective.h for semantics)
         SmoothKernel    = config.read<string>    ("SmoothKernel", "binomial");
         if (SmoothKernel == "binomial")
             smoothKernelInt = 0;
         else if (SmoothKernel == "binomial5")
             smoothKernelInt = 1;
+        else if (SmoothKernel == "helmholtz")
+            smoothKernelInt = 2;
+        else if (SmoothKernel == "binomial5_refresh")
+            smoothKernelInt = 3;
         else {
             cout << "ERROR: Unknown SmoothKernel '" << SmoothKernel
-                 << "'. Valid values: binomial, binomial5." << endl;
+                 << "'. Valid values: binomial, binomial5, helmholtz, binomial5_refresh." << endl;
             MPI_Abort(MPI_COMM_WORLD, -1);
         }
+
+        //* Phase 10k Helmholtz smoother knobs. Default α = 0 means auto-pick:
+        //* α = (max(Lx,Ly,Lz)/(2π))², which sets the Helmholtz half-power point at
+        //* the domain fundamental k = 2π/L_max — exactly the unstable mode in Finding 27.
+        HelmholtzAlpha  = config.read<double>    ("HelmholtzAlpha", 0.0);
+        HelmholtzNiter  = config.read<int>       ("HelmholtzNiter", 12);
+
+        //* Phase 10m: post-`calculateE` Helmholtz hook (default off — opt-in).
+        PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
         SaveDirName     = config.read<string>    ("SaveDirName", "data");
         RestartDirName  = config.read<string>    ("RestartDirName", "data");
