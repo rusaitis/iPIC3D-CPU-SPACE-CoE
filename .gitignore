@@ -7,17 +7,12 @@ data*/
 # Example files
 examples/
 
-# Local build and notes
-PLAN.md
-NOTES.md
-NOTES-preconditioner.md
-NOTES-solve-sequence.md
-plan-*.md
+# Local notes, plans, and phase artifacts
+NOTES*.md
+PLAN*.md
+plan*.md
 review*.md
-/phase*_results.txt
-/phase*_results.json
-/phase*_dmd*.json
-/phase*_dmd*.png
+phase*
 
 # Pixi
 .pixi/
