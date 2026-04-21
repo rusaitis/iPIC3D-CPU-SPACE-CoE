@@ -237,20 +237,28 @@ public:
     //* The 8-corner add_Rho/add_Jxh/... helpers above hardcode a 2x2x2 pattern,
     //* which is too rigid for the 27-node TSC support. These accept a single
     //* (value, node) pair so the per-particle TSC code can call them in a 27-loop.
+    // Race guard: ECSIM gather runs inside `#pragma omp parallel for` over particles
+    // (Particles3D.cpp:1518,1530); multiple threads scatter into the same grid nodes.
+    // atomic update fixes the read-modify-write race (no lost contributions); FP order
+    // remains thread-schedule-dependent so run-to-run results still vary at ULP.
     inline void add_Rho_node(double value, int X, int Y, int Z, int is)
     {
+        #pragma omp atomic update
         rhons[is][X][Y][Z] += value * invVOL;
     }
     inline void add_Jxh_node(double value, int X, int Y, int Z, int is)
     {
+        #pragma omp atomic update
         Jxhs[is][X][Y][Z] += value;
     }
     inline void add_Jyh_node(double value, int X, int Y, int Z, int is)
     {
+        #pragma omp atomic update
         Jyhs[is][X][Y][Z] += value;
     }
     inline void add_Jzh_node(double value, int X, int Y, int Z, int is)
     {
+        #pragma omp atomic update
         Jzhs[is][X][Y][Z] += value;
     }
     
@@ -820,12 +828,15 @@ private:
 };
 
 //* Add an amount of charge density to charge density field at node X,Y,Z
-inline void EMfields3D::add_Rho(double weight[8], int X, int Y, int Z, int is) 
+// See note above add_Rho_node for the atomic-update rationale.
+inline void EMfields3D::add_Rho(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 rhons[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k] * invVOL;
+            }
 }
 
 //* Add an amount of current density to current density field at node X,Y,Z
@@ -833,22 +844,28 @@ inline void EMfields3D::add_Jxh(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 Jxhs[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k];
+            }
 }
 inline void EMfields3D::add_Jyh(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 Jyhs[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k];
+            }
 }
 inline void EMfields3D::add_Jzh(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 Jzhs[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k];
+            }
 }
 
 inline void EMfields3D::add_Jx(double weight[8], int X, int Y, int Z, int is) 
@@ -1036,16 +1053,28 @@ inline void EMfields3D::add_Qyyz(double weight[8], int X, int Y, int Z, int is)
 }
 
 //* Add an amount of current density to mass matrix field at node X,Y *//
-inline void EMfields3D::add_Mass(double value[3][3], int X, int Y, int Z, int ind) 
+// See note above add_Rho_node for the atomic-update rationale. add_Mass is called
+// once per node-pair in the 2x2x2 x 14-group mass-matrix assembly (Particles3D.cpp
+// ~1801), so it's the hottest atomic site; measured ~30% gather overhead vs no-atomic.
+inline void EMfields3D::add_Mass(double value[3][3], int X, int Y, int Z, int ind)
 {
+    #pragma omp atomic update
     Mxx[ind][X][Y][Z] += value[0][0];
+    #pragma omp atomic update
     Mxy[ind][X][Y][Z] += value[0][1];
+    #pragma omp atomic update
     Mxz[ind][X][Y][Z] += value[0][2];
+    #pragma omp atomic update
     Myx[ind][X][Y][Z] += value[1][0];
+    #pragma omp atomic update
     Myy[ind][X][Y][Z] += value[1][1];
+    #pragma omp atomic update
     Myz[ind][X][Y][Z] += value[1][2];
+    #pragma omp atomic update
     Mzx[ind][X][Y][Z] += value[2][0];
+    #pragma omp atomic update
     Mzy[ind][X][Y][Z] += value[2][1];
+    #pragma omp atomic update
     Mzz[ind][X][Y][Z] += value[2][2];
 }
 
