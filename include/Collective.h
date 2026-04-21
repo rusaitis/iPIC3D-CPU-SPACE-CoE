@@ -180,6 +180,8 @@ class Collective
     double getGMREStol()                const{ return (GMREStol); }
     int    getNiterGMRES()              const{ return (NiterGMRES); }
     string getSolverType()              const{ return (SolverType); }
+    //* Step 11: MaxwellImage operator choice ("curl_curl" legacy | "lap_graddiv" self-adjoint).
+    string getMaxwellOperator()         const{ return (MaxwellOperator); }
     bool getPrecMatrix()                const{ return (PrecMatrix); }
     bool getPrecDiagnostics()           const{ return (PrecDiagnostics); }
     string getPrecType()                const{ return (PrecType); }
@@ -456,6 +458,10 @@ class Collective
 
     //* Field solver type: "GMRES" (default) or "PETSc"
     string SolverType;
+
+    //* MaxwellImage curl² operator: "curl_curl" (legacy) or "lap_graddiv" (self-adjoint).
+    //* See plan-energy-conservation.md Step 11.
+    string MaxwellOperator;
 
     //* Use explicit preconditioner matrix for PETSc solver
     bool PrecMatrix;

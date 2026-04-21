@@ -188,6 +188,14 @@ void Collective::ReadInput(string inputfile)
         PrecMatrix                  = config.read<bool>     ("PrecMatrix", false);
         PrecDiagnostics             = config.read<bool>     ("PrecDiagnostics", false);
         PrecType                    = config.read<string>   ("PrecType", "None");
+        //* Structural choice of curl² operator in MaxwellImage:
+        //*   "curl_curl"  — legacy iPIC3D path: curlC2N(curlN2C(E)).
+        //*   "lap_graddiv" — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E) via composed
+        //*                   node-centered operators.
+        //* On DoubleGEM (np=1, 30 cyc) the two produce near-identical |dE/E₀|
+        //* (2.15e-04 vs 2.16e-04). Kept as a cross-code comparison knob, not an
+        //* energy-conservation fix. See plan-energy-conservation.md Step 11.
+        MaxwellOperator             = config.read<string>   ("MaxwellOperator", "curl_curl");
         // Backward compat: PrecMatrix=true implies PrecType=Matrix if not explicitly set
         if (PrecMatrix && PrecType == "None")
             PrecType = "Matrix";

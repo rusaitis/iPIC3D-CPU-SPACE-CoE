@@ -2879,14 +2879,43 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
 	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
 
-    //? curl(curl(E)) is computed using finite differences
-    grid->curlN2C(tempXC, tempYC, tempZC, tempX, tempY, tempZ);
-    
-    communicateCenterBC(nxc, nyc, nzc, tempXC, 1, 1, 1, 1, 1, 1, vct, this);
-    communicateCenterBC(nxc, nyc, nzc, tempYC, 1, 1, 1, 1, 1, 1, vct, this);
-    communicateCenterBC(nxc, nyc, nzc, tempZC, 1, 1, 1, 1, 1, 1, vct, this);
+    //? curl(curl(E)) assembly. Two paths selected by MaxwellOperator:
+    //*   "curl_curl"   (default) — legacy composition curlC2N(curlN2C(E)).
+    //*   "lap_graddiv"           — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E)
+    //*                             via composed node-centered lapN2N and
+    //*                             divN2C→gradC2N.
+    //* Step 11 measured both on DoubleGEM (np=1, 30 cyc): |dE/E₀| = 2.16e-04 vs
+    //* 2.15e-04 — neither recovers ECSIM's 2.4e-14 machine precision, so the flag
+    //* is a cross-code comparison knob, not an energy-conservation fix.
+    const std::string maxwell_op = col->getMaxwellOperator();
+    if (maxwell_op == "lap_graddiv")
+    {
+        grid->lapN2N(imageX, tempX, this);
+        grid->lapN2N(imageY, tempY, this);
+        grid->lapN2N(imageZ, tempZ, this);
+        scale(imageX, -1.0, nxn, nyn, nzn);
+        scale(imageY, -1.0, nxn, nyn, nzn);
+        scale(imageZ, -1.0, nxn, nyn, nzn);
 
-    grid->curlC2N(imageX, imageY, imageZ, tempXC, tempYC, tempZC);
+        //* grad(div E): divE at cell centres → halo refresh → gradient back to nodes.
+        //* temp2 is reused as scratch — safe because M·E overwrites it below.
+        grid->divN2C(tempXC, tempX, tempY, tempZ);
+        communicateCenterBC(nxc, nyc, nzc, tempXC, 1, 1, 1, 1, 1, 1, vct, this);
+        grid->gradC2N(temp2X, temp2Y, temp2Z, tempXC);
+        addscale(1.0, imageX, temp2X, nxn, nyn, nzn);
+        addscale(1.0, imageY, temp2Y, nxn, nyn, nzn);
+        addscale(1.0, imageZ, temp2Z, nxn, nyn, nzn);
+    }
+    else
+    {
+        grid->curlN2C(tempXC, tempYC, tempZC, tempX, tempY, tempZ);
+
+        communicateCenterBC(nxc, nyc, nzc, tempXC, 1, 1, 1, 1, 1, 1, vct, this);
+        communicateCenterBC(nxc, nyc, nzc, tempYC, 1, 1, 1, 1, 1, 1, vct, this);
+        communicateCenterBC(nxc, nyc, nzc, tempZC, 1, 1, 1, 1, 1, 1, vct, this);
+
+        grid->curlC2N(imageX, imageY, imageZ, tempXC, tempYC, tempZC);
+    }
 
     //* Multiply by factor
     double factor = c*th*dt*c*th*dt;
