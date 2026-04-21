@@ -1476,6 +1476,186 @@ void Particles3D::ECSIM_position(Field *EMf)
     }
 }
 
+//? ECSIM combined velocity+position mover — port of ecsim/particles/Particles3D.cpp:4209
+//  Differs from iPIC3D's ECSIM_velocity+ECSIM_position split:
+//   (a) NiterMover inner iterations of Boris midpoint converge the uptilde velocity
+//       at the midpoint position (xptilde + uptilde * dt_sub/2).
+//   (b) Position advances with the midpoint velocity (x = xptilde + uptilde * dt_sub),
+//       not the end-of-step velocity — symplectic / second-order.
+//   (c) Adaptive sub-cycling: dt_sub = π·c / (4·|qom|·B) caps the sub-step at a quarter
+//       cyclotron period; sub_cycles = ⌈dt/dt_sub⌉. Typical plasmas have B~1 in plasma
+//       units → sub_cycles=1 and only (a),(b) differ from legacy.
+//   (d) No charge-conservation position correction (dxp,dyp,dzp) — matching ECSIM.
+void Particles3D::mover_PC_sub(Field *EMf)
+{
+    #pragma omp parallel
+    {
+        convertParticlesToAoS();
+
+        #pragma omp master
+        if (vct->getCartesian_rank() == 0)
+            cout << "*** ECSIM MOVER_PC_sub (vel+pos, NiterMover=" << NiterMover
+                 << ") for species " << ns << " ***" << endl;
+
+        const_arr4_double fieldForPcls = EMf->get_fieldForPcls();
+
+        #pragma omp for schedule(static)
+        for (int pidx = 0; pidx < getNOP(); pidx++)
+        {
+            SpeciesParticle* pcl = &_pcls[pidx];
+            ALIGNED(pcl);
+
+            //* Initial state at time n. `xptilde` is re-captured at the start of each
+            //* sub-cycle (per-sub-cycle reference), unlike ECSIM's `const xptilde =
+            //* x[rest]`. ECSIM's pattern is correct only when sub_cycles=1; with
+            //* sub_cycles>1 the const xptilde causes the final position to advance by
+            //* only one sub-step (uptilde_N · dt_sub) instead of cumulative advancement.
+            //* iPIC3D's electron timestep triggers sub_cycles~34 for typical Harris B,
+            //* so this fix is required.
+            double xp = pcl->get_x(), yp = pcl->get_y(), zp = pcl->get_z();
+            double up = pcl->get_u(), vp = pcl->get_v(), wp = pcl->get_w();
+            double uptilde = 0.0, vptilde = 0.0, wptilde = 0.0;
+
+            //* Shared scratch for field interpolation (same layout as ECSIM_velocity)
+            double weights_lin[8] ALLOC_ALIGNED;
+            double weights_tsc[27];
+            int cx, cy, cz;
+            double sampled_field[8] ALLOC_ALIGNED;
+            const int num_field_components = 2*DFIELD_3or4;
+
+            //* --------- Initial B interpolation → cyclotron-based sub-step ---------
+            for (int i = 0; i < 8; i++) sampled_field[i] = 0.0;
+            if (stencil_order_ == 1)
+            {
+                grid->get_safe_cell_and_weights(xp, yp, zp, cx, cy, cz, weights_lin);
+                const double* field_components[8] ALLOC_ALIGNED;
+                get_field_components_for_cell(field_components, fieldForPcls, cx, cy, cz);
+                for (int c = 0; c < 8; c++)
+                {
+                    const double* fc = field_components[c];
+                    ASSUME_ALIGNED(fc);
+                    const double w = weights_lin[c];
+                    #pragma simd
+                    for (int i = 0; i < num_field_components; i++)
+                        sampled_field[i] += w * fc[i];
+                }
+            }
+            else
+            {
+                grid->get_nearest_node_and_weights_tsc(xp, yp, zp, cx, cy, cz, weights_tsc);
+                for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b)
+                for (int cc = 0; cc < 3; ++cc)
+                {
+                    const double w = weights_tsc[(a*3 + b)*3 + cc];
+                    const double* fn = fieldForPcls[cx + a - 1][cy + b - 1][cz + cc - 1];
+                    ASSUME_ALIGNED(fn);
+                    #pragma simd
+                    for (int i = 0; i < num_field_components; i++)
+                        sampled_field[i] += w * fn[i];
+                }
+            }
+            const double Bx0 = sampled_field[0], By0 = sampled_field[1], Bz0 = sampled_field[2];
+            const double B_mag = sqrt(Bx0*Bx0 + By0*By0 + Bz0*Bz0);
+
+            double dt_sub = (B_mag > 0.0) ? (M_PI * c / (4.0 * fabs(qom) * B_mag)) : dt;
+            int sub_cycles = int(dt / dt_sub) + 1;
+            dt_sub = dt / double(sub_cycles);
+            const double dto2 = 0.5 * dt_sub;
+            const double qomdt2 = qom * dto2 / c;
+
+            //* --------- Sub-cycling loop ---------
+            for (int cyc = 0; cyc < sub_cycles; cyc++)
+            {
+                //* Per-sub-cycle reference position. After each sub-cycle this advances
+                //* by uptilde·dt_sub so the cumulative position after all sub-cycles is
+                //* the proper full-step advancement.
+                const double xptilde = xp, yptilde = yp, zptilde = zp;
+
+                //* NiterMover inner iterations refine the midpoint velocity uptilde.
+                //* If sub-cycles is very dense, a single iter per sub-cycle is sufficient
+                //* (matches ECSIM's heuristic).
+                int nit = NiterMover;
+                if (sub_cycles > 2*NiterMover) nit = 1;
+
+                for (int inner = 0; inner < nit; inner++)
+                {
+                    //* Re-interpolate E, B at current (midpoint) position xp,yp,zp
+                    for (int i = 0; i < 8; i++) sampled_field[i] = 0.0;
+                    if (stencil_order_ == 1)
+                    {
+                        grid->get_safe_cell_and_weights(xp, yp, zp, cx, cy, cz, weights_lin);
+                        const double* field_components[8] ALLOC_ALIGNED;
+                        get_field_components_for_cell(field_components, fieldForPcls, cx, cy, cz);
+                        for (int c = 0; c < 8; c++)
+                        {
+                            const double* fc = field_components[c];
+                            ASSUME_ALIGNED(fc);
+                            const double w = weights_lin[c];
+                            #pragma simd
+                            for (int i = 0; i < num_field_components; i++)
+                                sampled_field[i] += w * fc[i];
+                        }
+                    }
+                    else
+                    {
+                        grid->get_nearest_node_and_weights_tsc(xp, yp, zp, cx, cy, cz, weights_tsc);
+                        for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b)
+                        for (int cc = 0; cc < 3; ++cc)
+                        {
+                            const double w = weights_tsc[(a*3 + b)*3 + cc];
+                            const double* fn = fieldForPcls[cx + a - 1][cy + b - 1][cz + cc - 1];
+                            ASSUME_ALIGNED(fn);
+                            #pragma simd
+                            for (int i = 0; i < num_field_components; i++)
+                                sampled_field[i] += w * fn[i];
+                        }
+                    }
+                    const double Bxl = sampled_field[0], Byl = sampled_field[1], Bzl = sampled_field[2];
+                    const double Exl = sampled_field[0+DFIELD_3or4];
+                    const double Eyl = sampled_field[1+DFIELD_3or4];
+                    const double Ezl = sampled_field[2+DFIELD_3or4];
+
+                    //* Boris rotation with dt_sub — solve for midpoint velocity uptilde.
+                    const double omdtsq = qomdt2 * qomdt2 * (Bxl*Bxl + Byl*Byl + Bzl*Bzl);
+                    const double denom = 1.0 / (1.0 + omdtsq);
+                    const double ut = up + qomdt2 * Exl;
+                    const double vt = vp + qomdt2 * Eyl;
+                    const double wt = wp + qomdt2 * Ezl;
+                    const double udotb = ut*Bxl + vt*Byl + wt*Bzl;
+                    uptilde = (ut + qomdt2 * (vt*Bzl - wt*Byl + qomdt2*udotb*Bxl)) * denom;
+                    vptilde = (vt + qomdt2 * (wt*Bxl - ut*Bzl + qomdt2*udotb*Byl)) * denom;
+                    wptilde = (wt + qomdt2 * (ut*Byl - vt*Bxl + qomdt2*udotb*Bzl)) * denom;
+
+                    //* Midpoint position for next inner iteration's interpolation.
+                    //* Uses xptilde (const across sub-cycles — matches ECSIM).
+                    xp = xptilde + uptilde * dto2;
+                    yp = yptilde + vptilde * dto2;
+                    zp = zptilde + wptilde * dto2;
+                }
+
+                //* Commit this sub-cycle: u^{n+1} = 2·uptilde − u^n (Crank-Nicolson).
+                //* Position advances by uptilde·dt_sub from xptilde.
+                up = 2.0 * uptilde - up;
+                vp = 2.0 * vptilde - vp;
+                wp = 2.0 * wptilde - wp;
+                xp = xptilde + uptilde * dt_sub;
+                yp = yptilde + vptilde * dt_sub;
+                zp = zptilde + wptilde * dt_sub;
+            }
+
+            //* Store final state at time n+1.
+            pcl->set_x(xp); pcl->set_y(yp); pcl->set_z(zp);
+            pcl->set_u(up); pcl->set_v(vp); pcl->set_w(wp);
+        }
+    }
+    //! End of #pragma omp parallel
+
+    //* Collapse unused dimensions (1D/2D runs).
+    fixPosition();
+}
+
 //? Set particles' poitions to 0 along unused dimensions
 void Particles3D::fixPosition()
 {

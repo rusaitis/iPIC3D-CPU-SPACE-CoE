@@ -213,6 +213,7 @@ class Collective
     double getHelmholtzAlpha()          const { return HelmholtzAlpha; }
     int    getHelmholtzNiter()          const { return HelmholtzNiter; }
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
+    bool   getSubcycleMover()           const { return SubcycleMover; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -274,6 +275,12 @@ class Collective
     //* Decoupled from `MaxwellImage`'s S·M·S, so the implicit operator structure
     //* (which Phase 10k showed is fragile to long-range filters) is unchanged.
     bool   PostSolveHelmholtz;
+
+    //* Step 3: enable ECSIM-style combined velocity+position mover with adaptive
+    //* sub-cycling (dt_sub = π·c/(4·|qom|·B)), `NiterMover` inner midpoint iterations,
+    //* midpoint-velocity position update. Port of ecsim/particles/Particles3D.cpp:4209.
+    //* Default false — opt-in to compare with the legacy ECSIM_velocity+ECSIM_position path.
+    bool   SubcycleMover;
 
     int CurrentCycle;
     int zeroCurrent;

@@ -135,6 +135,9 @@ void Collective::ReadInput(string inputfile)
         //* Phase 10m: post-`calculateE` Helmholtz hook (default off — opt-in).
         PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
+        //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
+        SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
+
         SaveDirName     = config.read<string>    ("SaveDirName", "data");
         RestartDirName  = config.read<string>    ("RestartDirName", "data");
         ns              = config.read<int>       ("ns");

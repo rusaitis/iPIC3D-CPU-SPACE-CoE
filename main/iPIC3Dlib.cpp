@@ -641,21 +641,22 @@ bool c_Solver::ParticlesMover()
     time_vel.start();
     #endif
 
-    //* Iterate over each species to update velocities
+    //* Iterate over each species to update velocities.
+    //* If SubcycleMover is on (Step 3 — ECSIM combined mover), the velocity+position
+    //* update is done in one pass via mover_PC_sub; the separate ECSIM_position call
+    //* below is skipped.
+    const bool subcycle_mover = col->getSubcycleMover() && !col->getRelativistic();
     for (int i = 0; i < ns; i++)
     {
         switch(Parameters::get_MOVER_TYPE())
         {
             //? ECSIM & RelSIM
             case Parameters::SoA:
-                if (col->getRelativistic())
-                    particles[i].RelSIM_velocity(EMf);
-                else
-                    particles[i].ECSIM_velocity(EMf);
-            break;
             case Parameters::AoS:
                 if (col->getRelativistic())
                     particles[i].RelSIM_velocity(EMf);
+                else if (subcycle_mover)
+                    particles[i].mover_PC_sub(EMf);
                 else
                     particles[i].ECSIM_velocity(EMf);
             break;
@@ -675,16 +676,17 @@ bool c_Solver::ParticlesMover()
     //* Iterate over each species to update positions
     for (int i = 0; i < ns; i++)
     {
-        switch(Parameters::get_MOVER_TYPE())
+        if (!subcycle_mover)
         {
-            case Parameters::SoA:
-                particles[i].ECSIM_position(EMf);
-            break;
-            case Parameters::AoS:
-                particles[i].ECSIM_position(EMf);
-            break;
-            default:
-            break;
+            switch(Parameters::get_MOVER_TYPE())
+            {
+                case Parameters::SoA:
+                case Parameters::AoS:
+                    particles[i].ECSIM_position(EMf);
+                break;
+                default:
+                break;
+            }
         }
 
         //* Should integrate BC into separate_and_send_particles

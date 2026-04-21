@@ -125,6 +125,13 @@ class Particles3D:public Particles3Dcomm
     void RelSIM_velocity(Field * EMf);
     void ECSIM_position(Field * EMf);
 
+    //* ECSIM combined velocity+position mover with adaptive sub-cycling — port of
+    //* ecsim/particles/Particles3D.cpp:4209 mover_PC_sub. Uses midpoint velocity for
+    //* position advancement (second-order, symplectic) and NiterMover inner midpoint
+    //* iterations. Gated by `Collective::getSubcycleMover()`; invoked from iPIC3Dlib.cpp
+    //* as a replacement for ECSIM_velocity + ECSIM_position.
+    void mover_PC_sub(Field * EMf);
+
     //* ECSIM - moments
     void computeMoments(Field * EMf);
 
