@@ -221,6 +221,9 @@ class Collective
     bool   getEnergyConservingSmoothing() const { return EnergyConservingSmoothing; }
     bool   getEcsimAlphaOrdering()      const { return EcsimAlphaOrdering; }
     bool   getMoverExplicitAlpha()      const { return MoverExplicitAlpha; }
+    bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
+    bool   getLoadParticlesInit()       const { return LoadParticlesInit; }
+    const string& getParticlesInitDir() const { return ParticlesInitDir; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
@@ -324,6 +327,16 @@ class Collective
     //* midpoint-velocity position update. Port of ecsim/particles/Particles3D.cpp:4209.
     //* Default false — opt-in to compare with the legacy ECSIM_velocity+ECSIM_position path.
     bool   SubcycleMover;
+
+    //* Step 31: particle-state dump / load for cross-code (iPIC3D ↔ ECSIM) byte diff.
+    //* `DumpParticlesInit`: after species init and before cycle 1, write each species'
+    //* particles to `{ParticlesInitDir}/particles_init_s{ns}_r{rank}.txt` — 17-digit
+    //* space-separated `x y z u v w q`, one line per particle, no ordering guarantee.
+    //* `LoadParticlesInit`: after the case's init has run (harmless filler), clear
+    //* `_pcls` and repopulate from the file. Default both off.
+    bool   DumpParticlesInit;
+    bool   LoadParticlesInit;
+    string ParticlesInitDir;
 
     int CurrentCycle;
     int zeroCurrent;

@@ -163,6 +163,12 @@ void Collective::ReadInput(string inputfile)
 
         SaveDirName     = config.read<string>    ("SaveDirName", "data");
         RestartDirName  = config.read<string>    ("RestartDirName", "data");
+
+        //* Step 31: particle-state dump/load for cross-code byte diff (prerequisite for Step 32).
+        //* Reads must come after SaveDirName since ParticlesInitDir defaults to it.
+        DumpParticlesInit = config.read<bool>  ("DumpParticlesInit", false);
+        LoadParticlesInit = config.read<bool>  ("LoadParticlesInit", false);
+        ParticlesInitDir  = config.read<string>("ParticlesInitDir", SaveDirName);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);

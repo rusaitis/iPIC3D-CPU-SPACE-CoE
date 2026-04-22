@@ -46,6 +46,10 @@ developers: Stefano Markidis, Giovanni Lapenta.
 #include "Particles3Dcomm.h"
 #include "Parameters.h"
 
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+
 #include "ipichdf5.h"
 #include <vector>
 //#include <complex>
@@ -1594,6 +1598,61 @@ void Particles3Dcomm::PrintNp()  const
     cout << "Number of Particles of species " << get_species_num() << ": " << getNOP() << endl;
     cout << "Subgrid (" << vct->getCoordinates(0) << "," << vct->getCoordinates(1) << "," << vct->getCoordinates(2) << ")" << endl;
     cout << endl;
+}
+
+//* Step 31: dump particle state to a canonical text file for cross-code byte diff.
+//* Format — one line per particle, 17-digit scientific: `x y z u v w q`. Ordering
+//* matches insertion order (the natural loop order of the case's initializer),
+//* sufficient for iPIC3D→iPIC3D round-trip. Cross-code (Step 32) will impose a
+//* canonical sort if needed.
+void Particles3Dcomm::dump_particles_init(const std::string& dir) const
+{
+    const int rank = vct->getCartesian_rank();
+    std::ostringstream path;
+    path << dir << "/particles_init_s" << ns << "_r" << rank << ".txt";
+    std::ofstream f(path.str());
+    if (!f) eprintf("dump_particles_init: cannot open %s", path.str().c_str());
+
+    f << "# iPIC3D particles species=" << ns << " rank=" << rank
+      << " nop=" << _pcls.size() << "\n";
+    f << "# fields: x y z u v w q\n";
+    f << std::scientific << std::setprecision(17);
+    const int nop = (int)_pcls.size();
+    for (int i = 0; i < nop; i++)
+    {
+        const SpeciesParticle& p = _pcls[i];
+        f << p.get_x() << ' ' << p.get_y() << ' ' << p.get_z() << ' '
+          << p.get_u() << ' ' << p.get_v() << ' ' << p.get_w() << ' '
+          << p.get_q() << '\n';
+    }
+    if (rank == 0)
+        cout << "[DumpParticles] wrote species " << ns << " → " << path.str() << endl;
+}
+
+//* Step 31: clear current _pcls and repopulate from a file written by
+//* `dump_particles_init`. Each line is `x y z u v w q`; ID is regenerated.
+void Particles3Dcomm::load_particles_init(const std::string& dir)
+{
+    const int rank = vct->getCartesian_rank();
+    std::ostringstream path;
+    path << dir << "/particles_init_s" << ns << "_r" << rank << ".txt";
+    std::ifstream f(path.str());
+    if (!f) eprintf("load_particles_init: cannot open %s", path.str().c_str());
+
+    _pcls.clear();
+    std::string line;
+    while (std::getline(f, line))
+    {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream iss(line);
+        double xp, yp, zp, up, vp, wp, qp;
+        if (!(iss >> xp >> yp >> zp >> up >> vp >> wp >> qp))
+            eprintf("load_particles_init: parse error in %s", path.str().c_str());
+        create_new_particle(up, vp, wp, qp, xp, yp, zp);
+    }
+    if (rank == 0)
+        cout << "[LoadParticles] loaded species " << ns << " (" << _pcls.size()
+             << " pcls) ← " << path.str() << endl;
 }
 
 /***** particle sorting routines *****/

@@ -322,6 +322,24 @@ int c_Solver::Init(int argc, char **argv)
             particles[i].reserve_remaining_particle_IDs();
             particles[i].fixPosition();
         }
+
+        //* Step 31: replace the freshly-initialised particle list with a dump from
+        //* a prior run (or ECSIM). Applied after the case-specific init so the
+        //* allocation sizing / topology setup is already correct; we just swap
+        //* the per-particle state.
+        if (col->getLoadParticlesInit())
+        {
+            for (int i = 0; i < ns; i++)
+                particles[i].load_particles_init(col->getParticlesInitDir());
+        }
+
+        //* Step 31: dump post-init particle state (canonical CSV) for cross-code
+        //* byte diff (Step 32 prerequisite). Runs once at startup; free when off.
+        if (col->getDumpParticlesInit())
+        {
+            for (int i = 0; i < ns; i++)
+                particles[i].dump_particles_init(col->getSaveDirName());
+        }
     }
 
     //* Allocate test particles (if any)
