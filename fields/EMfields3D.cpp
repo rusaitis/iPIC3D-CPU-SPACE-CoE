@@ -3820,24 +3820,200 @@ void EMfields3D::probe_adjointness(int cycle)
     double uniq_u_Av = 0.0;
     MPI_Allreduce(&local_uniq_u_Av, &uniq_u_Av, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
 
-    if (rank == 0) {
-        auto report = [&](const char* tag, double left, double right) {
-            const double gap_abs = left - right;
-            const double scale   = 0.5 * (std::abs(left) + std::abs(right));
-            const double gap_rel = (scale > 0.0) ? std::abs(gap_abs) / scale : 0.0;
-            std::cout.setf(std::ios::scientific);
-            std::cout.precision(15);
+    auto report = [&](const char* tag, double left, double right) {
+        if (rank != 0) return;
+        const double gap_abs = left - right;
+        const double scale   = 0.5 * (std::abs(left) + std::abs(right));
+        const double gap_rel = (scale > 0.0) ? std::abs(gap_abs) / scale : 0.0;
+        std::cout.setf(std::ios::scientific);
+        std::cout.precision(15);
+        std::cout << "[adjoint-probe cycle=" << cycle << " " << tag << "]"
+                  << " <A*u,v>=" << left
+                  << " <u,A*v>=" << right
+                  << " gap_abs=" << gap_abs
+                  << " gap_rel=" << gap_rel
+                  << std::endl;
+        std::cout.unsetf(std::ios::scientific);
+    };
+    report("raw",    raw_Au_v, raw_u_Av);
+    report("unify",  uni_Au_v, uni_u_Av);
+    report("unique", uniq_Au_v, uniq_u_Av);
+
+    //* --- [smoothed] variants — band-limit u, v to progressively lower k ----
+    //* Question the smoothed sweep answers: is the 15% unique-DOF asymmetry on
+    //* white-noise random vectors a grid-scale artifact (orthogonal to physics)
+    //* or does it reach the low-k modes that actually carry the reconnection
+    //* dynamics?
+    //*
+    //* Apply N passes of the 3D (1,2,1)/4 binomial kernel (the same kernel used
+    //* by energy_conserve_smooth_direction when kernel=0) to the consistent u,
+    //* v in phys space. Each pass roughly halves the Nyquist-band amplitude;
+    //* N ~ 4–8 brings the band down to ~8-cell scale, comparable to the skin
+    //* depth in DoubleGEM. If the unique gap collapses to ULP as N grows, the
+    //* operator asymmetry is a *high-k* artifact and fixing it would not move
+    //* the long-run drift.
+    auto binomial_pass = [&](arr3_double F, const int bcx[6]) {
+        //* One 3D (1,2,1)/4 pass (27-point stencil / 64, bit-identical to
+        //* `energy_conserve_smooth_direction`'s kernel==0 branch, single iter).
+        //* Refresh halo first so the stencil at interior-boundary reads
+        //* consistent duplicates.
+        communicateNodeBC(nxn, nyn, nzn, F, bcx[0], bcx[1], bcx[2], bcx[3], bcx[4], bcx[5], vct, this);
+        array3_double tmp(nxn, nyn, nzn);
+        for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
+            for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
+                for (int k = n_ghost_; k < nzn - n_ghost_; ++k) {
+                    const double s =
+                        8.0*F[i][j][k]
+                      + 4.0*(F[i-1][j][k]+F[i+1][j][k]+F[i][j-1][k]+F[i][j+1][k]+F[i][j][k-1]+F[i][j][k+1])
+                      + 2.0*(F[i-1][j-1][k]+F[i+1][j-1][k]+F[i-1][j+1][k]+F[i+1][j+1][k]
+                           + F[i-1][j][k-1]+F[i+1][j][k-1]+F[i][j-1][k-1]+F[i][j+1][k-1]
+                           + F[i-1][j][k+1]+F[i+1][j][k+1]+F[i][j-1][k+1]+F[i][j+1][k+1])
+                      + 1.0*(F[i-1][j-1][k-1]+F[i+1][j-1][k-1]+F[i-1][j+1][k-1]+F[i+1][j+1][k-1]
+                           + F[i-1][j-1][k+1]+F[i+1][j-1][k+1]+F[i-1][j+1][k+1]+F[i+1][j+1][k+1]);
+                    tmp[i][j][k] = s * 0.015625;
+                }
+        for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
+            for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
+                for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
+                    F[i][j][k] = tmp[i][j][k];
+    };
+
+    auto smooth_krylov = [&](std::vector<double>& w, int Npasses) {
+        solver2phys(tempX, tempY, tempZ, w.data(), nxn, nyn, nzn, n_ghost_);
+        for (int p = 0; p < Npasses; ++p) {
+            binomial_pass(tempX, col->bcEx);
+            binomial_pass(tempY, col->bcEy);
+            binomial_pass(tempZ, col->bcEz);
+        }
+        if (periodicX_global || periodicY_global || periodicZ_global)
+            unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
+        phys2solver(w.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
+    };
+
+    const int smooth_levels[] = {1, 2, 4, 8, 16, 32};
+    for (int N : smooth_levels) {
+        std::vector<double> u_s = u_uni;
+        std::vector<double> v_s = v_uni;
+        smooth_krylov(u_s, N);
+        smooth_krylov(v_s, N);
+
+        MaxwellImage(Au.data(), u_s.data());
+        MaxwellImage(Av.data(), v_s.data());
+
+        //* Unique-DOF inner product via direct phys-space buffers; reuse the
+        //* same decomposition as the [unique] variant above.
+        solver2phys(imageX, imageY, imageZ, Au.data(), nxn, nyn, nzn, n_ghost_);
+        //* tempX/Y/Z currently hold (the last smoothed) v_s after phys2solver;
+        //* re-lift v_s to tempX for the <Au,v> sum.
+        solver2phys(tempX, tempY, tempZ, v_s.data(), nxn, nyn, nzn, n_ghost_);
+        const int ihi_s = periodicX_global ? nxn - n_ghost_ - 1 : nxn - n_ghost_;
+        const int jhi_s = periodicY_global ? nyn - n_ghost_ - 1 : nyn - n_ghost_;
+        const int khi_s = periodicZ_global ? nzn - n_ghost_ - 1 : nzn - n_ghost_;
+        double local_Au_v = 0.0;
+        for (int i = n_ghost_; i < ihi_s; ++i)
+            for (int j = n_ghost_; j < jhi_s; ++j)
+                for (int k = n_ghost_; k < khi_s; ++k)
+                    local_Au_v += imageX[i][j][k]*tempX[i][j][k]
+                                + imageY[i][j][k]*tempY[i][j][k]
+                                + imageZ[i][j][k]*tempZ[i][j][k];
+        double s_Au_v = 0.0;
+        MPI_Allreduce(&local_Au_v, &s_Au_v, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+
+        //* Now lift u_s and A·v_s into scratch buffers for <u, A·v>
+        solver2phys(imageX, imageY, imageZ, u_s.data(), nxn, nyn, nzn, n_ghost_);
+        std::vector<double> sAv_x(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
+        std::vector<double> sAv_y(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
+        std::vector<double> sAv_z(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
+        {
+            int pp = 0;
+            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
+                for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
+                    for (int k = n_ghost_; k < nzn - n_ghost_; ++k) {
+                        const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
+                        sAv_x[lin] = Av[pp++];
+                        sAv_y[lin] = Av[pp++];
+                        sAv_z[lin] = Av[pp++];
+                    }
+        }
+        double local_u_Av = 0.0;
+        for (int i = n_ghost_; i < ihi_s; ++i)
+            for (int j = n_ghost_; j < jhi_s; ++j)
+                for (int k = n_ghost_; k < khi_s; ++k) {
+                    const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
+                    local_u_Av += imageX[i][j][k]*sAv_x[lin]
+                                + imageY[i][j][k]*sAv_y[lin]
+                                + imageZ[i][j][k]*sAv_z[lin];
+                }
+        double s_u_Av = 0.0;
+        MPI_Allreduce(&local_u_Av, &s_u_Av, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+
+        //* Also compute |u|, |v|, |Au|, |Av| on the same unique-DOF range so
+        //* we can normalize the gap by |u|·|v| → estimate of ‖A − A^T‖.
+        double local_uu = 0.0, local_vv = 0.0;
+        double local_AuAu = 0.0, local_AvAv = 0.0;
+        for (int i = n_ghost_; i < ihi_s; ++i)
+            for (int j = n_ghost_; j < jhi_s; ++j)
+                for (int k = n_ghost_; k < khi_s; ++k) {
+                    const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
+                    //* imageX/Y/Z currently hold u_s (lifted just above).
+                    local_uu += imageX[i][j][k]*imageX[i][j][k]
+                              + imageY[i][j][k]*imageY[i][j][k]
+                              + imageZ[i][j][k]*imageZ[i][j][k];
+                    local_vv += tempX[i][j][k]*tempX[i][j][k]
+                              + tempY[i][j][k]*tempY[i][j][k]
+                              + tempZ[i][j][k]*tempZ[i][j][k];
+                    local_AvAv += sAv_x[lin]*sAv_x[lin] + sAv_y[lin]*sAv_y[lin] + sAv_z[lin]*sAv_z[lin];
+                }
+        //* |A·u|² requires lifting A·u back into phys scratch arrays.
+        std::vector<double> sAu_x(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
+        std::vector<double> sAu_y(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
+        std::vector<double> sAu_z(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
+        {
+            int pp = 0;
+            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
+                for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
+                    for (int k = n_ghost_; k < nzn - n_ghost_; ++k) {
+                        const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
+                        sAu_x[lin] = Au[pp++];
+                        sAu_y[lin] = Au[pp++];
+                        sAu_z[lin] = Au[pp++];
+                    }
+        }
+        for (int i = n_ghost_; i < ihi_s; ++i)
+            for (int j = n_ghost_; j < jhi_s; ++j)
+                for (int k = n_ghost_; k < khi_s; ++k) {
+                    const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
+                    local_AuAu += sAu_x[lin]*sAu_x[lin] + sAu_y[lin]*sAu_y[lin] + sAu_z[lin]*sAu_z[lin];
+                }
+        double uu=0, vv=0, AuAu=0, AvAv=0;
+        MPI_Allreduce(&local_uu, &uu, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        MPI_Allreduce(&local_vv, &vv, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        MPI_Allreduce(&local_AuAu, &AuAu, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        MPI_Allreduce(&local_AvAv, &AvAv, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        const double nu = std::sqrt(uu), nv = std::sqrt(vv);
+        const double nAu = std::sqrt(AuAu), nAv = std::sqrt(AvAv);
+
+        char tag[64];
+        std::snprintf(tag, sizeof(tag), "smooth_N%02d_unique", N);
+        if (rank == 0) {
+            const double gap = s_Au_v - s_u_Av;
+            const double scale_self = 0.5 * (std::abs(s_Au_v) + std::abs(s_u_Av));
+            const double rel_self = (scale_self > 0.0) ? std::abs(gap)/scale_self : 0.0;
+            const double asym_est = (nu*nv > 0.0) ? std::abs(gap)/(nu*nv) : 0.0;
+            std::cout.setf(std::ios::scientific); std::cout.precision(15);
             std::cout << "[adjoint-probe cycle=" << cycle << " " << tag << "]"
-                      << " <A*u,v>=" << left
-                      << " <u,A*v>=" << right
-                      << " gap_abs=" << gap_abs
-                      << " gap_rel=" << gap_rel
+                      << " <A*u,v>=" << s_Au_v
+                      << " <u,A*v>=" << s_u_Av
+                      << " gap_abs=" << gap
+                      << " gap_rel=" << rel_self
+                      << " ||u||=" << nu
+                      << " ||v||=" << nv
+                      << " ||A*u||=" << nAu
+                      << " ||A*v||=" << nAv
+                      << " asym_est=" << asym_est
                       << std::endl;
             std::cout.unsetf(std::ios::scientific);
-        };
-        report("raw",    raw_Au_v, raw_u_Av);
-        report("unify",  uni_Au_v, uni_u_Av);
-        report("unique", uniq_Au_v, uniq_u_Av);
+        }
     }
 }
 
