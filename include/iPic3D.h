@@ -78,6 +78,15 @@ namespace iPic3D {
     //* of all node fields + stored M as raw IEEE-754 doubles for cross-code
     //* byte diff. No-op if DumpCycle1Fields flag is off.
     void DumpCycleFields(int cycle);
+
+    //* Step 34c: gather/scatter transpose duality probe. Tests condition #3 of
+    //* the six ECSIM-exact energy-identity conditions: ⟨gather(f), q⟩_particle
+    //* should equal ⟨f, scatter(q)⟩_grid bit-for-bit when the gather and scatter
+    //* use the same weights. Opt-in via VerifyAdjoint flag (shared with 34b);
+    //* runs once at cycle 1 between CalculateMoments and ComputeEMFields so the
+    //* particle state is at x_n — the same position the gather/scatter kernels
+    //* just consumed.
+    void ProbeGatherScatterDuality(int cycle);
     void SupplementaryMoments();
 
     void WriteRestart(int cycle);

@@ -36,7 +36,7 @@ run_variant () {
     local run_log=$WORK/run_${tag}.log
     (cd "$BASE" && mpirun -np 1 "$EXE" "$tmp_in" >"$run_log" 2>&1) \
         && echo "# ${tag}" >> "$LOG" \
-        && grep "adjoint-probe" "$run_log" >> "$LOG" \
+        && grep -E "adjoint-probe|duality-probe" "$run_log" >> "$LOG" \
         || { echo "# ${tag} FAILED (see ${run_log})" >> "$LOG"; return 1; }
 }
 

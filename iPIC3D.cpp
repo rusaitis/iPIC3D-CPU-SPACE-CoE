@@ -72,9 +72,13 @@ int main(int argc, char **argv)
             
             //? Moment Gatherer --> Compute charge density, current density, and mass matrix
             time_MG.start();
-            KCode.CalculateMoments();        
+            KCode.CalculateMoments();
             time_MG.stop();
-            
+
+            //? Step 34c: probe gather/scatter transpose duality at cycle 1
+            //* (after CalculateMoments consumed x_n, before ParticlesMover advances).
+            KCode.ProbeGatherScatterDuality(i);
+
             //? Field Solver --> Compute E & B fields
             time_EF.start();
             KCode.ComputeEMFields(i);
