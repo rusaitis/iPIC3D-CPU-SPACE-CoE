@@ -155,6 +155,9 @@ void Collective::ReadInput(string inputfile)
         //* Step 27: match ECSIM's FP evaluation order for α-matrix scalars.
         EcsimAlphaOrdering = config.read<bool>("EcsimAlphaOrdering", false);
 
+        //* Step 30: mover α applied via explicit 3×3 matrix matching the gather's FP path.
+        MoverExplicitAlpha = config.read<bool>("MoverExplicitAlpha", false);
+
         //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

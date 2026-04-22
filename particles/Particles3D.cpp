@@ -1008,6 +1008,8 @@ void Particles3D::ECSIM_velocity(Field *EMf)
 
         //* Step 27: mirror computeMoments' α-ordering choice so mover and gather agree.
         const bool ecsim_alpha_mover = col->getEcsimAlphaOrdering();
+        //* Step 30: mover applies α as an explicit 3×3 matrix matching the gather.
+        const bool explicit_alpha_mover = col->getMoverExplicitAlpha();
         const double qdto2mc   = 0.5 * dt * qom/c;
         const double beta_mover = 0.5 * qom * dt;
 
@@ -1109,11 +1111,35 @@ void Particles3D::ECSIM_velocity(Field *EMf)
             const pfloat omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
             const pfloat denom = 1.0 / (1.0 + omsq);
 
-            const pfloat udotOm = u_temp * Omx + v_temp * Omy + w_temp * Omz;
+            if (explicit_alpha_mover)
+            {
+                //* Step 30: build α the same way `computeMoments` does at line 1901
+                //* so the mover's α application is FP-byte-identical to the gather's.
+                double alpha[3][3];
+                alpha[0][0] = ( 1.0 + (Omx*Omx))*denom;
+                alpha[0][1] = ( Omz + (Omx*Omy))*denom;
+                alpha[0][2] = (-Omy + (Omx*Omz))*denom;
 
-            uavg = (u_temp + (v_temp * Omz - w_temp * Omy + udotOm * Omx)) * denom;
-            vavg = (v_temp + (w_temp * Omx - u_temp * Omz + udotOm * Omy)) * denom;
-            wavg = (w_temp + (u_temp * Omy - v_temp * Omx + udotOm * Omz)) * denom;
+                alpha[1][0] = (-Omz + (Omx*Omy))*denom;
+                alpha[1][1] = ( 1.0 + (Omy*Omy))*denom;
+                alpha[1][2] = ( Omx + (Omy*Omz))*denom;
+
+                alpha[2][0] = ( Omy + (Omx*Omz))*denom;
+                alpha[2][1] = (-Omx + (Omy*Omz))*denom;
+                alpha[2][2] = ( 1.0 + (Omz*Omz))*denom;
+
+                uavg = alpha[0][0]*u_temp + alpha[0][1]*v_temp + alpha[0][2]*w_temp;
+                vavg = alpha[1][0]*u_temp + alpha[1][1]*v_temp + alpha[1][2]*w_temp;
+                wavg = alpha[2][0]*u_temp + alpha[2][1]*v_temp + alpha[2][2]*w_temp;
+            }
+            else
+            {
+                const pfloat udotOm = u_temp * Omx + v_temp * Omy + w_temp * Omz;
+
+                uavg = (u_temp + (v_temp * Omz - w_temp * Omy + udotOm * Omx)) * denom;
+                vavg = (v_temp + (w_temp * Omx - u_temp * Omz + udotOm * Omy)) * denom;
+                wavg = (w_temp + (u_temp * Omy - v_temp * Omx + udotOm * Omz)) * denom;
+            }
 
             //? Update new velocities at the (n+1)^th time step
             pcl->set_u(2.0 * uavg - u_n);

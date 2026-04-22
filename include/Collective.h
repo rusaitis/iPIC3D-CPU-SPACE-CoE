@@ -220,6 +220,7 @@ class Collective
     bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
     bool   getEnergyConservingSmoothing() const { return EnergyConservingSmoothing; }
     bool   getEcsimAlphaOrdering()      const { return EcsimAlphaOrdering; }
+    bool   getMoverExplicitAlpha()      const { return MoverExplicitAlpha; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
@@ -305,6 +306,18 @@ class Collective
     //* FP order differs. Flag re-orders iPIC3D's computeMoments + ECSIM_velocity to
     //* match ECSIM.
     bool   EcsimAlphaOrdering;
+
+    //* Step 30: in `ECSIM_velocity`, replace the compact inline α application
+    //*   (u + (v·Omz − w·Omy + udotOm·Omx))·denom
+    //* with the explicit 3×3 matrix form used by `computeMoments` (the gather):
+    //*   qau = α[0][0]·u + α[0][1]·v + α[0][2]·w   (row-by-row, with α pre-computed).
+    //* Algebraically identical; FP order differs. For the ECSIM identity
+    //*   ΔKE = dt·<E_th, Jxh + M·E_th>
+    //* to hold at machine precision the α used to update particle velocities
+    //* must be byte-identical to the α used to build Jxh and M. Step 27 confirmed
+    //* α-parity in computeMoments alone is not enough (EcsimAlphaOrdering null);
+    //* this flag tightens parity across mover and gather.
+    bool   MoverExplicitAlpha;
 
     //* Step 3: enable ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)), `NiterMover` inner midpoint iterations,
