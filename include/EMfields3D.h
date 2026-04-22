@@ -688,6 +688,14 @@ private:
 
     //? Implicit electric field (defined at nodes)
     array3_double Exth, Eyth, Ezth;
+    //* Step 33: stashed MaxwellSource RHS in physical (node) space for the
+    //* cross-code cycle-N byte diff. Populated right after MaxwellSource and
+    //* before GMRES/PETSc so MaxwellImage iterations don't clobber them.
+    array3_double bXn, bYn, bZn;
+    //* Step 33: direct operator diagnostic — result of applying MaxwellImage
+    //* to (bXn, bYn, bZn). If `b` matches across codes but `A·b` differs, the
+    //* operator is the source of the E_θ divergence.
+    array3_double AbXn, AbYn, AbZn;
 
     //? Magnetic field (defined at nodes)
     array3_double Bxn, Byn, Bzn;

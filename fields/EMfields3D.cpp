@@ -43,6 +43,7 @@
 #endif
 #include "asserts.h"
 #include <iomanip>
+#include <vector>
 #include <sstream>
 #include <iostream>
 #include <fstream>
@@ -116,6 +117,14 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Exth    (nxn, nyn, nzn),
     Eyth    (nxn, nyn, nzn),
     Ezth    (nxn, nyn, nzn),
+    //* Step 33: MaxwellSource RHS cache in node space.
+    bXn     (nxn, nyn, nzn),
+    bYn     (nxn, nyn, nzn),
+    bZn     (nxn, nyn, nzn),
+    //* Step 33: A·b diagnostic cache.
+    AbXn    (nxn, nyn, nzn),
+    AbYn    (nxn, nyn, nzn),
+    AbZn    (nxn, nyn, nzn),
 
     Bxn     (nxn, nyn, nzn),
     Byn     (nxn, nyn, nzn),
@@ -2638,7 +2647,8 @@ void EMfields3D::calculateE()
     time_ms.start();
     #endif
 
-    //* Prepare the source 
+    //* Prepare the source (bXn/bYn/bZn are snapshotted inside MaxwellSource
+    //* so both PETSc and built-in GMRES paths capture the RHS consistently)
     MaxwellSource(bkrylov);
 
     #ifdef __PROFILE_FIELDS__
@@ -2842,6 +2852,26 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 
     //* Physical space --> Krylov space
     phys2solver(bkrylov, tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
+
+    //* Step 33: snapshot the RHS in node space for cross-code byte diff. Runs
+    //* at the tail of MaxwellSource so both PETSc and built-in GMRES paths
+    //* capture bXn/bYn/bZn before any downstream MaxwellImage iterations.
+    eqValue(0.0, bXn, nxn, nyn, nzn);
+    eqValue(0.0, bYn, nxn, nyn, nzn);
+    eqValue(0.0, bZn, nxn, nyn, nzn);
+    solver2phys(bXn, bYn, bZn, bkrylov, nxn, nyn, nzn, n_ghost_);
+
+    //* Step 33 diagnostic: also compute A·b by calling MaxwellImage once on
+    //* bkrylov and stash the node-space result. Isolates the operator from the
+    //* solver path — if `b` matches across codes but `A·b` differs, the
+    //* divergence is in MaxwellImage itself.
+    const int krylov_size_diag = 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_);
+    std::vector<double> Ab_krylov(krylov_size_diag, 0.0);
+    MaxwellImage(Ab_krylov.data(), bkrylov);
+    eqValue(0.0, AbXn, nxn, nyn, nzn);
+    eqValue(0.0, AbYn, nxn, nyn, nzn);
+    eqValue(0.0, AbZn, nxn, nyn, nzn);
+    solver2phys(AbXn, AbYn, AbZn, Ab_krylov.data(), nxn, nyn, nzn, n_ghost_);
 }
 
 //? RHS of the Maxwell solver
@@ -3573,6 +3603,10 @@ void EMfields3D::dump_cycle_fields(int cycle, const std::string& dir)
     write_arr3("Ex",   Ex);    write_arr3("Ey",   Ey);    write_arr3("Ez",   Ez);
     write_arr3("Jxh",  Jxh);   write_arr3("Jyh",  Jyh);   write_arr3("Jzh",  Jzh);
     write_arr3("Bxn",  Bxn);   write_arr3("Byn",  Byn);   write_arr3("Bzn",  Bzn);
+    //* Step 33: MaxwellSource RHS b = E_n + θ·dt·(c·∇×B − 4π·S(Jxh)).
+    write_arr3("bx",   bXn);   write_arr3("by",   bYn);   write_arr3("bz",   bZn);
+    //* Step 33: A·b — MaxwellImage applied to the RHS, for direct operator diff.
+    write_arr3("Abx",  AbXn);  write_arr3("Aby",  AbYn);  write_arr3("Abz",  AbZn);
 
     write_arr4("Mxx",  Mxx);   write_arr4("Myy",  Myy);   write_arr4("Mzz",  Mzz);
     write_arr4("Mxy",  Mxy);   write_arr4("Myx",  Myx);
@@ -3588,7 +3622,7 @@ void EMfields3D::dump_cycle_fields(int cycle, const std::string& dir)
       << "  (row-major C order, k fastest)\n";
     m << "# grid_mass_shape " << ne_mass_ << " " << nxn << " " << nyn << " " << nzn << "\n";
     m << "# n_ghost " << n_ghost_ << "\n";
-    m << "# arr3: Exth Eyth Ezth Ex Ey Ez Jxh Jyh Jzh Bxn Byn Bzn\n";
+    m << "# arr3: Exth Eyth Ezth Ex Ey Ez Jxh Jyh Jzh Bxn Byn Bzn bx by bz Abx Aby Abz\n";
     m << "# arr4: Mxx Myy Mzz Mxy Myx Mxz Mzx Myz Mzy\n";
     m.close();
 
