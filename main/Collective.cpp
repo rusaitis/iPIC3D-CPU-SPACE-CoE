@@ -139,6 +139,13 @@ void Collective::ReadInput(string inputfile)
         //* of the solved Exth/Eyth/Ezth after `calculateE`. Default off.
         UnifyPeriodicDuplicates = config.read<bool>("UnifyPeriodicDuplicates", false);
 
+        //* Step 23: offset-by-one halo for NODE-centred fields on self-neighbor periodic
+        //* axes. Current convention `ghost(0) = interior(nxn-2)` maps the left ghost to the
+        //* HIGH-side duplicate rather than the proper periodic neighbor one step inside.
+        //* When true, uses `ghost(0) = interior(nxn-3)` and `ghost(nxn-1) = interior(2)`
+        //* (matching the MPI-send convention used for XLEN>1 subdomains). Default off.
+        FixNodePeriodicHalo = config.read<bool>("FixNodePeriodicHalo", false);
+
         //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

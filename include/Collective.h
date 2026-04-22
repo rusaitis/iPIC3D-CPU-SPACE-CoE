@@ -216,6 +216,7 @@ class Collective
     int    getHelmholtzNiter()          const { return HelmholtzNiter; }
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
     bool   getUnifyPeriodicDuplicates() const { return UnifyPeriodicDuplicates; }
+    bool   getFixNodePeriodicHalo()     const { return FixNodePeriodicHalo; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
@@ -279,6 +280,7 @@ class Collective
     //* (which Phase 10k showed is fragile to long-range filters) is unchanged.
     bool   PostSolveHelmholtz;
     bool   UnifyPeriodicDuplicates;
+    bool   FixNodePeriodicHalo;
 
     //* Step 3: enable ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)), `NiterMover` inner midpoint iterations,

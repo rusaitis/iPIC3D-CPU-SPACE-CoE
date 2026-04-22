@@ -19,6 +19,8 @@
  */
 
 #include "Com3DNonblk.h"
+#include "EMfields3D.h"
+#include "Collective.h"
 
 //* Forward declaration of the n_ghost > 1 helper (definition further down).
 static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
@@ -124,31 +126,48 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
     assert_eq(recvcnt,sendcnt-recvcnt);
 
     //Buffer swap if any (done before waiting for receiving msg done to delay sync)
+    //* Step 23: NODE-centered periodic arrays have a duplicate at indices {n_ghost, nx-n_ghost-1}
+    //* (the two images of the same physical boundary node). The legacy self-swap
+    //*   ghost(0) = interior(nx-2),  ghost(nx-1) = interior(1)
+    //* maps the ghost to the other-side duplicate of the CENTER node instead of its
+    //* geometric offset-by-one neighbour, biasing stencils at the periodic boundary.
+    //* When `FixNodePeriodicHalo` is set, swap in the offset-by-one convention for
+    //* non-center, non-interp arrays — which matches what the MPI-send convention for
+    //* XLEN>1 subdomains already does (see lines 112-114: sends interior(1+offset)/nx-2-offset).
+    const bool node_halo_fix = (EMf != nullptr) && EMf->get_col().getFixNodePeriodicHalo()
+                               && !isCenterFlag && !needInterp && !isParticle;
+    const int xlo_src = node_halo_fix ? (nx-3) : (nx-2);
+    const int xhi_src = node_halo_fix ? 2      : 1;
+    const int ylo_src = node_halo_fix ? (ny-3) : (ny-2);
+    const int yhi_src = node_halo_fix ? 2      : 1;
+    const int zlo_src = node_halo_fix ? (nz-3) : (nz-2);
+    const int zhi_src = node_halo_fix ? 2      : 1;
+
     if (right_neighborX == myrank &&  left_neighborX== myrank)
     {
         for (int iy = 1; iy < ny-1; iy++)
-            for (int iz = 1; iz < nz-1; iz++) 
+            for (int iz = 1; iz < nz-1; iz++)
             {
-                vector[0][iy][iz] = vector[nx-2][iy][iz];
-                vector[nx-1][iy][iz] = vector[1][iy][iz];
+                vector[0][iy][iz] = vector[xlo_src][iy][iz];
+                vector[nx-1][iy][iz] = vector[xhi_src][iy][iz];
             }
     }
     if (right_neighborY == myrank &&  left_neighborY == myrank)
     {
         for (int ix = 1; ix < nx-1; ix++)
-            for (int iz = 1; iz < nz-1; iz++) 
+            for (int iz = 1; iz < nz-1; iz++)
             {
-                vector[ix][0][iz] = vector[ix][ny-2][iz];
-                vector[ix][ny-1][iz] = vector[ix][1][iz];
+                vector[ix][0][iz] = vector[ix][ylo_src][iz];
+                vector[ix][ny-1][iz] = vector[ix][yhi_src][iz];
             }
     }
     if (right_neighborZ == myrank &&  left_neighborZ == myrank)
     {
         for (int ix = 1; ix < nx-1; ix++)
-            for (int iy = 1; iy < ny-1; iy++) 
+            for (int iy = 1; iy < ny-1; iy++)
             {
-                vector[ix][iy][0]    = vector[ix][iy][nz-2];
-                vector[ix][iy][nz-1] = vector[ix][iy][1];
+                vector[ix][iy][0]    = vector[ix][iy][zlo_src];
+                vector[ix][iy][nz-1] = vector[ix][iy][zhi_src];
             }
     }
 
