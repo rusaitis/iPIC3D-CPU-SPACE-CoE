@@ -73,6 +73,11 @@ namespace iPic3D {
     bool ParticlesMover();
     void CalculateB();
     void ComputeEMFields(int cycle);
+
+    //* Step 32: cycle 0 (post-init, pre-solve) or cycle 1 (post-solve-1) dump
+    //* of all node fields + stored M as raw IEEE-754 doubles for cross-code
+    //* byte diff. No-op if DumpCycle1Fields flag is off.
+    void DumpCycleFields(int cycle);
     void SupplementaryMoments();
 
     void WriteRestart(int cycle);

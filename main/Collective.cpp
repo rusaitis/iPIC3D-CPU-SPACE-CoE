@@ -169,6 +169,9 @@ void Collective::ReadInput(string inputfile)
         DumpParticlesInit = config.read<bool>  ("DumpParticlesInit", false);
         LoadParticlesInit = config.read<bool>  ("LoadParticlesInit", false);
         ParticlesInitDir  = config.read<string>("ParticlesInitDir", SaveDirName);
+
+        //* Step 32: cycle-1 field dump for cross-code byte diff.
+        DumpCycle1Fields  = config.read<bool>  ("DumpCycle1Fields", false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);

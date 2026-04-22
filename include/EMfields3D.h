@@ -204,6 +204,13 @@ public:
     //* and not polluted by halo wrap.
     void dump_mass_matrix_stats(int cycle);
 
+    //* Step 32: raw-binary IEEE-754 double dump of all node fields at a given
+    //* cycle for cross-code (iPIC3D ↔ ECSIM) byte diff. Writes one file per
+    //* array to `{dir}/fields_cycle{N}_{name}.bin` plus a
+    //* `fields_cycle{N}.meta.txt` index. Row-major C order, k (z) fastest.
+    //* Cycle 0 = post-init (pre-solve) snapshot; cycle 1 = post-solve-1.
+    void dump_cycle_fields(int cycle, const std::string& dir);
+
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();
 

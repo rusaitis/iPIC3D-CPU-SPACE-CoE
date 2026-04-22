@@ -224,6 +224,7 @@ class Collective
     bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
     bool   getLoadParticlesInit()       const { return LoadParticlesInit; }
     const string& getParticlesInitDir() const { return ParticlesInitDir; }
+    bool   getDumpCycle1Fields()        const { return DumpCycle1Fields; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
@@ -337,6 +338,14 @@ class Collective
     bool   DumpParticlesInit;
     bool   LoadParticlesInit;
     string ParticlesInitDir;
+
+    //* Step 32: after cycle 1 (the earliest point at which Jxh, M, and E_th have
+    //* all been updated from initial state), write raw-binary dumps of all node
+    //* fields into `{SaveDirName}/fields_cycle1_{name}.bin` — one IEEE-754 double
+    //* array per file, row-major C order with k (z) fastest. A companion
+    //* `fields_cycle1.meta.txt` lists names + shapes. Designed so ECSIM can
+    //* emit the same filename+layout convention for a trivial Python byte diff.
+    bool   DumpCycle1Fields;
 
     int CurrentCycle;
     int zeroCurrent;

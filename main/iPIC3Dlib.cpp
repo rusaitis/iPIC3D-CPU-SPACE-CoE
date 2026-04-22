@@ -629,13 +629,24 @@ void c_Solver::ComputeEMFields(int cycle)
 
     if(MPIdata::get_rank() == 0)
     {
-        cout << endl << "Profiling of FIELD SOLVER" << endl; 
+        cout << endl << "Profiling of FIELD SOLVER" << endl;
         cout << "Compute electric field     : " << time_e.total()     << " s, fraction of time taken in FieldSolver(): " << time_e.total()/time_total.total() << endl;
         cout << "Compute magnetic field     : " << time_b.total()     << " s, fraction of time taken in FieldSolver(): " << time_b.total()/time_total.total() << endl;
         cout << "Compute divergence of B    : " << time_div.total()   << " s, fraction of time taken in FieldSolver(): " << time_div.total()/time_total.total() << endl;
         cout << "FieldSolver()              : " << time_total.total() << " s" << endl << endl;
     }
     #endif
+}
+
+//* Step 32: cycle-N field dump hook. Called from the main loop and just after
+//* Init(). At cycle 0 captures pure init state (pre-solve); at cycle 1 captures
+//* Jxh/M from the first gather + Eth from the first solve. Opt-in via
+//* DumpCycle1Fields flag (kept name for backward compat).
+void c_Solver::DumpCycleFields(int cycle)
+{
+    if (!col->getDumpCycle1Fields()) return;
+    if (cycle != 0 && cycle != 1) return;
+    EMf->dump_cycle_fields(cycle, col->getSaveDirName());
 }
 
 //! Compute positions and velocities of particles

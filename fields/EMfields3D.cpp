@@ -43,6 +43,7 @@
 #endif
 #include "asserts.h"
 #include <iomanip>
+#include <sstream>
 #include <iostream>
 #include <fstream>
 #include "../LeXInt_Timer.hpp"
@@ -3519,6 +3520,79 @@ void EMfields3D::dump_cycle_identity(int cycle)
              << " I_M=" << I_M
              << " I_total=" << (I_J + I_M) << endl;
     }
+}
+
+//* Step 32: raw-binary dump of cycle-N fields for cross-code byte diff.
+//* Layout: row-major C order, k (z) fastest — matches how iPIC3D's arr3_double
+//* stores data. One double per grid point, 8 bytes, IEEE-754 little-endian.
+//* Writes per cycle N:
+//*   fields_cycle{N}_Exth.bin, Eyth, Ezth     (node, nxn*nyn*nzn)
+//*   fields_cycle{N}_Ex.bin, Ey, Ez           (node, full E = Eth unrotated)
+//*   fields_cycle{N}_Jxh.bin, Jyh, Jzh        (node)
+//*   fields_cycle{N}_Bxn.bin, Byn, Bzn        (node)
+//*   fields_cycle{N}_Mxx.bin … Mzy.bin        (ne_mass × nxn × nyn × nzn)
+//* Plus `fields_cycle{N}.meta.txt` listing names, shapes, and byte offsets for
+//* programmatic loading.
+void EMfields3D::dump_cycle_fields(int cycle, const std::string& dir)
+{
+    const int rank = (&get_vct())->getCartesian_rank();
+    if (rank != 0) return;  // dump from rank 0 only for now (np=1 diagnostic)
+
+    auto write_arr3 = [&](const char* name, arr3_double a)
+    {
+        std::ostringstream p;
+        p << dir << "/fields_cycle" << cycle << "_" << name << ".bin";
+        std::ofstream f(p.str(), std::ios::binary);
+        if (!f) eprintf("dump_cycle_fields: cannot open %s", p.str().c_str());
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    const double v = a[i][j][k];
+                    f.write(reinterpret_cast<const char*>(&v), sizeof(double));
+                }
+    };
+
+    auto write_arr4 = [&](const char* name, arr4_double a)
+    {
+        std::ostringstream p;
+        p << dir << "/fields_cycle" << cycle << "_" << name << ".bin";
+        std::ofstream f(p.str(), std::ios::binary);
+        if (!f) eprintf("dump_cycle_fields: cannot open %s", p.str().c_str());
+        for (int g = 0; g < ne_mass_; g++)
+            for (int i = 0; i < nxn; i++)
+                for (int j = 0; j < nyn; j++)
+                    for (int k = 0; k < nzn; k++)
+                    {
+                        const double v = a.get(g, i, j, k);
+                        f.write(reinterpret_cast<const char*>(&v), sizeof(double));
+                    }
+    };
+
+    write_arr3("Exth", Exth);  write_arr3("Eyth", Eyth);  write_arr3("Ezth", Ezth);
+    write_arr3("Ex",   Ex);    write_arr3("Ey",   Ey);    write_arr3("Ez",   Ez);
+    write_arr3("Jxh",  Jxh);   write_arr3("Jyh",  Jyh);   write_arr3("Jzh",  Jzh);
+    write_arr3("Bxn",  Bxn);   write_arr3("Byn",  Byn);   write_arr3("Bzn",  Bzn);
+
+    write_arr4("Mxx",  Mxx);   write_arr4("Myy",  Myy);   write_arr4("Mzz",  Mzz);
+    write_arr4("Mxy",  Mxy);   write_arr4("Myx",  Myx);
+    write_arr4("Mxz",  Mxz);   write_arr4("Mzx",  Mzx);
+    write_arr4("Myz",  Myz);   write_arr4("Mzy",  Mzy);
+
+    //* Sidecar metadata: shapes and byte layout. Python reader uses this.
+    std::ostringstream mp;
+    mp << dir << "/fields_cycle" << cycle << ".meta.txt";
+    std::ofstream m(mp.str());
+    m << "# iPIC3D cycle-" << cycle << " field dump — IEEE-754 double little-endian\n";
+    m << "# grid_node_shape " << nxn << " " << nyn << " " << nzn
+      << "  (row-major C order, k fastest)\n";
+    m << "# grid_mass_shape " << ne_mass_ << " " << nxn << " " << nyn << " " << nzn << "\n";
+    m << "# n_ghost " << n_ghost_ << "\n";
+    m << "# arr3: Exth Eyth Ezth Ex Ey Ez Jxh Jyh Jzh Bxn Byn Bzn\n";
+    m << "# arr4: Mxx Myy Mzz Mxy Myx Mxz Mzx Myz Mzy\n";
+    m.close();
+
+    std::cout << "[DumpCycle" << cycle << "] wrote node + M arrays to " << dir << std::endl;
 }
 
 
