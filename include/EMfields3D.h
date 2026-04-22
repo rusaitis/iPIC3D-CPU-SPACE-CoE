@@ -190,6 +190,20 @@ public:
     //* O(relative solver tol). See plan-energy-conservation.md Step 21 Sub-test (c).
     void unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz);
 
+    //* Step 25 diagnostic: at end of calculateE, print the two grid-side work integrals
+    //*   I_J = dt · <Eth, Jxh>_unique     I_M = dt · <Eth, M·Eth>_unique
+    //* Summation range is the unique-node interior [n_ghost_, n{x,y,z}n - n_ghost_ - 1)
+    //* matching get_E_field_energy, so the prints align with ConservedQuantities.txt
+    //* columns and external scripts can derive R_part / R_field per cycle.
+    void dump_cycle_identity(int cycle);
+
+    //* Step 27 diagnostic: at the end of the first moment gather, print Frobenius-norm,
+    //* max-abs, and sum statistics of the 9-component stored mass matrix. Cheap probe
+    //* designed as the iPIC3D endpoint for a cross-code byte compare against an ECSIM
+    //* dump. Shape-preserving (unique-node interior only) so differences are localised
+    //* and not polluted by halo wrap.
+    void dump_mass_matrix_stats(int cycle);
+
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();
 

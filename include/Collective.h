@@ -217,6 +217,9 @@ class Collective
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
     bool   getUnifyPeriodicDuplicates() const { return UnifyPeriodicDuplicates; }
     bool   getFixNodePeriodicHalo()     const { return FixNodePeriodicHalo; }
+    bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
+    bool   getEnergyConservingSmoothing() const { return EnergyConservingSmoothing; }
+    bool   getEcsimAlphaOrdering()      const { return EcsimAlphaOrdering; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
@@ -281,6 +284,27 @@ class Collective
     bool   PostSolveHelmholtz;
     bool   UnifyPeriodicDuplicates;
     bool   FixNodePeriodicHalo;
+
+    //* Step 25: cycle-1 identity decomposition print. When true, calculateE prints
+    //* I_J = dt · <Eth, Jxh>_unique and I_M = dt · <Eth, M·Eth>_unique so external
+    //* post-processing can compute R_part = ΔKE − (I_J + I_M) and R_field =
+    //* ΔUE + ΔUB + (I_J + I_M). Cheap (~two extra matvec passes) but gated off.
+    bool   DumpCycleIdentity;
+
+    //* Step 26: ECSIM-style energy-conserving smoothing slot. Even with Smooth=0 /
+    //* Nvolte=0, ECSIM forces extra communicateNodeBC passes around the M·E matvec
+    //* and around Jxh (see ecsim/fields/EMfields3D.cpp:878-881,1177-1203). These
+    //* halo refreshes are structurally unconditional in ECSIM and may shift the
+    //* M-side composition even though iPIC3D's Smooth=false skips them. Flag gates
+    //* the ported halo-only passes.
+    bool   EnergyConservingSmoothing;
+
+    //* Step 27: match ECSIM's FP evaluation order for the α-matrix scalars. iPIC3D
+    //* hoists `q_dt_2mc = 0.5*dt*qom/c` and uses `Om = q_dt_2mc*B/γ`; ECSIM uses
+    //* `beta = 0.5*qom*dt` and `omc = beta*B/γ/c` — mathematically identical but
+    //* FP order differs. Flag re-orders iPIC3D's computeMoments + ECSIM_velocity to
+    //* match ECSIM.
+    bool   EcsimAlphaOrdering;
 
     //* Step 3: enable ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)), `NiterMover` inner midpoint iterations,

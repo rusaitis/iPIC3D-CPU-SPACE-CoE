@@ -1006,7 +1006,10 @@ void Particles3D::ECSIM_velocity(Field *EMf)
 
         const_arr4_double fieldForPcls = EMf->get_fieldForPcls();
 
-        const double qdto2mc = 0.5 * dt * qom/c;
+        //* Step 27: mirror computeMoments' α-ordering choice so mover and gather agree.
+        const bool ecsim_alpha_mover = col->getEcsimAlphaOrdering();
+        const double qdto2mc   = 0.5 * dt * qom/c;
+        const double beta_mover = 0.5 * qom * dt;
 
         #pragma omp for schedule(static)
         for (int pidx = 0; pidx < getNOP(); pidx++) 
@@ -1092,13 +1095,16 @@ void Particles3D::ECSIM_velocity(Field *EMf)
             //* --------------------------------------- *//
 
             //? Update (temporary) velocities
-            const pfloat u_temp = u_n + qdto2mc*Exl;
-            const pfloat v_temp = v_n + qdto2mc*Eyl;
-            const pfloat w_temp = w_n + qdto2mc*Ezl;
+            const pfloat u_temp = ecsim_alpha_mover ? (u_n + beta_mover*Exl/c)
+                                                    : (u_n + qdto2mc*Exl);
+            const pfloat v_temp = ecsim_alpha_mover ? (v_n + beta_mover*Eyl/c)
+                                                    : (v_n + qdto2mc*Eyl);
+            const pfloat w_temp = ecsim_alpha_mover ? (w_n + beta_mover*Ezl/c)
+                                                    : (w_n + qdto2mc*Ezl);
 
-            const double Omx = qdto2mc*Bxl;
-            const double Omy = qdto2mc*Byl;
-            const double Omz = qdto2mc*Bzl;
+            const double Omx = ecsim_alpha_mover ? (beta_mover*Bxl/c) : (qdto2mc*Bxl);
+            const double Omy = ecsim_alpha_mover ? (beta_mover*Byl/c) : (qdto2mc*Byl);
+            const double Omz = ecsim_alpha_mover ? (beta_mover*Bzl/c) : (qdto2mc*Bzl);
 
             const pfloat omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
             const pfloat denom = 1.0 / (1.0 + omsq);
@@ -1703,9 +1709,14 @@ void Particles3D::computeMoments(Field *EMf)
         double Fxl = 0.0, Fyl = 0.0, Fzl = 0.0;
 
         const_arr4_double fieldForPcls = EMf->get_fieldForPcls();
-        
-        //* q*dt/(2*m*c)
-        const double q_dt_2mc = 0.5*dt*qom/c;
+
+        //* q*dt/(2*m*c). Step 27: optional ECSIM-matching evaluation order.
+        //* iPIC3D default:   q_dt_2mc = 0.5*dt*qom/c         (all folded outside loop)
+        //* ECSIM equivalent: beta = 0.5*qom*dt, then /c inside loop per-particle
+        //* Flag routes through the ECSIM order for FP bit-match experiments.
+        const bool ecsim_alpha = col->getEcsimAlphaOrdering();
+        const double q_dt_2mc     = 0.5*dt*qom/c;
+        const double beta_ecsim   = 0.5*qom*dt;
 
         #pragma omp for schedule(static)
         for (int pidx = 0; pidx < getNOP(); pidx++)
@@ -1877,9 +1888,12 @@ void Particles3D::computeMoments(Field *EMf)
                 }
             }
 
-            const double Omx = q_dt_2mc*Bxl/lorentz_factor;
-            const double Omy = q_dt_2mc*Byl/lorentz_factor;
-            const double Omz = q_dt_2mc*Bzl/lorentz_factor;
+            const double Omx = ecsim_alpha ? (beta_ecsim*Bxl/lorentz_factor/c)
+                                           : (q_dt_2mc*Bxl/lorentz_factor);
+            const double Omy = ecsim_alpha ? (beta_ecsim*Byl/lorentz_factor/c)
+                                           : (q_dt_2mc*Byl/lorentz_factor);
+            const double Omz = ecsim_alpha ? (beta_ecsim*Bzl/lorentz_factor/c)
+                                           : (q_dt_2mc*Bzl/lorentz_factor);
 
             const pfloat omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
             const pfloat denom = 1.0 / (1.0 + omsq)/lorentz_factor;

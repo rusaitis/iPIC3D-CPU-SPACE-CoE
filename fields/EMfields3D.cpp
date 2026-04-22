@@ -2703,6 +2703,15 @@ void EMfields3D::calculateE()
     if (col->getPostSolveHelmholtz())
         post_solve_filter_E(Exth, Eyth, Ezth, nxn, nyn, nzn);
 
+    //* Step 25: print grid-side identity decomposition once Exth is finalized.
+    if (col->getDumpCycleIdentity())
+    {
+        dump_cycle_identity(col->getCurrentCycle());
+        //* Step 27: mass-matrix summary stats — cycle 1 only (M is stable within a cycle).
+        if (col->getCurrentCycle() == 1)
+            dump_mass_matrix_stats(col->getCurrentCycle());
+    }
+
     //* E(x,y,z) = -(1.0 - th)/th * E(x,y,z) + 1.0/th * Eth(x,y,z): scale the electric field values
     addscale(1.0/th, -(1.0 - th)/th, Ex, Exth, nxn, nyn, nzn);
     addscale(1.0/th, -(1.0 - th)/th, Ey, Eyth, nxn, nyn, nzn);
@@ -2779,11 +2788,24 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 
     //? --------------------------------------------------------- ?//
 
+    //* Step 26: ECSIM-style unconditional halo refresh on Jxh before it enters the
+    //* solver source. Matches ecsim/fields/EMfields3D.cpp:878-880, which runs even
+    //* when Nvolte=0 (the "halo-only" energy-conserving smoother slot). iPIC3D's
+    //* moment-gather `communicateInterp`+`communicateNode_P` already refresh Jxh at
+    //* cycle start, but the explicit NodeBC here enforces the periodic-duplicate
+    //* convention on the solver-input Jxh after any intervening state changes.
+    if (col->getEnergyConservingSmoothing())
+    {
+        communicateNodeBC(nxn, nyn, nzn, Jxh, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Jyh, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Jzh, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
+    }
+
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(Jxh, Jyh, Jzh, nxn, nyn, nzn);
 
     for (int i = 0; i < nxn; i++)
-        for (int j = 0; j < nyn; j++) 
+        for (int j = 0; j < nyn; j++)
             for (int k = 0; k < nzn; k++)
             {
                 //? If zeroCurrent is implemented, the follwoing 3 lines need to be changed to J_tot = Jh.(i,j,k) + zeroCurrent*J_ext.get(i, j, k)
@@ -2952,6 +2974,17 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Y[i][j][k] = dt*th*FourPI*MEy;
                 temp2Z[i][j][k] = dt*th*FourPI*MEz;
             }
+
+    //* Step 26: ECSIM-style halo refresh on M·E before the invVOL scaling. Matches
+    //* ecsim/fields/EMfields3D.cpp:1199-1201, which runs unconditionally inside
+    //* applySmoothing even when Nvolte=0. Completes the S·M·S sandwich (the S before
+    //* M·E is already supplied by the NodeBC on tempX at the top of MaxwellImage).
+    if (col->getEnergyConservingSmoothing())
+    {
+        communicateNodeBC(nxn, nyn, nzn, temp2X, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, temp2Y, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, temp2Z, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
+    }
 
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(temp2X, temp2Y, temp2Z, nxn, nyn, nzn);
@@ -3390,6 +3423,102 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
     communicateNodeBC(nxn, nyn, nzn, Exf, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
     communicateNodeBC(nxn, nyn, nzn, Eyf, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
     communicateNodeBC(nxn, nyn, nzn, Ezf, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
+}
+
+//* Step 27: summary stats over the stored 9-component mass matrix. Prints once at the
+//* supplied cycle and is designed as the iPIC3D endpoint for a cross-code M byte compare
+//* against ECSIM (dump its `Mxx/Myy/…` with equivalent NeNo ordering over the same
+//* unique-node interior). Cheap: one pass over each of the 9 · ne_mass_ arrays.
+void EMfields3D::dump_mass_matrix_stats(int cycle)
+{
+    auto walk = [&](arr4_double M, const char *name)
+    {
+        double local_sum = 0.0, local_sqsum = 0.0, local_max = 0.0;
+        long   local_cnt = 0;
+        for (int g = 0; g < ne_mass_; ++g)
+            for (int i = n_ghost_; i < nxn - n_ghost_ - 1; ++i)
+                for (int j = n_ghost_; j < nyn - n_ghost_ - 1; ++j)
+                    for (int k = n_ghost_; k < nzn - n_ghost_ - 1; ++k)
+                    {
+                        const double v = M.get(g, i, j, k);
+                        local_sum   += v;
+                        local_sqsum += v * v;
+                        const double av = std::fabs(v);
+                        if (av > local_max) local_max = av;
+                        ++local_cnt;
+                    }
+
+        double sum = 0.0, sqsum = 0.0, maxabs = 0.0;
+        long   cnt = 0;
+        MPI_Allreduce(&local_sum,   &sum,    1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+        MPI_Allreduce(&local_sqsum, &sqsum,  1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+        MPI_Allreduce(&local_max,   &maxabs, 1, MPI_DOUBLE, MPI_MAX, (&get_vct())->getFieldComm());
+        MPI_Allreduce(&local_cnt,   &cnt,    1, MPI_LONG,   MPI_SUM, (&get_vct())->getFieldComm());
+
+        if ((&get_vct())->getCartesian_rank() == 0)
+        {
+            using std::cout;
+            using std::endl;
+            cout << std::scientific << std::setprecision(15);
+            cout << "[MassStats] cycle=" << cycle << " " << name
+                 << " sum="    << sum
+                 << " frob="   << std::sqrt(sqsum)
+                 << " maxabs=" << maxabs
+                 << " n="      << cnt << endl;
+        }
+    };
+
+    walk(Mxx, "Mxx");
+    walk(Myy, "Myy");
+    walk(Mzz, "Mzz");
+    walk(Mxy, "Mxy");
+    walk(Myx, "Myx");
+    walk(Mxz, "Mxz");
+    walk(Mzx, "Mzx");
+    walk(Myz, "Myz");
+    walk(Mzy, "Mzy");
+}
+
+//* Step 25: cycle-1 identity decomposition print. Uses the SAME unique-node range
+//* [n_ghost_, n{x,y,z}n - n_ghost_ - 1) as get_E_field_energy so external scripts
+//* can line the numbers up with ConservedQuantities.txt column II/III/IV.
+void EMfields3D::dump_cycle_identity(int cycle)
+{
+    double local_I_J = 0.0;
+    double local_I_M = 0.0;
+
+    for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
+            {
+                local_I_J += Exth[i][j][k] * Jxh[i][j][k]
+                           + Eyth[i][j][k] * Jyh[i][j][k]
+                           + Ezth[i][j][k] * Jzh[i][j][k];
+
+                double MEx, MEy, MEz;
+                mass_matrix_times_vector(&MEx, &MEy, &MEz, Exth, Eyth, Ezth, i, j, k);
+                local_I_M += Exth[i][j][k] * MEx
+                           + Eyth[i][j][k] * MEy
+                           + Ezth[i][j][k] * MEz;
+            }
+
+    double I_J = 0.0, I_M = 0.0;
+    MPI_Allreduce(&local_I_J, &I_J, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    MPI_Allreduce(&local_I_M, &I_M, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+
+    I_J *= dt;
+    I_M *= dt;
+
+    if ((&get_vct())->getCartesian_rank() == 0)
+    {
+        using std::cout;
+        using std::endl;
+        cout << std::scientific << std::setprecision(15);
+        cout << "[StepID] cycle=" << cycle
+             << " I_J=" << I_J
+             << " I_M=" << I_M
+             << " I_total=" << (I_J + I_M) << endl;
+    }
 }
 
 

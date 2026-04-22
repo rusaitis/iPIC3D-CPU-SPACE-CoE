@@ -146,6 +146,15 @@ void Collective::ReadInput(string inputfile)
         //* (matching the MPI-send convention used for XLEN>1 subdomains). Default off.
         FixNodePeriodicHalo = config.read<bool>("FixNodePeriodicHalo", false);
 
+        //* Step 25: cycle-1 identity decomposition print (DoubleGEM residual audit).
+        DumpCycleIdentity = config.read<bool>("DumpCycleIdentity", false);
+
+        //* Step 26: ECSIM-style energy-conserving smoothing slot (halo-only when Smooth=0).
+        EnergyConservingSmoothing = config.read<bool>("EnergyConservingSmoothing", false);
+
+        //* Step 27: match ECSIM's FP evaluation order for α-matrix scalars.
+        EcsimAlphaOrdering = config.read<bool>("EcsimAlphaOrdering", false);
+
         //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 
