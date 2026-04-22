@@ -135,6 +135,10 @@ void Collective::ReadInput(string inputfile)
         //* Phase 10m: post-`calculateE` Helmholtz hook (default off — opt-in).
         PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
+        //* Step 22: average the two periodic-image copies of interior duplicate nodes
+        //* of the solved Exth/Eyth/Ezth after `calculateE`. Default off.
+        UnifyPeriodicDuplicates = config.read<bool>("UnifyPeriodicDuplicates", false);
+
         //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

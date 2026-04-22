@@ -183,6 +183,13 @@ public:
     //* `MaxwellImage` the way Phase 10k's drop-in attempt did.
     void post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field, arr3_double Ez_field, int nx, int ny, int nz);
 
+    //* Step 22: enforce equality of the periodic-duplicate interior nodes (indices n_ghost_ and
+    //*          nxn-n_ghost_-1 along each periodic axis) on the solved E-field arrays.
+    //* The Maxwell solver treats the two images of the same physical periodic node as independent
+    //* DOFs. communicateNodeBC refreshes ghost faces only, so interior duplicates can disagree by
+    //* O(relative solver tol). See plan-energy-conservation.md Step 21 Sub-test (c).
+    void unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz);
+
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();
 

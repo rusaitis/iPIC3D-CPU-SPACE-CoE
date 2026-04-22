@@ -2691,6 +2691,11 @@ void EMfields3D::calculateE()
     time_com.stop();
     #endif
 
+    //* Step 22: average periodic-duplicate interior nodes so the two solver DOFs representing
+    //* the same physical node carry a single, self-consistent value before downstream use.
+    if (col->getUnifyPeriodicDuplicates())
+        unify_periodic_duplicates(Exth, Eyth, Ezth, nxn, nyn, nzn);
+
     //* Phase 10m: post-`calculateE` Helmholtz low-pass on the time-centered field Eth.
     //* Applied BEFORE Ex/Ey/Ez are derived from Eth, so the time-advanced E inherits the
     //* filtering automatically. Decoupled from MaxwellImage's S·M·S — the implicit operator
@@ -3012,7 +3017,7 @@ void EMfields3D::set_fieldForPcls()
             }
 }
 
-//? Calculate magnetic field (defined on nodes) using precomputed E(n + theta), the magnetic field is evaluated from Faraday's law 
+//? Calculate magnetic field (defined on nodes) using precomputed E(n + theta), the magnetic field is evaluated from Faraday's law
 void EMfields3D::calculateB()
 {
     const Collective *col = &get_col();
@@ -3026,7 +3031,7 @@ void EMfields3D::calculateB()
     grid->curlN2C(tempXC, tempYC, tempZC, Exth, Eyth, Ezth);
 
     //? Compute curl of E_ext
-    // if (col->getAddExternalCurlE()) 
+    // if (col->getAddExternalCurlE())
     //     grid->curlN2C(tempXC2, tempYC2, tempZC2, Ex_ext, Ey_ext, Ez_ext);
 
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
@@ -3036,8 +3041,8 @@ void EMfields3D::calculateB()
     addscale(-c * dt, 1, Bxc, tempXC, nxc, nyc, nzc);
     addscale(-c * dt, 1, Byc, tempYC, nxc, nyc, nzc);
     addscale(-c * dt, 1, Bzc, tempZC, nxc, nyc, nzc);
-    
-    // if (col->getAddExternalCurlE()) 
+
+    // if (col->getAddExternalCurlE())
     // {
     //     addscale(-c * dt, 1, Bxc, tempXC2, nxc, nyc, nzc);
     //     addscale(-c * dt, 1, Byc, tempYC2, nxc, nyc, nzc);
@@ -3317,6 +3322,74 @@ void EMfields3D::post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field,
     energy_conserve_smooth_direction(Ex_field, nx, ny, nz, 0, /*kernel_override=*/2);
     energy_conserve_smooth_direction(Ey_field, nx, ny, nz, 1, /*kernel_override=*/2);
     energy_conserve_smooth_direction(Ez_field, nx, ny, nz, 2, /*kernel_override=*/2);
+}
+
+//* Step 22: Average the two periodic-image copies of each interior duplicate node.
+//* For periodic axis d with n_ghost_ ghost layers, indices `n_ghost_` and `nx_d - n_ghost_ - 1`
+//* along that axis carry the same physical position but live as independent solver DOFs.
+//* After averaging, re-running communicateNodeBC propagates the unified value back into ghosts.
+void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz)
+{
+    const VirtualTopology3D *vct = &get_vct();
+    const Collective *col = &get_col();
+
+    const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
+    const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
+    const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
+
+    arr3_double *flds[3] = { &Exf, &Eyf, &Ezf };
+
+    if (periodicX_global) {
+        const int ilo = n_ghost_;
+        const int ihi = nx - n_ghost_ - 1;
+        if (ihi > ilo) {
+            for (int f = 0; f < 3; ++f) {
+                arr3_double &F = *flds[f];
+                for (int j = 0; j < ny; ++j)
+                    for (int k = 0; k < nz; ++k) {
+                        const double avg = 0.5 * (F[ilo][j][k] + F[ihi][j][k]);
+                        F[ilo][j][k] = avg;
+                        F[ihi][j][k] = avg;
+                    }
+            }
+        }
+    }
+
+    if (periodicY_global) {
+        const int jlo = n_ghost_;
+        const int jhi = ny - n_ghost_ - 1;
+        if (jhi > jlo) {
+            for (int f = 0; f < 3; ++f) {
+                arr3_double &F = *flds[f];
+                for (int i = 0; i < nx; ++i)
+                    for (int k = 0; k < nz; ++k) {
+                        const double avg = 0.5 * (F[i][jlo][k] + F[i][jhi][k]);
+                        F[i][jlo][k] = avg;
+                        F[i][jhi][k] = avg;
+                    }
+            }
+        }
+    }
+
+    if (periodicZ_global) {
+        const int klo = n_ghost_;
+        const int khi = nz - n_ghost_ - 1;
+        if (khi > klo) {
+            for (int f = 0; f < 3; ++f) {
+                arr3_double &F = *flds[f];
+                for (int i = 0; i < nx; ++i)
+                    for (int j = 0; j < ny; ++j) {
+                        const double avg = 0.5 * (F[i][j][klo] + F[i][j][khi]);
+                        F[i][j][klo] = avg;
+                        F[i][j][khi] = avg;
+                    }
+            }
+        }
+    }
+
+    communicateNodeBC(nxn, nyn, nzn, Exf, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Eyf, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Ezf, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
 }
 
 
