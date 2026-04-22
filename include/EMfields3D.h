@@ -211,6 +211,17 @@ public:
     //* Cycle 0 = post-init (pre-solve) snapshot; cycle 1 = post-solve-1.
     void dump_cycle_fields(int cycle, const std::string& dir);
 
+    //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
+    //* Generates two deterministic pseudo-random Krylov-space vectors u, v,
+    //* applies the matrix-free operator A via MaxwellImage to each, and
+    //* reports <A·u, v> − <u, A·v>. A self-adjoint A makes the gap purely
+    //* FP round-off (~1e-13 relative at DoubleGEM scale). Any systematic
+    //* asymmetry above ~1e-12 rel indicates a structural break in one of the
+    //* six ECSIM-exact energy-identity conditions (#2: operator self-adjoint;
+    //* #6: consistent periodic-DOF handling). Gated by input flag
+    //* VerifyAdjoint; runs once at the chosen cycle (default cycle 1).
+    void probe_adjointness(int cycle);
+
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();
 

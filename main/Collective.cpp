@@ -149,6 +149,9 @@ void Collective::ReadInput(string inputfile)
         //* Step 25: cycle-1 identity decomposition print (DoubleGEM residual audit).
         DumpCycleIdentity = config.read<bool>("DumpCycleIdentity", false);
 
+        //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
+        VerifyAdjoint = config.read<bool>("VerifyAdjoint", false);
+
         //* Step 26: ECSIM-style energy-conserving smoothing slot (halo-only when Smooth=0).
         EnergyConservingSmoothing = config.read<bool>("EnergyConservingSmoothing", false);
 

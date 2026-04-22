@@ -217,6 +217,7 @@ class Collective
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
     bool   getUnifyPeriodicDuplicates() const { return UnifyPeriodicDuplicates; }
     bool   getFixNodePeriodicHalo()     const { return FixNodePeriodicHalo; }
+    bool   getVerifyAdjoint()           const { return VerifyAdjoint; }
     bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
     bool   getEnergyConservingSmoothing() const { return EnergyConservingSmoothing; }
     bool   getEcsimAlphaOrdering()      const { return EcsimAlphaOrdering; }
@@ -289,6 +290,12 @@ class Collective
     bool   PostSolveHelmholtz;
     bool   UnifyPeriodicDuplicates;
     bool   FixNodePeriodicHalo;
+
+    //* Step 34b: programmatic self-adjointness probe for MaxwellImage. When true,
+    //* at cycle 1 (after MaxwellSource, before the Krylov solve) computes
+    //* <A·u, v> − <u, A·v> on two deterministic pseudo-random Krylov vectors
+    //* and prints the absolute/relative gap. Off by default.
+    bool   VerifyAdjoint;
 
     //* Step 25: cycle-1 identity decomposition print. When true, calculateE prints
     //* I_J = dt · <Eth, Jxh>_unique and I_M = dt · <Eth, M·Eth>_unique so external
