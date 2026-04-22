@@ -218,6 +218,7 @@ class Collective
     bool   getUnifyPeriodicDuplicates() const { return UnifyPeriodicDuplicates; }
     bool   getFixNodePeriodicHalo()     const { return FixNodePeriodicHalo; }
     bool   getVerifyAdjoint()           const { return VerifyAdjoint; }
+    bool   getSymmetrizeMaxwellImage()  const { return SymmetrizeMaxwellImage; }
     bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
     bool   getEnergyConservingSmoothing() const { return EnergyConservingSmoothing; }
     bool   getEcsimAlphaOrdering()      const { return EcsimAlphaOrdering; }
@@ -296,6 +297,14 @@ class Collective
     //* <A·u, v> − <u, A·v> on two deterministic pseudo-random Krylov vectors
     //* and prints the absolute/relative gap. Off by default.
     bool   VerifyAdjoint;
+
+    //* Step 34d: per-matvec symmetrization of MaxwellImage. When true, applies
+    //* unify_periodic_duplicates on both INPUT (after solver2phys+halo refresh,
+    //* before L applies) and OUTPUT (after L, before phys2solver) of every
+    //* matvec. Forces A to act on the consistent-periodic subspace and returns
+    //* a consistent result. First-pass cheap fix for the 34b operator
+    //* asymmetry; if it moves the drift a deeper H^T refactor is warranted.
+    bool   SymmetrizeMaxwellImage;
 
     //* Step 25: cycle-1 identity decomposition print. When true, calculateE prints
     //* I_J = dt · <Eth, Jxh>_unique and I_M = dt · <Eth, M·Eth>_unique so external

@@ -2944,6 +2944,19 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
 	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
 
+    //* Step 34d: per-matvec symmetrization — unify duplicate periodic DOFs
+    //* on the INPUT side so the operator acts on the consistent subspace only.
+    //* The halo refresh above filled ghosts via H; unifying now equalises the
+    //* interior periodic-duplicate pair and re-refreshes halos so the stencil
+    //* below sees a fully-consistent vector. Cheap (3 grid sweeps) per matvec.
+    if (col->getSymmetrizeMaxwellImage()) {
+        const bool perX = col->getPERIODICX() && vct->getXLEN() == 1;
+        const bool perY = col->getPERIODICY() && vct->getYLEN() == 1;
+        const bool perZ = col->getPERIODICZ() && vct->getZLEN() == 1;
+        if (perX || perY || perZ)
+            unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
+    }
+
     //? curl(curl(E)) assembly. Two paths selected by MaxwellOperator:
     //*   "curl_curl"   (default) — legacy composition curlC2N(curlN2C(E)).
     //*   "lap_graddiv"           — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E)
@@ -3044,6 +3057,18 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageY[i][j][k] = temp2Y[i][j][k] + imageY[i][j][k];
                 imageZ[i][j][k] = temp2Z[i][j][k] + imageZ[i][j][k];
             }
+
+    //* Step 34d: per-matvec symmetrization — unify duplicate periodic DOFs on
+    //* the OUTPUT too so the result lives in the consistent-periodic subspace.
+    //* Paired with the input-side unify above, this restricts A to the
+    //* consistent subspace (A_symm = unify · A · unify).
+    if (col->getSymmetrizeMaxwellImage()) {
+        const bool perX = col->getPERIODICX() && vct->getXLEN() == 1;
+        const bool perY = col->getPERIODICY() && vct->getYLEN() == 1;
+        const bool perZ = col->getPERIODICZ() && vct->getZLEN() == 1;
+        if (perX || perY || perZ)
+            unify_periodic_duplicates(imageX, imageY, imageZ, nxn, nyn, nzn);
+    }
 
     //? Move from physical space to Krylov space
     phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_);

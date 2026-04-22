@@ -152,6 +152,9 @@ void Collective::ReadInput(string inputfile)
         //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
         VerifyAdjoint = config.read<bool>("VerifyAdjoint", false);
 
+        //* Step 34d: per-matvec symmetrization of MaxwellImage.
+        SymmetrizeMaxwellImage = config.read<bool>("SymmetrizeMaxwellImage", false);
+
         //* Step 26: ECSIM-style energy-conserving smoothing slot (halo-only when Smooth=0).
         EnergyConservingSmoothing = config.read<bool>("EnergyConservingSmoothing", false);
 
