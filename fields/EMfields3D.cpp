@@ -3322,7 +3322,7 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
                     for (int k = n_ghost_; k < nz - n_ghost_; k++)
                         local += u[i][j][k] * v[i][j][k];
             double global = 0.0;
-            MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_SUM, vct->getFieldComm());
+            allreduce_sum(&local, &global, 1, vct->getFieldComm());
             return global;
         };
 
@@ -3586,8 +3586,8 @@ void EMfields3D::dump_mass_matrix_stats(int cycle)
 
         double sum = 0.0, sqsum = 0.0, maxabs = 0.0;
         long   cnt = 0;
-        MPI_Allreduce(&local_sum,   &sum,    1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
-        MPI_Allreduce(&local_sqsum, &sqsum,  1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+        allreduce_sum(&local_sum, &sum, 1, (&get_vct())->getFieldComm());
+        allreduce_sum(&local_sqsum, &sqsum, 1, (&get_vct())->getFieldComm());
         MPI_Allreduce(&local_max,   &maxabs, 1, MPI_DOUBLE, MPI_MAX, (&get_vct())->getFieldComm());
         MPI_Allreduce(&local_cnt,   &cnt,    1, MPI_LONG,   MPI_SUM, (&get_vct())->getFieldComm());
 
@@ -3639,8 +3639,8 @@ void EMfields3D::dump_cycle_identity(int cycle)
             }
 
     double I_J = 0.0, I_M = 0.0;
-    MPI_Allreduce(&local_I_J, &I_J, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
-    MPI_Allreduce(&local_I_M, &I_M, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&local_I_J, &I_J, 1, (&get_vct())->getFieldComm());
+    allreduce_sum(&local_I_M, &I_M, 1, (&get_vct())->getFieldComm());
 
     I_J *= dt;
     I_M *= dt;
@@ -3866,7 +3866,7 @@ void EMfields3D::probe_adjointness(int cycle)
                            + Ya[i][j][k]*Yb[i][j][k]
                            + Za[i][j][k]*Zb[i][j][k];
         double sum = 0.0;
-        MPI_Allreduce(&local, &sum, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        allreduce_sum(&local, &sum, 1, fieldcomm);
         return sum;
     };
 
@@ -3916,7 +3916,7 @@ void EMfields3D::probe_adjointness(int cycle)
                                  + imageZ[i][j][k] * scratch_Av_z[lin];
             }
     double uniq_u_Av = 0.0;
-    MPI_Allreduce(&local_uniq_u_Av, &uniq_u_Av, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+    allreduce_sum(&local_uniq_u_Av, &uniq_u_Av, 1, fieldcomm);
 
     auto report = [&](const char* tag, double left, double right) {
         if (rank != 0) return;
@@ -4015,7 +4015,7 @@ void EMfields3D::probe_adjointness(int cycle)
                                 + imageY[i][j][k]*tempY[i][j][k]
                                 + imageZ[i][j][k]*tempZ[i][j][k];
         double s_Au_v = 0.0;
-        MPI_Allreduce(&local_Au_v, &s_Au_v, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        allreduce_sum(&local_Au_v, &s_Au_v, 1, fieldcomm);
 
         //* Now lift u_s and A·v_s into scratch buffers for <u, A·v>
         solver2phys(imageX, imageY, imageZ, u_s.data(), nxn, nyn, nzn, n_ghost_);
@@ -4043,7 +4043,7 @@ void EMfields3D::probe_adjointness(int cycle)
                                 + imageZ[i][j][k]*sAv_z[lin];
                 }
         double s_u_Av = 0.0;
-        MPI_Allreduce(&local_u_Av, &s_u_Av, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        allreduce_sum(&local_u_Av, &s_u_Av, 1, fieldcomm);
 
         //* Also compute |u|, |v|, |Au|, |Av| on the same unique-DOF range so
         //* we can normalize the gap by |u|·|v| → estimate of ‖A − A^T‖.
@@ -4084,10 +4084,10 @@ void EMfields3D::probe_adjointness(int cycle)
                     local_AuAu += sAu_x[lin]*sAu_x[lin] + sAu_y[lin]*sAu_y[lin] + sAu_z[lin]*sAu_z[lin];
                 }
         double uu=0, vv=0, AuAu=0, AvAv=0;
-        MPI_Allreduce(&local_uu, &uu, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
-        MPI_Allreduce(&local_vv, &vv, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
-        MPI_Allreduce(&local_AuAu, &AuAu, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
-        MPI_Allreduce(&local_AvAv, &AvAv, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        allreduce_sum(&local_uu, &uu, 1, fieldcomm);
+        allreduce_sum(&local_vv, &vv, 1, fieldcomm);
+        allreduce_sum(&local_AuAu, &AuAu, 1, fieldcomm);
+        allreduce_sum(&local_AvAv, &AvAv, 1, fieldcomm);
         const double nu = std::sqrt(uu), nv = std::sqrt(vv);
         const double nAu = std::sqrt(AuAu), nAv = std::sqrt(AvAv);
 
@@ -7212,7 +7212,7 @@ double EMfields3D::get_E_field_energy(void)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k] + Ey[i][j][k] * Ey[i][j][k] + Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
 
-    MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
@@ -7226,7 +7226,7 @@ double EMfields3D::get_Ex_field_energy(void)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k]) / (FourPI);
 
-    MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
@@ -7240,7 +7240,7 @@ double EMfields3D::get_Ey_field_energy(void)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ey[i][j][k] * Ey[i][j][k]) / (FourPI);
 
-    MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
@@ -7254,7 +7254,7 @@ double EMfields3D::get_Ez_field_energy(void)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
                 localEenergy += .5 * dx * dy * dz * (Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
 
-    MPI_Allreduce(&localEenergy, &totalEenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
@@ -7281,7 +7281,7 @@ double EMfields3D::get_B_field_energy(void)
                 localBenergy += .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
             }
 
-    MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
@@ -7295,7 +7295,7 @@ double EMfields3D::get_Bx_field_energy(void)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++)
                 localBenergy += .5 * dx * dy * dz * (Bxc[i][j][k] * Bxc[i][j][k])/(FourPI);
 
-    MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
@@ -7309,7 +7309,7 @@ double EMfields3D::get_By_field_energy(void)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++)
                 localBenergy += .5 * dx * dy * dz * (Byc[i][j][k] * Byc[i][j][k])/(FourPI);
 
-    MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
@@ -7323,7 +7323,7 @@ double EMfields3D::get_Bz_field_energy(void)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++)
                 localBenergy += .5 * dx * dy * dz * (Bzc[i][j][k] * Bzc[i][j][k])/(FourPI);
 
-    MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
@@ -7347,7 +7347,7 @@ double EMfields3D::get_Bext_energy(void)
                 localBenergy += .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
             }
 
-    MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
@@ -7362,7 +7362,7 @@ double EMfields3D::get_bulk_energy(int is)
                 // Trying to avoid division by zero. Where rho iz 0, current must be 0.
                 localBenergy += (fabs(rhons[is][i][j][k]) > 1.e-20) ? (0.5 * dx * dy * dz * (Jxs[is][i][j][k] * Jxs[is][i][j][k] + Jys[is][i][j][k] * Jys[is][i][j][k] + Jzs[is][i][j][k] * Jzs[is][i][j][k]) / rhons[is][i][j][k]) : 0.0;
 
-    MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM, (&get_vct())->getFieldComm());
+    allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy / qom[is]);
 }
 

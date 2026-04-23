@@ -229,6 +229,8 @@ class Collective
     bool   getDumpCycle1Fields()        const { return DumpCycle1Fields; }
     bool   getDumpMaxwellImageStages()  const { return DumpMaxwellImageStages; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
+    bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
+    bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -369,6 +371,22 @@ class Collective
     //* assembly, pre-M·E, raw M·E, post-outer-smooth×invVOL, final A·E). Used with
     //* `scripts/diff_maxwell_stages.py` for cross-code operator-interior byte diff.
     bool   DumpMaxwellImageStages;
+
+    //* Step 62: force bit-deterministic scalar MPI_SUM allreduce (rank-order gather→
+    //* sum→broadcast) for GMRES dot products / norms and energy diagnostics. Baseline
+    //* MPI_Allreduce trees can reassociate summation depending on process layout, so
+    //* two identical np>1 runs drift by ±1 ULP. Opt-in: adds 2·log(p) extra comms per
+    //* reduction but guarantees cross-run bit-reproducibility. Sets the module-level
+    //* `g_deterministic_mpi_reductions` flag in `utility/Basic.cpp` during init.
+    bool   DeterministicMPIReductions;
+
+    //* Step 63: serialize `computeMoments`' OpenMP parallel region (num_threads=1).
+    //* The ECSIM gather writes to shared grid nodes via `#pragma omp atomic update`;
+    //* atomics protect against races but the landing order of thread writes still
+    //* varies run to run, which drifts the result by ±1 ULP at the same node. Opt-in
+    //* flag that gives cross-OMP-thread-count bit-reproducibility at the cost of
+    //* losing OpenMP parallelism inside the gather. MPI parallelism is unaffected.
+    bool   DeterministicThreadMoments;
 
     int CurrentCycle;
     int zeroCurrent;

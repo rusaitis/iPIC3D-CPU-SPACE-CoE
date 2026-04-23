@@ -180,6 +180,10 @@ void Collective::ReadInput(string inputfile)
         DumpCycle1Fields  = config.read<bool>  ("DumpCycle1Fields", false);
         //* Step 38: per-stage MaxwellImage dump for cross-code operator-interior diff.
         DumpMaxwellImageStages = config.read<bool>("DumpMaxwellImageStages", false);
+
+        //* Step 62 / 63: bit-determinism knobs (both default off — legacy preserved).
+        DeterministicMPIReductions = config.read<bool>("DeterministicMPIReductions", false);
+        DeterministicThreadMoments = config.read<bool>("DeterministicThreadMoments", false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);

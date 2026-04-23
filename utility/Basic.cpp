@@ -19,6 +19,7 @@
  */
 
 #include "mpi.h"
+#include <vector>
 #include "ipicdefs.h"
 #include "Basic.h"
 #include "EllipticF.h"
@@ -26,13 +27,56 @@
 #include "TimeTasks.h"
 #include "errors.h"
 
+//* Step 62: deterministic-MPI switch. Off by default (legacy MPI_Allreduce).
+bool g_deterministic_mpi_reductions = false;
+
+void det_allreduce_sum(const double *local, double *global, int count, MPI_Comm comm)
+{
+    int rank = 0, nranks = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &nranks);
+
+    //* Single-rank fast path — no reduction needed.
+    if (nranks == 1) {
+        for (int c = 0; c < count; ++c) global[c] = local[c];
+        return;
+    }
+
+    //* Gather all rank-local vectors onto root in rank order.
+    std::vector<double> buf;
+    if (rank == 0) buf.resize(static_cast<size_t>(nranks) * count);
+    MPI_Gather(local, count, MPI_DOUBLE,
+               rank == 0 ? buf.data() : nullptr, count, MPI_DOUBLE, 0, comm);
+
+    //* Sum in fixed rank order on root, broadcast the scalar result.
+    if (rank == 0) {
+        for (int c = 0; c < count; ++c) {
+            double s = 0.0;
+            for (int r = 0; r < nranks; ++r) s += buf[(size_t)r * count + c];
+            global[c] = s;
+        }
+    }
+    MPI_Bcast(global, count, MPI_DOUBLE, 0, comm);
+}
+
+void allreduce_sum(const double *local, double *global, int count, MPI_Comm comm)
+{
+    if (g_deterministic_mpi_reductions)
+        det_allreduce_sum(local, global, count, comm);
+    else
+        MPI_Allreduce(local, global, count, MPI_DOUBLE, MPI_SUM, comm);
+}
+
 /** method to calculate the parallel dot product with vect1, vect2 having the ghost cells*/
 double dotP(const double *vect1, const double *vect2, int n,MPI_Comm* comm) {
   double result = 0;
   double local_result = 0;
   for (int i = 0; i < n; i++)
     local_result += vect1[i] * vect2[i];
-  MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, *comm);
+  if (g_deterministic_mpi_reductions)
+    det_allreduce_sum(&local_result, &result, 1, *comm);
+  else
+    MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, *comm);
   return (result);
 
 }
@@ -114,20 +158,23 @@ double norm2(double ***vect, int nx, int ny, int nz)
   }
 
 //* Compute parallel norm of a vector on different processors with the ghost cell
-double normP(const double *vect, int n,MPI_Comm* comm) 
+double normP(const double *vect, int n,MPI_Comm* comm)
 {
     double result = 0.0;
     double local_result = 0.0;
-    
+
     for (int i = 0; i < n; i++)
         local_result += vect[i] * vect[i];
-    
-    MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, *comm);
-    
+
+    if (g_deterministic_mpi_reductions)
+        det_allreduce_sum(&local_result, &result, 1, *comm);
+    else
+        MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, *comm);
+
     return (sqrt(result));
 }
 
-double norm2P(double ***vect, int nx, int ny, int nz) 
+double norm2P(double ***vect, int nx, int ny, int nz)
 {
     double result = 0;
     double local_result = 0;
@@ -136,7 +183,10 @@ double norm2P(double ***vect, int nx, int ny, int nz)
             for (int k = 0; k < nz; k++)
                 local_result += vect[i][j][k] * vect[i][j][k];
 
-    MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    if (g_deterministic_mpi_reductions)
+        det_allreduce_sum(&local_result, &result, 1, MPI_COMM_WORLD);
+    else
+        MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     return (result);
 }
 

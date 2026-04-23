@@ -43,6 +43,7 @@ developers: Stefano Markidis, Giovanni Lapenta
 
 #include "mic_particles.h"
 #include "debug.h"
+#include "ompdefs.h"                 // omp_get_max_threads for Step 63
 #include <complex>
 #include <iomanip>
 #include <fstream>
@@ -994,14 +995,18 @@ void Particles3D::Shock1D_DoublePiston(Field * EMf)
 //
 
 //! ECSIM - energy conserving semi-implicit method !//
-void Particles3D::ECSIM_velocity(Field *EMf) 
+void Particles3D::ECSIM_velocity(Field *EMf)
 {
-    #pragma omp parallel
+    //* Step 63: same serialisation clause as in computeMoments. Mover per-particle
+    //* loops have no atomics, but OMP thread scheduling still perturbs downstream
+    //* state enough to lose bit-reproducibility vs OMP_NUM_THREADS=1.
+    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
+    #pragma omp parallel num_threads(det_num_threads)
     {
         convertParticlesToAoS();
 
         #pragma omp master
-        if (vct->getCartesian_rank() == 0) 
+        if (vct->getCartesian_rank() == 0)
             cout << "*** ECSIM MOVER (velocities) for species " << ns << " ***" << endl;
 
         const_arr4_double fieldForPcls = EMf->get_fieldForPcls();
@@ -1335,9 +1340,10 @@ void Particles3D::RelSIM_velocity(Field *EMf)
     }
 }
 
-void Particles3D::ECSIM_position(Field *EMf) 
+void Particles3D::ECSIM_position(Field *EMf)
 {
-    #pragma omp parallel
+    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
+    #pragma omp parallel num_threads(det_num_threads)
     {
         convertParticlesToAoS();
 
@@ -1520,7 +1526,8 @@ void Particles3D::ECSIM_position(Field *EMf)
 //   (d) No charge-conservation position correction (dxp,dyp,dzp) — matching ECSIM.
 void Particles3D::mover_PC_sub(Field *EMf)
 {
-    #pragma omp parallel
+    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
+    #pragma omp parallel num_threads(det_num_threads)
     {
         convertParticlesToAoS();
 
@@ -1724,10 +1731,19 @@ void Particles3D::computeMoments(Field *EMf)
     #endif
 
     #pragma omp master
-    if (vct->getCartesian_rank() == 0) 
+    if (vct->getCartesian_rank() == 0)
         cout << "Number of particles of species " << ns << " per MPI process: " << getNOP() << endl;
 
-    #pragma omp parallel
+    //* Step 63: when DeterministicThreadMoments=true, clamp the gather's parallel
+    //* region to a single thread. Deposit helpers (add_Rho_node/add_Jxh_node/
+    //* add_Mass) use `#pragma omp atomic update` to avoid races, but the landing
+    //* order of atomic writes to the same node still varies with the OpenMP
+    //* schedule, introducing ±1 ULP run-to-run noise. Serialising the loop makes
+    //* the deposit order deterministic at the cost of losing OpenMP speedup on
+    //* computeMoments. MPI parallelism is unaffected.
+    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
+
+    #pragma omp parallel num_threads(det_num_threads)
     {
         convertParticlesToAoS();
 

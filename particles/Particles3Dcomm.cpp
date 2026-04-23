@@ -45,6 +45,7 @@ developers: Stefano Markidis, Giovanni Lapenta.
 #include "Particle.h"
 #include "Particles3Dcomm.h"
 #include "Parameters.h"
+#include "Basic.h"                   // allreduce_sum / g_deterministic_mpi_reductions
 
 #include <fstream>
 #include <iomanip>
@@ -1408,7 +1409,7 @@ double Particles3Dcomm::get_total_charge()
         localQ += q;
     }
     
-    MPI_Allreduce(&localQ, &totalQ, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    allreduce_sum(&localQ, &totalQ, 1, MPI_COMM_WORLD);
     return (totalQ);
 }
 
@@ -1449,7 +1450,7 @@ double Particles3Dcomm::get_kinetic_energy()
         }
     }
     
-    MPI_Allreduce(&localKe, &totalKe, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    allreduce_sum(&localKe, &totalKe, 1, MPI_COMM_WORLD);
     return (totalKe);
 }
 
@@ -1481,7 +1482,7 @@ double Particles3Dcomm::get_momentum()
         const double q = pcl.get_q();
         localP += (q/qom)*sqrt(u*u + v*v + w*w);
     }
-    MPI_Allreduce(&localP, &totalP, 1, MPI_DOUBLE, MPI_SUM, mpi_comm);
+    allreduce_sum(&localP, &totalP, 1, mpi_comm);
     return (totalP);
 }
 

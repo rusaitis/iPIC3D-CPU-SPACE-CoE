@@ -35,6 +35,7 @@
 #include "Timing.h"
 #include "ParallelIO.h"
 #include "outputPrepare.h"
+#include "Basic.h"                   // g_deterministic_mpi_reductions
 
 #ifndef NO_HDF5
     #include "WriteOutputParallel.h"
@@ -178,6 +179,10 @@ int c_Solver::Init(int argc, char **argv)
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 #endif
+
+    //* Step 62: propagate the deterministic-reduction flag into the Basic module
+    //* before any dotP/normP/norm2P call (first one is inside EMfields3D init).
+    g_deterministic_mpi_reductions = col->getDeterministicMPIReductions();
 
     //* Create local grid
     grid = new Grid3DCU(col, vct);          // Create the local grid
@@ -781,8 +786,8 @@ void c_Solver::ProbeGatherScatterDuality(int cycle)
 
     double L = 0.0, R = 0.0;
     MPI_Comm fieldcomm = vct->getFieldComm();
-    MPI_Allreduce(&L_local, &L, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
-    MPI_Allreduce(&R_local, &R, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+    allreduce_sum(&L_local, &L, 1, fieldcomm);
+    allreduce_sum(&R_local, &R, 1, fieldcomm);
 
     const double gap_abs = L - R;
     const double scale   = 0.5 * (std::abs(L) + std::abs(R));

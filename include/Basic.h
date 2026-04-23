@@ -54,6 +54,24 @@ double dotP(const double *vect1, const double *vect2, int n,MPI_Comm* comm);
 /** method to calculate dot product */
 double dot(const double *vect1, const double *vect2, int n);
 
+//* Step 62: bit-deterministic scalar MPI_SUM allreduce.
+//* When g_deterministic_mpi_reductions is true, dotP/normP/norm2P and callers
+//* in fields/solvers route their MPI_Allreduce through this instead of the
+//* default tree reduction. The implementation is MPI_Gather → rank-order sum
+//* on root → MPI_Bcast: the summation order is fixed by rank index, so the
+//* output bit pattern is independent of the reduction tree, the node layout,
+//* and the MPI implementation. For count==1 the overhead is negligible; for
+//* larger counts (GMRES y-vector, up to ~m+3 ≈ 43) it's still trivial next
+//* to the matvec cost. Set once from Collective's DeterministicMPIReductions
+//* flag during solver init.
+extern bool g_deterministic_mpi_reductions;
+void det_allreduce_sum(const double *local, double *global, int count, MPI_Comm comm);
+
+//* Drop-in for `MPI_Allreduce(local, global, count, MPI_DOUBLE, MPI_SUM, comm)`
+//* that routes through `det_allreduce_sum` when the determinism flag is set and
+//* otherwise forwards to MPI_Allreduce unchanged.
+void allreduce_sum(const double *local, double *global, int count, MPI_Comm comm);
+
 double norm2(const double *vect, int nx);
 double norm2(const double *const*vect, int nx, int ny);
 double norm2(const arr3_double vect, int nx, int ny);
