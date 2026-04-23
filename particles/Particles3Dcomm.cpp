@@ -1447,14 +1447,24 @@ double Particles3Dcomm::get_total_charge()
     double localQ = 0.0;
     double totalQ = 0.0;
 
+    //* Step 68: opt-in Kahan accumulation — same rationale as get_kinetic_energy.
+    const bool use_kahan = col->getKahanParticleSums();
+    double q_c = 0.0;
+
     for (int i = 0; i < _pcls.size(); i++)
     {
         SpeciesParticle& pcl = _pcls[i];
         const double q = pcl.get_q();
-        
-        localQ += q;
+        if (use_kahan) {
+            const double y = q - q_c;
+            const double t = localQ + y;
+            q_c    = (t - localQ) - y;
+            localQ = t;
+        } else {
+            localQ += q;
+        }
     }
-    
+
     allreduce_sum(&localQ, &totalQ, 1, MPI_COMM_WORLD);
     return (totalQ);
 }
@@ -1471,12 +1481,21 @@ int Particles3Dcomm::get_num_particles()
 }
 
 //? Kinetic energy of all particles
-double Particles3Dcomm::get_kinetic_energy() 
+double Particles3Dcomm::get_kinetic_energy()
 {
     double localKe = 0.0;
     double totalKe = 0.0;
     double lorentz_factor = 0.0;
-    
+
+    //* Step 68: opt-in Kahan-compensated accumulation. The plain `+=` is
+    //* FP-non-associative, so the same particle set summed as one list
+    //* (np=1) vs as rank-partial sums (np>1) drifts by ~1 ULP per cycle.
+    //* Kahan drops the per-add error to O(ε²) which is below IEEE 754's
+    //* resolution, making the rank-partial sum bit-identical to the single
+    //* accumulator.
+    const bool use_kahan = col->getKahanParticleSums();
+    double ke_c = 0.0;   // Kahan compensation term
+
     for (int i = 0; i < _pcls.size(); i++)
     {
         SpeciesParticle& pcl = _pcls[i];
@@ -1485,17 +1504,27 @@ double Particles3Dcomm::get_kinetic_energy()
         const double w = pcl.get_w();
         const double q = pcl.get_q();
 
-        if (Relativistic) 
-		{
+        double term;
+        if (Relativistic)
+        {
             lorentz_factor = sqrt(1.0 + (u*u + v*v + w*w)/(c*c));
-            localKe += (q/qom) * (lorentz_factor - 1.0) * c*c;
+            term = (q/qom) * (lorentz_factor - 1.0) * c*c;
         }
         else
         {
-            localKe += 0.5 * (q/qom) * (u*u + v*v + w*w);
+            term = 0.5 * (q/qom) * (u*u + v*v + w*w);
+        }
+
+        if (use_kahan) {
+            const double y = term - ke_c;
+            const double t = localKe + y;
+            ke_c    = (t - localKe) - y;
+            localKe = t;
+        } else {
+            localKe += term;
         }
     }
-    
+
     allreduce_sum(&localKe, &totalKe, 1, MPI_COMM_WORLD);
     return (totalKe);
 }
@@ -1515,10 +1544,12 @@ double Particles3Dcomm::get_kinetic_energy()
 // momentum, which has no physical meaning that I can see.
 // we should be summing each component of the momentum. -eaj
 //
-double Particles3Dcomm::get_momentum() 
+double Particles3Dcomm::get_momentum()
 {
     double localP = 0.0;
     double totalP = 0.0;
+    const bool use_kahan = col->getKahanParticleSums();
+    double p_c = 0.0;
     for (int i = 0; i < _pcls.size(); i++)
     {
         SpeciesParticle& pcl = _pcls[i];
@@ -1526,7 +1557,15 @@ double Particles3Dcomm::get_momentum()
         const double v = pcl.get_v();
         const double w = pcl.get_w();
         const double q = pcl.get_q();
-        localP += (q/qom)*sqrt(u*u + v*v + w*w);
+        const double term = (q/qom)*sqrt(u*u + v*v + w*w);
+        if (use_kahan) {
+            const double y = term - p_c;
+            const double t = localP + y;
+            p_c    = (t - localP) - y;
+            localP = t;
+        } else {
+            localP += term;
+        }
     }
     allreduce_sum(&localP, &totalP, 1, mpi_comm);
     return (totalP);
@@ -1700,6 +1739,145 @@ void Particles3Dcomm::load_particles_init(const std::string& dir)
     if (rank == 0)
         cout << "[LoadParticles] loaded species " << ns << " (" << _pcls.size()
              << " pcls) ← " << path.str() << endl;
+}
+
+//* Step 68: global-to-local particle dump. Aggregates every rank's particles
+//* to rank 0 via MPI_Gatherv and writes a single species file
+//* `{dir}/particles_init_s{ns}_global.txt`. Canonical per-particle format
+//* matches `dump_particles_init`: one line with 17-digit `x y z u v w q`,
+//* ordered by rank then by local insertion order. Together with
+//* `load_particles_global` this round-trips across any change in np at
+//* fixed global particle count, which is the prerequisite for the Step 68
+//* np=1 ≡ np=4 bit-identity test.
+void Particles3Dcomm::dump_particles_global(const std::string& dir) const
+{
+    const int rank     = vct->getCartesian_rank();
+    const int nprocs   = vct->getNprocs();
+    const int nop_here = static_cast<int>(_pcls.size());
+
+    //* Pack local particles into a contiguous buffer of 7 doubles per pcl.
+    const int per_pcl = 7;
+    std::vector<double> send_buf(static_cast<size_t>(nop_here) * per_pcl);
+    for (int i = 0; i < nop_here; ++i) {
+        const SpeciesParticle& p = _pcls[i];
+        double* s = send_buf.data() + static_cast<size_t>(i) * per_pcl;
+        s[0] = p.get_x(); s[1] = p.get_y(); s[2] = p.get_z();
+        s[3] = p.get_u(); s[4] = p.get_v(); s[5] = p.get_w();
+        s[6] = p.get_q();
+    }
+
+    //* Gather NOP from every rank to rank 0.
+    std::vector<int> nops(nprocs, 0);
+    MPI_Gather(&nop_here, 1, MPI_INT, nops.data(), 1, MPI_INT, 0, mpi_comm);
+
+    //* Build displacement + receive-count arrays on rank 0 (in doubles).
+    std::vector<int> recvcounts(nprocs, 0);
+    std::vector<int> displs(nprocs, 0);
+    long total_pcls = 0;
+    if (rank == 0) {
+        int off = 0;
+        for (int r = 0; r < nprocs; ++r) {
+            recvcounts[r] = nops[r] * per_pcl;
+            displs[r]     = off;
+            off          += recvcounts[r];
+            total_pcls   += nops[r];
+        }
+    }
+
+    std::vector<double> recv_buf;
+    if (rank == 0) recv_buf.resize(static_cast<size_t>(total_pcls) * per_pcl);
+
+    MPI_Gatherv(send_buf.data(), nop_here * per_pcl, MPI_DOUBLE,
+                recv_buf.data(), recvcounts.data(), displs.data(),
+                MPI_DOUBLE, 0, mpi_comm);
+
+    if (rank == 0) {
+        std::ostringstream path;
+        path << dir << "/particles_init_s" << ns << "_global.txt";
+        std::ofstream f(path.str());
+        if (!f) eprintf("dump_particles_global: cannot open %s", path.str().c_str());
+        f << "# iPIC3D particles species=" << ns
+          << " global nop=" << total_pcls << "\n";
+        f << "# fields: x y z u v w q\n";
+        f << std::scientific << std::setprecision(17);
+        for (long i = 0; i < total_pcls; ++i) {
+            const double* s = recv_buf.data() + static_cast<size_t>(i) * per_pcl;
+            f << s[0] << ' ' << s[1] << ' ' << s[2] << ' '
+              << s[3] << ' ' << s[4] << ' ' << s[5] << ' '
+              << s[6] << '\n';
+        }
+        cout << "[DumpParticlesGlobal] wrote species " << ns
+             << " (" << total_pcls << " pcls) → " << path.str() << endl;
+    }
+}
+
+//* Step 68: global-to-local particle load. Rank 0 reads the full file and
+//* broadcasts the raw buffer to all ranks; each rank filters by its local
+//* subdomain (`xstart <= x < xend` etc.) and keeps only its own share.
+//* Boundary tie-break: the last rank along each axis inclusively accepts
+//* `x == xend` so that a particle at the global upper bound ends up on
+//* exactly one rank.
+void Particles3Dcomm::load_particles_global(const std::string& dir)
+{
+    const int rank      = vct->getCartesian_rank();
+    const int per_pcl   = 7;
+
+    //* Rank 0 reads the file into memory.
+    long total_pcls = 0;
+    std::vector<double> buf;
+    if (rank == 0) {
+        std::ostringstream path;
+        path << dir << "/particles_init_s" << ns << "_global.txt";
+        std::ifstream f(path.str());
+        if (!f) eprintf("load_particles_global: cannot open %s", path.str().c_str());
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream iss(line);
+            double x, y, z, u, v, w, q;
+            if (!(iss >> x >> y >> z >> u >> v >> w >> q))
+                eprintf("load_particles_global: parse error in %s", path.str().c_str());
+            buf.push_back(x); buf.push_back(y); buf.push_back(z);
+            buf.push_back(u); buf.push_back(v); buf.push_back(w);
+            buf.push_back(q);
+            ++total_pcls;
+        }
+        cout << "[LoadParticlesGlobal] read species " << ns
+             << " (" << total_pcls << " pcls) ← " << path.str() << endl;
+    }
+
+    //* Broadcast size then raw data to every rank.
+    MPI_Bcast(&total_pcls, 1, MPI_LONG, 0, mpi_comm);
+    if (rank != 0) buf.resize(static_cast<size_t>(total_pcls) * per_pcl);
+    MPI_Bcast(buf.data(), static_cast<int>(total_pcls * per_pcl),
+              MPI_DOUBLE, 0, mpi_comm);
+
+    //* Boundary inclusivity: rightmost rank along each axis accepts `== xend`
+    //* so the global upper bound doesn't fall through. A non-rightmost rank
+    //* uses strict `<` so shared boundaries assign to exactly one rank.
+    const bool last_x = (vct->getXright_neighbor_P() == MPI_PROC_NULL)
+                     || (vct->getCoordinates(0) == vct->getXLEN() - 1);
+    const bool last_y = (vct->getYright_neighbor_P() == MPI_PROC_NULL)
+                     || (vct->getCoordinates(1) == vct->getYLEN() - 1);
+    const bool last_z = (vct->getZright_neighbor_P() == MPI_PROC_NULL)
+                     || (vct->getCoordinates(2) == vct->getZLEN() - 1);
+
+    _pcls.clear();
+    long kept = 0;
+    for (long i = 0; i < total_pcls; ++i) {
+        const double* s = buf.data() + static_cast<size_t>(i) * per_pcl;
+        const double x = s[0], y = s[1], z = s[2];
+        const bool in_x = (x >= xstart) && (last_x ? (x <= xend) : (x < xend));
+        const bool in_y = (y >= ystart) && (last_y ? (y <= yend) : (y < yend));
+        const bool in_z = (z >= zstart) && (last_z ? (z <= zend) : (z < zend));
+        if (in_x && in_y && in_z) {
+            create_new_particle(s[3], s[4], s[5], s[6], x, y, z);
+            ++kept;
+        }
+    }
+    if (rank == 0)
+        cout << "[LoadParticlesGlobal] species " << ns
+             << " — rank 0 kept " << kept << " / " << total_pcls << endl;
 }
 
 /***** particle sorting routines *****/

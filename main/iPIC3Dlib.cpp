@@ -345,6 +345,22 @@ int c_Solver::Init(int argc, char **argv)
             for (int i = 0; i < ns; i++)
                 particles[i].dump_particles_init(col->getSaveDirName());
         }
+
+        //* Step 68: global-to-local particle dump/load. Mirrors the Step 31 hooks
+        //* but uses a single aggregated file per species, filtered by local
+        //* subdomain on load, so a reference state generated at one (np, MPI
+        //* layout) can seed a different one. Load runs before dump so a round
+        //* trip at the same np is a no-op rather than a crash.
+        if (col->getLoadParticlesGlobal())
+        {
+            for (int i = 0; i < ns; i++)
+                particles[i].load_particles_global(col->getParticlesInitDir());
+        }
+        if (col->getDumpParticlesGlobal())
+        {
+            for (int i = 0; i < ns; i++)
+                particles[i].dump_particles_global(col->getSaveDirName());
+        }
     }
 
     //* Allocate test particles (if any)

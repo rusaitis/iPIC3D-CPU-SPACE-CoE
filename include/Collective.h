@@ -234,6 +234,9 @@ class Collective
     bool   getDumpAlphaBothPaths()           const { return DumpAlphaBothPaths; }
     bool   getDeepSymmetrizeMaxwellImage()   const { return DeepSymmetrizeMaxwellImage; }
     bool   getDeterministicParticleComm()    const { return DeterministicParticleComm; }
+    bool   getDumpParticlesGlobal()          const { return DumpParticlesGlobal; }
+    bool   getLoadParticlesGlobal()          const { return LoadParticlesGlobal; }
+    bool   getKahanParticleSums()            const { return KahanParticleSums; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -430,6 +433,28 @@ class Collective
     //* `DeterministicThreadMoments=1` for full same-config bit reproducibility
     //* at np>1.
     bool   DeterministicParticleComm;
+
+    //* Step 68: global-to-local particle dump/load so an np=1 reference state
+    //* can be consumed by an np>1 run (and vice versa). Unlike
+    //* DumpParticlesInit/LoadParticlesInit — which write one file per
+    //* (species, rank) and therefore round-trip only at matched decomposition
+    //* — the "global" variants aggregate to rank 0 via `MPI_Gatherv` and emit
+    //* one file per species. On load, every rank reads the full file and
+    //* keeps only particles whose position falls in its local subdomain
+    //* (`Grid3DCU::get{X,Y,Z}{start,end}`), so the decomposition can change.
+    //* Opt-in. Cost is only the extra communication/disk during Init.
+    bool   DumpParticlesGlobal;
+    bool   LoadParticlesGlobal;
+
+    //* Step 68: Kahan-compensated accumulation inside the serial per-particle
+    //* sums in `Particles3Dcomm::get_kinetic_energy`, `get_total_charge`,
+    //* `get_momentum`. Plain accumulation is FP-non-associative, so the
+    //* single-accumulator result at np=1 drifts from the per-rank-partial
+    //* result at np>1 by ~1 ULP per cycle even with matched particles and
+    //* `DeterministicMPIReductions`. Kahan reduces the per-addition error to
+    //* O(ε²) which is below IEEE 754's resolution, so per-rank partial sums
+    //* match the np=1 single accumulator to bit identity. Opt-in.
+    bool   KahanParticleSums;
 
     int CurrentCycle;
     int zeroCurrent;

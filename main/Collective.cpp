@@ -204,6 +204,11 @@ void Collective::ReadInput(string inputfile)
         //* Step 66: drain incoming particle blocks per-direction in fixed order
         //* instead of OS-scheduled `MPI_Waitany` completion. Opt-in.
         DeterministicParticleComm  = config.read<bool>("DeterministicParticleComm", false);
+        //* Step 68: cross-np bit-identity — global particle dump/load + Kahan
+        //* summation in the per-particle scalar reductions. All opt-in.
+        DumpParticlesGlobal = config.read<bool>("DumpParticlesGlobal", false);
+        LoadParticlesGlobal = config.read<bool>("LoadParticlesGlobal", false);
+        KahanParticleSums   = config.read<bool>("KahanParticleSums",   false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);
