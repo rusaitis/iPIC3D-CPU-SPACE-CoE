@@ -99,9 +99,26 @@ GMREStol                       = 1E-15                                         #
 # %                                   SMOOTHING                                %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
  
-Smooth                         = 1                                             # If Smooth = false (1 = true OR 0 = false), the following 2 parameters will be ignored 
+Smooth                         = 1                                             # If Smooth = false (1 = true OR 0 = false), the following 2 parameters will be ignored
 num_smoothings                 = 4	                                           # Number of smoothings
 SmoothCycle                    = 1	                                           # After how many time cycles is the data smoothed
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                             ENERGY CONSERVATION                            %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# The three flags below are the canonical set that closes iPIC3D's historical
+# 12-OoM energy-conservation gap vs ECSIM on DoubleGEM 256x128 (now ε_mach at
+# np=1 and np=4). FixNodePeriodicHalo + UnifyPeriodicDuplicates are no-ops
+# when the axis is non-periodic or MPI-split (XLEN>1). SymmetrizeMaxwellImage
+# adds ~15% to the field-solve cost and is only observable on self-periodic
+# axes; harmless otherwise. All three now default true — the explicit lines
+# here document the set and make them visible to grep/diff for experiments.
+
+FixNodePeriodicHalo            = 1                                             # Offset-by-one convention for self-periodic NODE halo
+UnifyPeriodicDuplicates        = 1                                             # Post-solve average of periodic-image duplicate DOFs
+SymmetrizeMaxwellImage         = 1                                             # Per-matvec unify on both input and output of MaxwellImage
+EnergyConservingSmoothing      = 1                                             # Extra halo refresh around Jxh and M*E (ECSIM-style)
+MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); default curl_curl is not self-adjoint
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                    BOX SIZE                                %

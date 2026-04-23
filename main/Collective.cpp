@@ -136,15 +136,18 @@ void Collective::ReadInput(string inputfile)
         PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
         //* Step 22: average the two periodic-image copies of interior duplicate nodes
-        //* of the solved Exth/Eyth/Ezth after `calculateE`. Default off.
-        UnifyPeriodicDuplicates = config.read<bool>("UnifyPeriodicDuplicates", false);
+        //* of the solved Exth/Eyth/Ezth after `calculateE`. Default ON (promoted
+        //* 2026-04-23 after Steps 22/23/34d/38 closed the 12-OoM gap at np=1 and np=4).
+        //* No-op on axes that are either non-periodic or MPI-split (XLEN>1).
+        UnifyPeriodicDuplicates = config.read<bool>("UnifyPeriodicDuplicates", true);
 
         //* Step 23: offset-by-one halo for NODE-centred fields on self-neighbor periodic
-        //* axes. Current convention `ghost(0) = interior(nxn-2)` maps the left ghost to the
-        //* HIGH-side duplicate rather than the proper periodic neighbor one step inside.
-        //* When true, uses `ghost(0) = interior(nxn-3)` and `ghost(nxn-1) = interior(2)`
-        //* (matching the MPI-send convention used for XLEN>1 subdomains). Default off.
-        FixNodePeriodicHalo = config.read<bool>("FixNodePeriodicHalo", false);
+        //* axes. Legacy convention `ghost(0) = interior(nxn-2)` maps the left ghost to
+        //* the HIGH-side duplicate instead of the proper periodic neighbor one step inside.
+        //* New convention `ghost(0) = interior(nxn-3)` matches the MPI-send convention
+        //* for XLEN>1 subdomains. Default ON (promoted 2026-04-23). No-op on axes that
+        //* are either non-periodic or MPI-split.
+        FixNodePeriodicHalo = config.read<bool>("FixNodePeriodicHalo", true);
 
         //* Step 25: cycle-1 identity decomposition print (DoubleGEM residual audit).
         DumpCycleIdentity = config.read<bool>("DumpCycleIdentity", false);
@@ -152,8 +155,13 @@ void Collective::ReadInput(string inputfile)
         //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
         VerifyAdjoint = config.read<bool>("VerifyAdjoint", false);
 
-        //* Step 34d: per-matvec symmetrization of MaxwellImage.
-        SymmetrizeMaxwellImage = config.read<bool>("SymmetrizeMaxwellImage", false);
+        //* Step 34d: per-matvec symmetrization of MaxwellImage (calls
+        //* `unify_periodic_duplicates` on MaxwellImage input and output). Required for
+        //* cross-cycle Exth consistency when UnifyPeriodicDuplicates is on; turning this
+        //* off while leaving the unify hook off can abort mid-run (see project notes).
+        //* Default ON (promoted 2026-04-23). Adds ~15% wall-clock to the field solve;
+        //* irrelevant on non-self-periodic decompositions where the unify pass is a no-op.
+        SymmetrizeMaxwellImage = config.read<bool>("SymmetrizeMaxwellImage", true);
 
         //* Step 26: ECSIM-style energy-conserving smoothing slot (halo-only when Smooth=0).
         EnergyConservingSmoothing = config.read<bool>("EnergyConservingSmoothing", false);
