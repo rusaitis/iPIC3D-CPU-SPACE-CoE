@@ -231,6 +231,8 @@ class Collective
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
+    bool   getDumpAlphaBothPaths()           const { return DumpAlphaBothPaths; }
+    bool   getDeepSymmetrizeMaxwellImage()   const { return DeepSymmetrizeMaxwellImage; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -387,6 +389,30 @@ class Collective
     //* flag that gives cross-OMP-thread-count bit-reproducibility at the cost of
     //* losing OpenMP parallelism inside the gather. MPI parallelism is unaffected.
     bool   DeterministicThreadMoments;
+
+    //* Step 64: mover-gather α-parity audit. When true, both `computeMoments`
+    //* (gather) and `ECSIM_velocity` (mover) emit per-particle α tensors to
+    //* binary files `{SaveDirName}/alpha_{gather|mover}_cyc{N}_s{s}_r{r}.bin`.
+    //* Layout per particle: 16 doubles — [pidx_as_double, x, y, z, Bx, By, Bz,
+    //* α00..α22 (row-major)]. The mover always builds an explicit 3×3 α for
+    //* the dump, independent of `MoverExplicitAlpha`, so the audit measures
+    //* the canonical rotation tensor regardless of the compact-form path.
+    //* Post-process with `scripts/diff_alpha_paths.py` to confirm ECSIM
+    //* condition #4 (mover-α ≡ gather-α for the same particle state).
+    bool   DumpAlphaBothPaths;
+
+    //* Step 65 probe (null result): extends `SymmetrizeMaxwellImage`'s periodic
+    //* duplicate unification from input/output only to the S·M·S sandwich's
+    //* intermediate NodeBC on temp2 (`fields/EMfields3D.cpp` after M·E). Kept
+    //* as a negative-control knob: measuring `VerifyAdjoint` with this on
+    //* reproduces the baseline `unique` gap_rel of 0.171 *exactly*, proving
+    //* the residual A_kry asymmetry is NOT carried by intermediate halo
+    //* refreshes but is structural inside the stencil arithmetic (curl²,
+    //* M·E) — the consistent periodic subspace is not an A-invariant subspace.
+    //* A true symmetrization requires building a second `MaxwellImage_transpose`
+    //* that reverses the halo-broadcast pattern (path (a) in the Step 65
+    //* write-up). Deferred; left as probe-only.
+    bool   DeepSymmetrizeMaxwellImage;
 
     int CurrentCycle;
     int zeroCurrent;

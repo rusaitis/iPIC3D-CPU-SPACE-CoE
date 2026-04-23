@@ -192,6 +192,15 @@ void Collective::ReadInput(string inputfile)
         //* Step 62 / 63: bit-determinism knobs (both default off — legacy preserved).
         DeterministicMPIReductions = config.read<bool>("DeterministicMPIReductions", false);
         DeterministicThreadMoments = config.read<bool>("DeterministicThreadMoments", false);
+        //* Step 64: mover/gather α-parity audit dump (default off). Every enabled
+        //* cycle writes ~16 doubles × NOP per species per rank for each of the
+        //* two paths — keep FinalCycle small when running the audit.
+        DumpAlphaBothPaths = config.read<bool>("DumpAlphaBothPaths", false);
+        //* Step 65: deep-symmetrize variant extends `SymmetrizeMaxwellImage`'s
+        //* periodic-duplicate unification from input/output only to every
+        //* internal halo refresh inside the matvec. Opt-in (default false)
+        //* because the probe reduction is cheap but not a no-op on wall time.
+        DeepSymmetrizeMaxwellImage = config.read<bool>("DeepSymmetrizeMaxwellImage", false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);

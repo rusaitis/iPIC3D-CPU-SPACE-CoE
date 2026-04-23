@@ -3095,6 +3095,20 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
         communicateNodeBC(nxn, nyn, nzn, temp2X, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
         communicateNodeBC(nxn, nyn, nzn, temp2Y, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
         communicateNodeBC(nxn, nyn, nzn, temp2Z, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
+
+        //* Step 65: deep-symm unify on the S·M·S sandwich's intermediate halo.
+        //* The NodeBC above introduces the same copy-from-one-side asymmetry
+        //* as the input halo refresh; the outer-level Symm unify alone cannot
+        //* undo it because invVOL × temp2 is added to imageX before the final
+        //* projection. Unifying here restricts the M·E result to the consistent
+        //* subspace before it multiplies invVOL.
+        if (col->getDeepSymmetrizeMaxwellImage()) {
+            const bool perX = col->getPERIODICX() && vct->getXLEN() == 1;
+            const bool perY = col->getPERIODICY() && vct->getYLEN() == 1;
+            const bool perZ = col->getPERIODICZ() && vct->getZLEN() == 1;
+            if (perX || perY || perZ)
+                unify_periodic_duplicates(temp2X, temp2Y, temp2Z, nxn, nyn, nzn);
+        }
     }
 
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
