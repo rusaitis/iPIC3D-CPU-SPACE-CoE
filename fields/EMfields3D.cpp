@@ -2927,13 +2927,13 @@ void EMfields3D::dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3
 {
     const Collective *col = &get_col();
     const int rank = (&get_vct())->getCartesian_rank();
-    if (rank != 0) return;
 
     auto write_arr3 = [&](const char* comp, arr3_double a)
     {
         std::ostringstream p;
         p << col->getSaveDirName() << "/maxwell_stage_c" << mi_dump_target_cycle_
-          << "_m" << mi_matvec_count_ << "_" << stage_name << "_" << comp << ".bin";
+          << "_m" << mi_matvec_count_ << "_" << stage_name << "_" << comp
+          << "_r" << rank << ".bin";
         std::ofstream f(p.str(), std::ios::binary);
         if (!f) eprintf("dump_maxwell_stage: cannot open %s", p.str().c_str());
         for (int i = 0; i < nxn; i++)

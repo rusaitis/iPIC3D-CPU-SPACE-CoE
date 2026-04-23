@@ -280,58 +280,65 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 
 		sendcnt = recvcnt;
 
+		//* Step 61 fix: edge/corner MPI sends inherit the face-send offset-by-one
+		//* convention so rank-boundary corner ghosts use the same periodic-duplicate
+		//* source as face ghosts do. Face sends at lines 113-124 already apply
+		//*   base_idx = isCenterFlag ? legacy : 1+offset (= 2 for node-copy)
+		//* but edge/corner sends previously hard-coded legacy (idx=1, nx-2, etc.).
+		//* That mismatch shows up as 2e-7 abs / 1e-3 l2_rel in Stage C (raw M·E)
+		//* at rank-interior corners (local X=1 & nx-2, Y=1 & ny-2) for np>1 runs.
 		if(communicationCnt[0] == 1){
 			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Isend(&vector[1][1][0],   1,  yEdgetype2,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1+offset][1][0],   1,  yEdgetype2,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[4] == 1){
-				MPI_Isend(&vector[1][1][0],   1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1+offset][1][0],   1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[5] == 1){
-				MPI_Isend(&vector[1][1][nz-1],1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1+offset][1][nz-1],1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[1] == 1){
 			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Isend(&vector[nx-2][1][0],1,   yEdgetype2,right_neighborX, tag_XR, comm,&reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-2-offset][1][0],1,   yEdgetype2,right_neighborX, tag_XR, comm,&reqList[sendcnt++]);
 			}else if(communicationCnt[4] == 1){
-				MPI_Isend(&vector[nx-2][1][0],1,   yEdgetype,right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-2-offset][1][0],1,   yEdgetype,right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[5] == 1){
-				MPI_Isend(&vector[nx-2][1][nz-1],1,yEdgetype,right_neighborX, tag_XR,comm,&reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-2-offset][1][nz-1],1,yEdgetype,right_neighborX, tag_XR,comm,&reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[2] == 1){
 			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Isend(&vector[0][1][1],1,   zEdgetype2, left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][1+offset][1],1,   zEdgetype2, left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[0][1][1],1,   zEdgetype,  left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][1+offset][1],1,   zEdgetype,  left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-1][1][1],1,zEdgetype,left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-1][1+offset][1],1,zEdgetype,left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[3] == 1){
 			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Isend(&vector[0][ny-2][1],1,   zEdgetype2, right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][ny-2-offset][1],1,   zEdgetype2, right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[0][ny-2][1],1,   zEdgetype,  right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][ny-2-offset][1],1,   zEdgetype,  right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-1][ny-2][1],1,zEdgetype,right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-1][ny-2-offset][1],1,zEdgetype,right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[4] == 1){
 			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][0][1],1, xEdgetype2, left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][1+offset],1, xEdgetype2, left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[2] == 1){
-				MPI_Isend(&vector[1][0][1],1, xEdgetype,  left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][1+offset],1, xEdgetype,  left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][ny-1][1],1,xEdgetype,left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][ny-1][1+offset],1,xEdgetype,left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[5] == 1){
 			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][0][nz-2],1,    xEdgetype2, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][nz-2-offset],1,    xEdgetype2, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[2] == 1){
-				MPI_Isend(&vector[1][0][nz-2],1,    xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][nz-2-offset],1,    xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][ny-1][nz-2],1, xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][ny-1][nz-2-offset],1, xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
 			}
 		}
 
@@ -462,11 +469,13 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 
 			sendcnt=recvcnt;
 
+			//* Step 61 fix: corner send uses the offset-by-one X source,
+			//* matching face/edge sends.
 			if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[1][0][0],   1,cornertype,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1+offset][0][0],   1,cornertype,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}
 			if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-2][0][0],1,cornertype,right_neighborX, tag_XR,comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-2-offset][0][0],1,cornertype,right_neighborX, tag_XR,comm, &reqList[sendcnt++]);
 			}
 		}
 
