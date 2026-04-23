@@ -883,6 +883,52 @@ int Particles3Dcomm::handle_received_particles(int pclCommMode)
   // while there are still incoming particles
   // put them in the appropriate buffer
   //
+  //* Step 66: opt-in deterministic reception. Drains each direction fully in
+  //* a fixed [XDN, XUP, YDN, YUP, ZDN, ZUP] order via `MPI_Wait` on the
+  //* streaming block communicator, eliminating the OS-scheduled reordering
+  //* introduced by `MPI_Waitany`. Particles appended to `_pcls` therefore
+  //* land in a run-independent order, so subsequent serial sums (kinetic
+  //* energy, gather) walk the same FP path every run. Legacy Waitany path is
+  //* preserved for default builds.
+  const bool deterministic_comm = col->getDeterministicParticleComm();
+  if (deterministic_comm)
+  {
+    auto process_block = [&](int d)
+    {
+      MPI_Status recv_status;
+      MPI_Wait(&recv_requests[d], &recv_status);
+      BlockCommunicator<SpeciesParticle>* recvBuff = recvBuffArr[d];
+      Block<SpeciesParticle>& recv_block = recvBuff->fetch_received_block(recv_status);
+      vector_SpeciesParticle& pcl_list = recv_block.fetch_block();
+      if (pclCommMode & do_apply_BCs_globally)
+        apply_BCs_globally(pcl_list);
+      else
+        apply_BCs_locally(pcl_list, direction[d], apply_shift[d], do_apply_BCs[d]);
+      recv_count[d] += recv_block.size();
+      num_pcls_recved += recv_block.size();
+      for (int pidx = 0; pidx < recv_block.size(); pidx++)
+      {
+        SpeciesParticle& pcl = recv_block[pidx];
+        bool was_sent = send_pcl_to_appropriate_buffer(pcl, send_count);
+        if (__builtin_expect(was_sent, false))
+        {
+          num_pcls_resent++;
+          if (pclCommMode & print_sent_pcls) print_pcl(pcl, ns);
+        }
+        else
+        {
+          _pcls.push_back(pcl);
+        }
+      }
+      recvBuff->release_received_block();
+      recv_requests[d] = recvBuff->get_curr_request();
+    };
+
+    for (int d = 0; d < num_recv_buffers; ++d)
+      while (!recvBuffArr[d]->comm_finished())
+        process_block(d);
+  }
+  else
   while(!(
     recvXleft.comm_finished() && recvXrght.comm_finished() &&
     recvYleft.comm_finished() && recvYrght.comm_finished() &&

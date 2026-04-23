@@ -201,6 +201,9 @@ void Collective::ReadInput(string inputfile)
         //* internal halo refresh inside the matvec. Opt-in (default false)
         //* because the probe reduction is cheap but not a no-op on wall time.
         DeepSymmetrizeMaxwellImage = config.read<bool>("DeepSymmetrizeMaxwellImage", false);
+        //* Step 66: drain incoming particle blocks per-direction in fixed order
+        //* instead of OS-scheduled `MPI_Waitany` completion. Opt-in.
+        DeterministicParticleComm  = config.read<bool>("DeterministicParticleComm", false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);

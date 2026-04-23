@@ -233,6 +233,7 @@ class Collective
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
     bool   getDumpAlphaBothPaths()           const { return DumpAlphaBothPaths; }
     bool   getDeepSymmetrizeMaxwellImage()   const { return DeepSymmetrizeMaxwellImage; }
+    bool   getDeterministicParticleComm()    const { return DeterministicParticleComm; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -413,6 +414,22 @@ class Collective
     //* that reverses the halo-broadcast pattern (path (a) in the Step 65
     //* write-up). Deferred; left as probe-only.
     bool   DeepSymmetrizeMaxwellImage;
+
+    //* Step 66: process incoming particle blocks in fixed direction order
+    //* [XDN, XUP, YDN, YUP, ZDN, ZUP] instead of the OS-scheduled completion
+    //* order returned by `MPI_Waitany`. Each direction is drained fully
+    //* (via `MPI_Wait` on the streaming block communicator) before moving
+    //* to the next. Removes the last source of run-to-run non-determinism
+    //* in the particle pipeline at np>1: with `MPI_Waitany` the order that
+    //* particles are appended to `_pcls` varies per run, so subsequent serial
+    //* sums (kinetic energy, gather) walk the list in a different FP order
+    //* and drift by ±1 ULP even with `DeterministicMPIReductions` on.
+    //* Opt-in (default false) because switching to per-direction sequential
+    //* drain is a behavioural change even when the outputs are mathematically
+    //* equivalent. Combine with `DeterministicMPIReductions=1` and
+    //* `DeterministicThreadMoments=1` for full same-config bit reproducibility
+    //* at np>1.
+    bool   DeterministicParticleComm;
 
     int CurrentCycle;
     int zeroCurrent;
