@@ -222,6 +222,13 @@ public:
     //* VerifyAdjoint; runs once at the chosen cycle (default cycle 1).
     void probe_adjointness(int cycle);
 
+    //* Step 38: per-stage dump inside MaxwellImage. `set_mi_dump_target(cycle)` is
+    //* called from the main loop so MaxwellImage knows when to dump. Dumps happen
+    //* only on the *first* matvec call of the target cycle (so cost is one
+    //* set of binary files per run, not per Krylov iteration).
+    void set_mi_dump_target(int cycle) { mi_dump_target_cycle_ = cycle; mi_matvec_count_ = 0; }
+    void dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3_double aY, arr3_double aZ);
+
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();
 
@@ -629,6 +636,12 @@ private:
     const Collective& _col;
     const Grid& _grid;
     const VirtualTopology3D&_vct;
+
+    //* Step 38: per-stage MaxwellImage dump bookkeeping.
+    //* mi_dump_target_cycle_ is set from the main loop (currently 1); the first
+    //* call to MaxwellImage during that cycle dumps, later calls don't.
+    int mi_dump_target_cycle_ = -1;
+    int mi_matvec_count_      = 0;
     
     /*! light speed */
     double c;

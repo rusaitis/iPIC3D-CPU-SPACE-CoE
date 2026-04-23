@@ -132,10 +132,24 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
     //* maps the ghost to the other-side duplicate of the CENTER node instead of its
     //* geometric offset-by-one neighbour, biasing stencils at the periodic boundary.
     //* When `FixNodePeriodicHalo` is set, swap in the offset-by-one convention for
-    //* non-center, non-interp arrays — which matches what the MPI-send convention for
-    //* XLEN>1 subdomains already does (see lines 112-114: sends interior(1+offset)/nx-2-offset).
+    //* plain node-copy arrays (E halo, B halo, moment-copy halo). Matches the MPI-send
+    //* convention for XLEN>1 subdomains (lines 112-114: sends interior(1+offset)/nx-2-offset).
+    //* Also matches ECSIM's `makeNodeFace` (ComParser3D.cpp:34-60), which reads from
+    //* interior[2] / interior[nx-3] for the communicateNode_P path.
+    //*
+    //* Step 38 follow-up (2026-04-23): drop the `!isParticle` exclusion so the
+    //* particle-moment ghost copy path (communicateNode_P on Mij, ρ, J with
+    //* isParticle=true) also picks up the offset-by-one convention. Previously
+    //* the E halo used nx-3/2 while the mass-matrix ghost-copy halo stayed on
+    //* legacy nx-2/1, producing ~4e-5 l2_rel divergence in the cross-code
+    //* MaxwellImage Stage C (raw M·E) byte diff.
+    //*
+    //* `needInterp` (the sum-on-receive addFace/Edge/Corner path used by
+    //* communicateInterp) is still excluded: ECSIM's `makeCenterFace`
+    //* (ComParser3D.cpp:91-116) reads from interior[1] / interior[nx-2]
+    //* (legacy convention), so iPIC3D's legacy self-swap already matches there.
     const bool node_halo_fix = (EMf != nullptr) && EMf->get_col().getFixNodePeriodicHalo()
-                               && !isCenterFlag && !needInterp && !isParticle;
+                               && !isCenterFlag && !needInterp;
     const int xlo_src = node_halo_fix ? (nx-3) : (nx-2);
     const int xhi_src = node_halo_fix ? 2      : 1;
     const int ylo_src = node_halo_fix ? (ny-3) : (ny-2);

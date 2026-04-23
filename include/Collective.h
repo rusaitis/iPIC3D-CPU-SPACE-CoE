@@ -227,6 +227,7 @@ class Collective
     bool   getLoadParticlesInit()       const { return LoadParticlesInit; }
     const string& getParticlesInitDir() const { return ParticlesInitDir; }
     bool   getDumpCycle1Fields()        const { return DumpCycle1Fields; }
+    bool   getDumpMaxwellImageStages()  const { return DumpMaxwellImageStages; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
@@ -362,6 +363,12 @@ class Collective
     //* `fields_cycle1.meta.txt` lists names + shapes. Designed so ECSIM can
     //* emit the same filename+layout convention for a trivial Python byte diff.
     bool   DumpCycle1Fields;
+
+    //* Step 38: inside MaxwellImage, at cycle 1, first matvec only, dump tempX/Y/Z,
+    //* imageX/Y/Z, temp2X/Y/Z at six composition stages (post-input-halo, post-curl²
+    //* assembly, pre-M·E, raw M·E, post-outer-smooth×invVOL, final A·E). Used with
+    //* `scripts/diff_maxwell_stages.py` for cross-code operator-interior byte diff.
+    bool   DumpMaxwellImageStages;
 
     int CurrentCycle;
     int zeroCurrent;

@@ -1225,7 +1225,6 @@ void EMfields3D::sumMoments_AoS(const Particles3Dcomm* part)
     for (int is = 0; is < ns; is++)
     {
         communicateGhostP2G_ecsim(is);
-        // communicateGhostP2G_mass_matrix();
     }
 
     //* Sum all over the species (mass and charge density)
@@ -2921,6 +2920,36 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 // ghost nodes before returning to the Krylov solver. With the definitions above, phys2solver() would simply zero
 // the ghost nodes and solver2phys() would populate them via communication. Note that it would also be possible, if
 // desired, to give duplicated nodes equal weight by rescaling their values in these two methods.
+//* Step 38: binary dump of an intermediate 3D stage inside MaxwellImage. Writes
+//* `{SaveDirName}/maxwell_stage_c{cycle}_m{matvec}_{stage}_{x|y|z}.bin`. Rank-0
+//* only, full nxn×nyn×nzn node array, row-major C order, k fastest.
+void EMfields3D::dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3_double aY, arr3_double aZ)
+{
+    const Collective *col = &get_col();
+    const int rank = (&get_vct())->getCartesian_rank();
+    if (rank != 0) return;
+
+    auto write_arr3 = [&](const char* comp, arr3_double a)
+    {
+        std::ostringstream p;
+        p << col->getSaveDirName() << "/maxwell_stage_c" << mi_dump_target_cycle_
+          << "_m" << mi_matvec_count_ << "_" << stage_name << "_" << comp << ".bin";
+        std::ofstream f(p.str(), std::ios::binary);
+        if (!f) eprintf("dump_maxwell_stage: cannot open %s", p.str().c_str());
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    const double v = a[i][j][k];
+                    f.write(reinterpret_cast<const char*>(&v), sizeof(double));
+                }
+    };
+
+    write_arr3("x", aX);
+    write_arr3("y", aY);
+    write_arr3("z", aZ);
+}
+
 void EMfields3D::MaxwellImage(double *im, double* vector)
 {
     //* double *im      : Output
@@ -2929,6 +2958,14 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     const Collective *col = &get_col();
     const VirtualTopology3D *vct = &get_vct();
     const Grid *grid = &get_grid();
+
+    //* Step 38: dump at 5 composition stages on the first matvec of the target
+    //* cycle only. Cross-diff against ECSIM isolates which stage (input halo,
+    //* curl² assembly, raw M·E, outer smooth+invVOL, final sum) carries the
+    //* residual 1.83e-6 A·b l2_rel divergence. Zero cost when flag is off.
+    const bool mi_dump = col->getDumpMaxwellImageStages()
+                      && (col->getCurrentCycle() == mi_dump_target_cycle_)
+                      && (mi_matvec_count_ == 0);
 
     eqValue(0.0, im, 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_));
 
@@ -2943,6 +2980,11 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     communicateNodeBC(nxn, nyn, nzn, tempX, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
+
+    //* Stage A — post input halo refresh. This is S·E under the
+    //* "halo refresh = smoothing at Smooth=0" reading. Cross-diff pins down
+    //* halo convention differences (corner averaging, ghost fill pattern).
+    if (mi_dump) dump_maxwell_stage("A_post_halo_in", tempX, tempY, tempZ);
 
     //* Step 34d: per-matvec symmetrization — unify duplicate periodic DOFs
     //* on the INPUT side so the operator acts on the consistent subspace only.
@@ -3006,8 +3048,21 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageZ[i][j][k] = tempZ[i][j][k] + factor * imageZ[i][j][k];
             }
 
+    //* Stage B — post (I + (cθΔt)²·curl²)·E assembly, before the M·E block.
+    //* Isolates the Maxwell stencil half of the operator from the particle
+    //* (M·E) half. Step 36 showed curl² alone conserves exactly, so this
+    //* should cross-diff cleanly against ECSIM; any gap here points at
+    //* the stencil implementation (lap+graddiv vs curl²) or (I + ...) order.
+    if (mi_dump) dump_maxwell_stage("B_post_curl2", imageX, imageY, imageZ);
+
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(tempX, tempY, tempZ, nxn, nyn, nzn);
+
+    //* Stage B2 — tempX after the inner smoothing that precedes M·E.
+    //* Step 38: if A/B match across codes but C diverges, the gap must live
+    //* in *either* this smoothing (energy_conserve_smooth vs applySmoothing)
+    //* *or* the matvec kernel itself. Dumping right before M·E disambiguates.
+    if (mi_dump) dump_maxwell_stage("B2_pre_ME_temp", tempX, tempY, tempZ);
 
     //* mass_matrix_times_vector handles bounds internally for the wider TSC stencil
     //* (mass-matrix product cube reaches +/- stencil_order_ nodes), so we keep the
@@ -3025,6 +3080,11 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Y[i][j][k] = dt*th*FourPI*MEy;
                 temp2Z[i][j][k] = dt*th*FourPI*MEz;
             }
+
+    //* Stage C — raw M·E output × (dt·θ·4π), pre outer halo refresh and smoothing.
+    //* With M storage bit-identical to ECSIM (Step 27), any gap here comes from
+    //* the matvec kernel itself (Kahan vs plain, bounds-check, iteration order).
+    if (mi_dump) dump_maxwell_stage("C_raw_ME", temp2X, temp2Y, temp2Z);
 
     //* Step 26: ECSIM-style halo refresh on M·E before the invVOL scaling. Matches
     //* ecsim/fields/EMfields3D.cpp:1199-1201, which runs unconditionally inside
@@ -3049,6 +3109,11 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Z[i][j][k] *= invVOL;
             }
 
+    //* Stage D — full S·M·S·E weight, post outer halo + outer smooth + invVOL.
+    //* This is the term that gets added to (I + (cθΔt)²·curl²)·E. Divergence
+    //* vs C indicates the outer halo/smoothing step differs between codes.
+    if (mi_dump) dump_maxwell_stage("D_SMS_invVOL", temp2X, temp2Y, temp2Z);
+
     for (int i = n_ghost_; i < nxn - n_ghost_; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_; j++)
             for (int k = n_ghost_; k < nzn - n_ghost_; k++)
@@ -3057,6 +3122,9 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageY[i][j][k] = temp2Y[i][j][k] + imageY[i][j][k];
                 imageZ[i][j][k] = temp2Z[i][j][k] + imageZ[i][j][k];
             }
+
+    //* Stage E — full A·E assembled (before optional Symm-out).
+    if (mi_dump) dump_maxwell_stage("E_full_Ae", imageX, imageY, imageZ);
 
     //* Step 34d: per-matvec symmetrization — unify duplicate periodic DOFs on
     //* the OUTPUT too so the result lives in the consistent-periodic subspace.
@@ -3072,6 +3140,11 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
 
     //? Move from physical space to Krylov space
     phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_);
+
+    //* Step 38: bookkeeping for per-stage dumps.
+    if (col->getDumpMaxwellImageStages()
+        && col->getCurrentCycle() == mi_dump_target_cycle_)
+        mi_matvec_count_++;
 }
 
 //? Update the values of magnetic field at the nodes at time n+1

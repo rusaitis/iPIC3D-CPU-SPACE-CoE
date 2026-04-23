@@ -570,6 +570,11 @@ void c_Solver::ComputeEMFields(int cycle)
 {
     col->setCurrentCycle(cycle);
 
+    //* Step 38: arm per-stage MaxwellImage dumps on cycle 1's first matvec.
+    //* Cheap no-op when DumpMaxwellImageStages flag is off.
+    if (cycle == 1 && col->getDumpMaxwellImageStages())
+        EMf->set_mi_dump_target(1);
+
     #ifdef __PROFILING__
     LeXInt::timer time_e, time_b, time_div, time_total;
     

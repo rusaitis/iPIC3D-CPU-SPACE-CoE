@@ -178,6 +178,8 @@ void Collective::ReadInput(string inputfile)
 
         //* Step 32: cycle-1 field dump for cross-code byte diff.
         DumpCycle1Fields  = config.read<bool>  ("DumpCycle1Fields", false);
+        //* Step 38: per-stage MaxwellImage dump for cross-code operator-interior diff.
+        DumpMaxwellImageStages = config.read<bool>("DumpMaxwellImageStages", false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);
