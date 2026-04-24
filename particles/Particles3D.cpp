@@ -1788,7 +1788,11 @@ void Particles3D::computeMoments(Field *EMf)
     //* schedule, introducing ±1 ULP run-to-run noise. Serialising the loop makes
     //* the deposit order deterministic at the cost of losing OpenMP speedup on
     //* computeMoments. MPI parallelism is unaffected.
-    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
+    //* Step 68b: `KahanGather=true` uses the non-atomic `*_kahan` deposit
+    //* variants, which are only safe in a single-thread region — so force
+    //* num_threads=1 whenever the flag is on.
+    const bool kahan_gather   = col->getKahanGather();
+    const int det_num_threads = (col->getDeterministicThreadMoments() || kahan_gather) ? 1 : omp_get_max_threads();
 
     //* Step 64: mover/gather α-parity audit dump. Allocate per-particle scratch
     //* when the flag is on; the per-thread loop fills each particle's 16-double
@@ -2045,22 +2049,26 @@ void Particles3D::computeMoments(Field *EMf)
                 //* Add charge density
                 for (int ii = 0; ii < 8; ii++)
                     temp[ii] = q * weights_lin[ii];
-                EMf->add_Rho(temp, ix, iy, iz, ns);
+                if (kahan_gather) EMf->add_Rho_kahan(temp, ix, iy, iz, ns);
+                else              EMf->add_Rho      (temp, ix, iy, iz, ns);
 
                 //* Add implicit current density - X
                 for (int ii = 0; ii < 8; ii++)
                     temp[ii] = qau * weights_lin[ii];
-                EMf->add_Jxh(temp, ix, iy, iz, ns);
+                if (kahan_gather) EMf->add_Jxh_kahan(temp, ix, iy, iz, ns);
+                else              EMf->add_Jxh      (temp, ix, iy, iz, ns);
 
                 //* Add implicit current density - Y
                 for (int ii = 0; ii < 8; ii++)
                     temp[ii] = qav * weights_lin[ii];
-                EMf->add_Jyh(temp, ix, iy, iz, ns);
+                if (kahan_gather) EMf->add_Jyh_kahan(temp, ix, iy, iz, ns);
+                else              EMf->add_Jyh      (temp, ix, iy, iz, ns);
 
                 //* Add implicit current density - Z
                 for (int ii = 0; ii < 8; ii++)
                     temp[ii] = qaw * weights_lin[ii];
-                EMf->add_Jzh(temp, ix, iy, iz, ns);
+                if (kahan_gather) EMf->add_Jzh_kahan(temp, ix, iy, iz, ns);
+                else              EMf->add_Jzh      (temp, ix, iy, iz, ns);
 
                 #ifdef __PROFILE_MOMENTS__
                 time_add.stop();
@@ -2101,7 +2109,8 @@ void Particles3D::computeMoments(Field *EMf)
                                         for (int ind2 = 0; ind2 < 3; ind2++)
                                             value[ind1][ind2] = alpha[ind2][ind1]*qww;
 
-                                    EMf->add_Mass(value, ni, nj, nk, n_node);
+                                    if (kahan_gather) EMf->add_Mass_kahan(value, ni, nj, nk, n_node);
+                                    else              EMf->add_Mass      (value, ni, nj, nk, n_node);
                                 }
                             }
                         }
@@ -2140,10 +2149,17 @@ void Particles3D::computeMoments(Field *EMf)
                     const int nix = cx + a - 1;
                     const int niy = cy + b - 1;
                     const int niz = cz + cc - 1;
-                    EMf->add_Rho_node(temp_rho[s], nix, niy, niz, ns);
-                    EMf->add_Jxh_node(temp_jx [s], nix, niy, niz, ns);
-                    EMf->add_Jyh_node(temp_jy [s], nix, niy, niz, ns);
-                    EMf->add_Jzh_node(temp_jz [s], nix, niy, niz, ns);
+                    if (kahan_gather) {
+                        EMf->add_Rho_node_kahan(temp_rho[s], nix, niy, niz, ns);
+                        EMf->add_Jxh_node_kahan(temp_jx [s], nix, niy, niz, ns);
+                        EMf->add_Jyh_node_kahan(temp_jy [s], nix, niy, niz, ns);
+                        EMf->add_Jzh_node_kahan(temp_jz [s], nix, niy, niz, ns);
+                    } else {
+                        EMf->add_Rho_node(temp_rho[s], nix, niy, niz, ns);
+                        EMf->add_Jxh_node(temp_jx [s], nix, niy, niz, ns);
+                        EMf->add_Jyh_node(temp_jy [s], nix, niy, niz, ns);
+                        EMf->add_Jzh_node(temp_jz [s], nix, niy, niz, ns);
+                    }
                 }
 
                 #ifdef __PROFILE_MOMENTS__
@@ -2194,7 +2210,8 @@ void Particles3D::computeMoments(Field *EMf)
                             for (int ind2 = 0; ind2 < 3; ind2++)
                                 value[ind1][ind2] = alpha[ind2][ind1]*qww;
 
-                        EMf->add_Mass(value, ni, nj, nk, g);
+                        if (kahan_gather) EMf->add_Mass_kahan(value, ni, nj, nk, g);
+                        else              EMf->add_Mass      (value, ni, nj, nk, g);
                     }
                 }
             }

@@ -209,6 +209,11 @@ void Collective::ReadInput(string inputfile)
         DumpParticlesGlobal = config.read<bool>("DumpParticlesGlobal", false);
         LoadParticlesGlobal = config.read<bool>("LoadParticlesGlobal", false);
         KahanParticleSums   = config.read<bool>("KahanParticleSums",   false);
+        //* Step 68b: Kahan-compensated gather deposit. Requires single-thread
+        //* gather (flag forces num_threads=1 in computeMoments); supersedes
+        //* the atomic-update path while on. Memory cost: one companion per
+        //* deposited field. Opt-in, default off.
+        KahanGather         = config.read<bool>("KahanGather",         false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);

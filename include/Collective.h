@@ -237,6 +237,7 @@ class Collective
     bool   getDumpParticlesGlobal()          const { return DumpParticlesGlobal; }
     bool   getLoadParticlesGlobal()          const { return LoadParticlesGlobal; }
     bool   getKahanParticleSums()            const { return KahanParticleSums; }
+    bool   getKahanGather()                  const { return KahanGather; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -455,6 +456,23 @@ class Collective
     //* O(ε²) which is below IEEE 754's resolution, so per-rank partial sums
     //* match the np=1 single accumulator to bit identity. Opt-in.
     bool   KahanParticleSums;
+
+    //* Step 68b: Kahan-compensated accumulation inside the particle→grid
+    //* gather (`Particles3D::computeMoments`). The default path accumulates
+    //* ρ, Jxh, Jyh, Jzh, and the 9-component mass matrix via `#pragma omp
+    //* atomic update`, so threads race on the same node and the landing
+    //* order is schedule-dependent. Under `KahanGather=true`, a companion
+    //* compensation array is allocated for each deposited field and the
+    //* accumulators do Neumaier-compensated adds (atomics replaced by
+    //* sequential single-thread sums — the flag forces `num_threads=1` in
+    //* the gather region). Before halo exchange, compensation is folded
+    //* back into the main field and zeroed. Result: each rank's local sum
+    //* is ε²-accurate regardless of particle ordering, and combined with
+    //* `DeterministicParticleComm` the per-cycle np=1 vs np=4 drift of ~3e-9
+    //* collapses toward the halo-exchange floor. Memory cost: one extra
+    //* companion array per accumulated field (4 × ns + 9 × ne_mass_ node
+    //* arrays). Opt-in.
+    bool   KahanGather;
 
     int CurrentCycle;
     int zeroCurrent;

@@ -239,6 +239,15 @@ public:
 
     //! Set all elements of mass matrix to 0.0 !//
     void setZeroMassMatrix();
+
+    //! Step 68b: Kahan-compensated gather (KahanGather=true) helpers.
+    //* `setZeroKahanGatherCompensation` zeroes the companion compensation
+    //* buffers at the start of each gather cycle; `foldKahanGatherCompensation`
+    //* folds the accumulated compensation back into the primary field and
+    //* zeroes it. Called right before `communicateInterp` / `communicateNode_P`
+    //* so the halo exchange ships the ε²-accurate per-rank sum.
+    void setZeroKahanGatherCompensation();
+    void foldKahanGatherCompensation();
     /*! Sum rhon and J over species */
     void sumOverSpecies();
         /*! Sum rhon over species */
@@ -307,12 +316,56 @@ public:
         #pragma omp atomic update
         Jzhs[is][X][Y][Z] += value;
     }
+
+    //* Step 68b: Neumaier (Kahan-Babuska) compensated add helper.
+    //* Used by the `*_kahan` deposit variants below when `KahanGather=true`.
+    //* The companion `comp` scalar accumulates the floating-point residual
+    //* that a plain `sum += term` would discard; folding it back at the end
+    //* of the gather yields an ε²-accurate total independent of add order.
+    static inline void kahan_add(double& sum, double& comp, double term)
+    {
+        const double t = sum + term;
+        if (std::fabs(sum) >= std::fabs(term))
+            comp += (sum - t) + term;
+        else
+            comp += (term - t) + sum;
+        sum = t;
+    }
+
+    //* Step 68b: Kahan-compensated single-node deposit helpers (TSC + CIC
+    //* alike). No atomic pragma: `KahanGather=true` also pins the gather to
+    //* num_threads=1, so these are safe and cheaper than the atomic variants.
+    inline void add_Rho_node_kahan(double value, int X, int Y, int Z, int is)
+    {
+        kahan_add(rhons[is][X][Y][Z], rhons_c[is][X][Y][Z], value * invVOL);
+    }
+    inline void add_Jxh_node_kahan(double value, int X, int Y, int Z, int is)
+    {
+        kahan_add(Jxhs[is][X][Y][Z], Jxhs_c[is][X][Y][Z], value);
+    }
+    inline void add_Jyh_node_kahan(double value, int X, int Y, int Z, int is)
+    {
+        kahan_add(Jyhs[is][X][Y][Z], Jyhs_c[is][X][Y][Z], value);
+    }
+    inline void add_Jzh_node_kahan(double value, int X, int Y, int Z, int is)
+    {
+        kahan_add(Jzhs[is][X][Y][Z], Jzhs_c[is][X][Y][Z], value);
+    }
     
     void add_Jxh(double weight[8], int X, int Y, int Z, int is);
     void add_Jyh(double weight[8], int X, int Y, int Z, int is);
     void add_Jzh(double weight[8], int X, int Y, int Z, int is);
 
     void add_Mass(double value[3][3], int X, int Y, int Z, int ind);
+
+    //* Step 68b: Kahan-compensated 8-corner CIC deposits + mass matrix. See
+    //* the companion `*_c` arrays and `kahan_add` helper below. Used when
+    //* `KahanGather=true`.
+    void add_Rho_kahan(double weight[8], int X, int Y, int Z, int is);
+    void add_Jxh_kahan(double weight[8], int X, int Y, int Z, int is);
+    void add_Jyh_kahan(double weight[8], int X, int Y, int Z, int is);
+    void add_Jzh_kahan(double weight[8], int X, int Y, int Z, int is);
+    void add_Mass_kahan(double value[3][3], int X, int Y, int Z, int ind);
 
     //* ECSIM/RelSIM supplementary moments
     void add_Jx(double weight[8], int X, int Y, int Z, int is);
@@ -751,14 +804,26 @@ private:
     //! Mass matrix components (defined at nodes)
     array4_double Mxx, Mxy, Mxz, Myx, Myy, Myz, Mzx, Mzy, Mzz;
 
+    //! Step 68b: Kahan-compensated gather companion arrays.
+    //* Populated only while `KahanGather=true`; sized identically to their
+    //* primary partner. Each gathered field (ρ_s, Jxh_s, Jyh_s, Jzh_s, and
+    //* the 9-component mass matrix) gets a per-node compensation scalar used
+    //* by Neumaier's summation. Allocated unconditionally for layout
+    //* simplicity; the zero-fill pass is cheap and the runtime cost when the
+    //* flag is off is only the memory footprint.
+    array4_double Mxx_c, Mxy_c, Mxz_c, Myx_c, Myy_c, Myz_c, Mzx_c, Mzy_c, Mzz_c;
+
     //? Density for each species (defined at nodes and centres, respectively)
-    array4_double rhons, rhocs;         
-    
-    array3_double rhoc_avg;             //* Time averaged density (defined at cell centres)    
+    array4_double rhons, rhocs;
+
+    array3_double rhoc_avg;             //* Time averaged density (defined at cell centres)
     array4_double rhocs_avg;            //* Time averaged density for each species (defined at cell centres)
-    
+
     //? Current densities for each species (defined at nodes)
     array4_double Jxs, Jys, Jzs, Jxhs, Jyhs, Jzhs;
+
+    //? Step 68b: Kahan companions for species-level gather accumulators.
+    array4_double rhons_c, Jxhs_c, Jyhs_c, Jzhs_c;
     
     //! Supplementary moments
     //? Energy flux for each species (defined at nodes)
@@ -925,6 +990,48 @@ inline void EMfields3D::add_Jzh(double weight[8], int X, int Y, int Z, int is)
             for (int k = 0; k < 2; k++) {
                 #pragma omp atomic update
                 Jzhs[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k];
+            }
+}
+
+//* Step 68b: Kahan-compensated CIC (8-corner) deposit variants.
+inline void EMfields3D::add_Rho_kahan(double weight[8], int X, int Y, int Z, int is)
+{
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+            for (int k = 0; k < 2; k++) {
+                const int xi = X - i, yi = Y - j, zi = Z - k;
+                kahan_add(rhons[is][xi][yi][zi], rhons_c[is][xi][yi][zi],
+                          weight[i * 4 + j * 2 + k] * invVOL);
+            }
+}
+inline void EMfields3D::add_Jxh_kahan(double weight[8], int X, int Y, int Z, int is)
+{
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+            for (int k = 0; k < 2; k++) {
+                const int xi = X - i, yi = Y - j, zi = Z - k;
+                kahan_add(Jxhs[is][xi][yi][zi], Jxhs_c[is][xi][yi][zi],
+                          weight[i * 4 + j * 2 + k]);
+            }
+}
+inline void EMfields3D::add_Jyh_kahan(double weight[8], int X, int Y, int Z, int is)
+{
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+            for (int k = 0; k < 2; k++) {
+                const int xi = X - i, yi = Y - j, zi = Z - k;
+                kahan_add(Jyhs[is][xi][yi][zi], Jyhs_c[is][xi][yi][zi],
+                          weight[i * 4 + j * 2 + k]);
+            }
+}
+inline void EMfields3D::add_Jzh_kahan(double weight[8], int X, int Y, int Z, int is)
+{
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+            for (int k = 0; k < 2; k++) {
+                const int xi = X - i, yi = Y - j, zi = Z - k;
+                kahan_add(Jzhs[is][xi][yi][zi], Jzhs_c[is][xi][yi][zi],
+                          weight[i * 4 + j * 2 + k]);
             }
 }
 
@@ -1136,6 +1243,20 @@ inline void EMfields3D::add_Mass(double value[3][3], int X, int Y, int Z, int in
     Mzy[ind][X][Y][Z] += value[2][1];
     #pragma omp atomic update
     Mzz[ind][X][Y][Z] += value[2][2];
+}
+
+//* Step 68b: Kahan-compensated mass matrix accumulator.
+inline void EMfields3D::add_Mass_kahan(double value[3][3], int X, int Y, int Z, int ind)
+{
+    kahan_add(Mxx[ind][X][Y][Z], Mxx_c[ind][X][Y][Z], value[0][0]);
+    kahan_add(Mxy[ind][X][Y][Z], Mxy_c[ind][X][Y][Z], value[0][1]);
+    kahan_add(Mxz[ind][X][Y][Z], Mxz_c[ind][X][Y][Z], value[0][2]);
+    kahan_add(Myx[ind][X][Y][Z], Myx_c[ind][X][Y][Z], value[1][0]);
+    kahan_add(Myy[ind][X][Y][Z], Myy_c[ind][X][Y][Z], value[1][1]);
+    kahan_add(Myz[ind][X][Y][Z], Myz_c[ind][X][Y][Z], value[1][2]);
+    kahan_add(Mzx[ind][X][Y][Z], Mzx_c[ind][X][Y][Z], value[2][0]);
+    kahan_add(Mzy[ind][X][Y][Z], Mzy_c[ind][X][Y][Z], value[2][1]);
+    kahan_add(Mzz[ind][X][Y][Z], Mzz_c[ind][X][Y][Z], value[2][2]);
 }
 
 inline void get_field_components_for_cell(const double* field_components[8], const_arr4_double fieldForPcls, int cx, int cy, int cz)

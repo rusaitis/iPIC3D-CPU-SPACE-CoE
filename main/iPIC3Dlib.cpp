@@ -544,6 +544,13 @@ void c_Solver::CalculateMoments()
     time_com.start();
     #endif
 
+    //* Step 68b: fold the Kahan-gather compensation into the primaries once
+    //* all species have finished depositing and before any halo exchange
+    //* runs, so `communicateInterp` / `communicateNode_P` ship a single
+    //* ε²-accurate value per node rather than a (sum, comp) pair.
+    if (col->getKahanGather())
+        EMf->foldKahanGatherCompensation();
+
     //? Communicate moments
     for (int is = 0; is < ns; is++)
         EMf->communicateGhostP2G_ecsim(is);

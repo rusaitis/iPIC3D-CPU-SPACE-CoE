@@ -171,6 +171,17 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Myz (ne_mass_, nxn, nyn, nzn),
     Mzy (ne_mass_, nxn, nyn, nzn),
 
+    //! Step 68b: Kahan companions for the mass matrix (same shape).
+    Mxx_c (ne_mass_, nxn, nyn, nzn),
+    Myy_c (ne_mass_, nxn, nyn, nzn),
+    Mzz_c (ne_mass_, nxn, nyn, nzn),
+    Mxy_c (ne_mass_, nxn, nyn, nzn),
+    Myx_c (ne_mass_, nxn, nyn, nzn),
+    Mxz_c (ne_mass_, nxn, nyn, nzn),
+    Mzx_c (ne_mass_, nxn, nyn, nzn),
+    Myz_c (ne_mass_, nxn, nyn, nzn),
+    Mzy_c (ne_mass_, nxn, nyn, nzn),
+
     //! Species-specific quantities
     rhocs_avg (ns, nxc, nyc, nzc),
     rhons     (ns, nxn, nyn, nzn),
@@ -181,6 +192,12 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Jxhs      (ns, nxn, nyn, nzn),
     Jyhs      (ns, nxn, nyn, nzn),
     Jzhs      (ns, nxn, nyn, nzn),
+
+    //! Step 68b: Kahan companions for species gather accumulators.
+    rhons_c   (ns, nxn, nyn, nzn),
+    Jxhs_c    (ns, nxn, nyn, nzn),
+    Jyhs_c    (ns, nxn, nyn, nzn),
+    Jzhs_c    (ns, nxn, nyn, nzn),
     E_flux_xs      (ns, nxn, nyn, nzn),
     E_flux_ys      (ns, nxn, nyn, nzn),
     E_flux_zs      (ns, nxn, nyn, nzn),
@@ -4713,6 +4730,76 @@ void EMfields3D::setZeroMassMatrix()
                 }
 }
 
+//! Step 68b: zero the Kahan-gather companion arrays. Called each cycle
+//* alongside `setZeroPrimaryMoments` / `setZeroMassMatrix` when the flag is
+//* on; a no-op when off (cheap single pass over the companion arrays, which
+//* are always allocated).
+void EMfields3D::setZeroKahanGatherCompensation()
+{
+    for (int is = 0; is < ns; is++)
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    rhons_c[is][i][j][k] = 0.0;
+                    Jxhs_c [is][i][j][k] = 0.0;
+                    Jyhs_c [is][i][j][k] = 0.0;
+                    Jzhs_c [is][i][j][k] = 0.0;
+                }
+
+    for (int c = 0; c < ne_mass_; c++)
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    Mxx_c[c][i][j][k] = 0.0;
+                    Mxy_c[c][i][j][k] = 0.0;
+                    Mxz_c[c][i][j][k] = 0.0;
+                    Myx_c[c][i][j][k] = 0.0;
+                    Myy_c[c][i][j][k] = 0.0;
+                    Myz_c[c][i][j][k] = 0.0;
+                    Mzx_c[c][i][j][k] = 0.0;
+                    Mzy_c[c][i][j][k] = 0.0;
+                    Mzz_c[c][i][j][k] = 0.0;
+                }
+}
+
+//! Step 68b: fold Kahan compensation back into the primary field and zero it.
+//* Called just before halo exchange so `communicateInterp` / `communicateNode_P`
+//* ship a single ε²-accurate value per node rather than a (sum, comp) pair.
+//* Follows the Neumaier convention: the companion scalar is the running
+//* floating-point residual of all plain adds replaced by `kahan_add`, so the
+//* final total is `sum + comp`.
+void EMfields3D::foldKahanGatherCompensation()
+{
+    for (int is = 0; is < ns; is++)
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    rhons[is][i][j][k] += rhons_c[is][i][j][k]; rhons_c[is][i][j][k] = 0.0;
+                    Jxhs [is][i][j][k] += Jxhs_c [is][i][j][k]; Jxhs_c [is][i][j][k] = 0.0;
+                    Jyhs [is][i][j][k] += Jyhs_c [is][i][j][k]; Jyhs_c [is][i][j][k] = 0.0;
+                    Jzhs [is][i][j][k] += Jzhs_c [is][i][j][k]; Jzhs_c [is][i][j][k] = 0.0;
+                }
+
+    for (int c = 0; c < ne_mass_; c++)
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    Mxx[c][i][j][k] += Mxx_c[c][i][j][k]; Mxx_c[c][i][j][k] = 0.0;
+                    Mxy[c][i][j][k] += Mxy_c[c][i][j][k]; Mxy_c[c][i][j][k] = 0.0;
+                    Mxz[c][i][j][k] += Mxz_c[c][i][j][k]; Mxz_c[c][i][j][k] = 0.0;
+                    Myx[c][i][j][k] += Myx_c[c][i][j][k]; Myx_c[c][i][j][k] = 0.0;
+                    Myy[c][i][j][k] += Myy_c[c][i][j][k]; Myy_c[c][i][j][k] = 0.0;
+                    Myz[c][i][j][k] += Myz_c[c][i][j][k]; Myz_c[c][i][j][k] = 0.0;
+                    Mzx[c][i][j][k] += Mzx_c[c][i][j][k]; Mzx_c[c][i][j][k] = 0.0;
+                    Mzy[c][i][j][k] += Mzy_c[c][i][j][k]; Mzy_c[c][i][j][k] = 0.0;
+                    Mzz[c][i][j][k] += Mzz_c[c][i][j][k]; Mzz_c[c][i][j][k] = 0.0;
+                }
+}
+
 //? Set the derived moments to zero
 void EMfields3D::setZeroDerivedMoments()
 {
@@ -4789,13 +4876,16 @@ void EMfields3D::setZeroPrimaryMoments()
 }
 
 //? Set all moments to zero
-void EMfields3D::setZeroDensities() 
+void EMfields3D::setZeroDensities()
 {
-    setZeroRho(); 
+    setZeroRho();
     setZeroDerivedMoments();
     setZeroPrimaryMoments();
     setZeroTertiaryMoments();
     setZeroMassMatrix();
+    //* Step 68b: zero the Kahan companions in lock-step with their primaries.
+    if (_col.getKahanGather())
+        setZeroKahanGatherCompensation();
 }
 
 //? Set densities (at nodes and cell centres) of all species to 0
