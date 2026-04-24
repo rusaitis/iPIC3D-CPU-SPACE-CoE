@@ -106,19 +106,45 @@ SmoothCycle                    = 1	                                           # 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                             ENERGY CONSERVATION                            %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# The three flags below are the canonical set that closes iPIC3D's historical
-# 12-OoM energy-conservation gap vs ECSIM on DoubleGEM 256x128 (now ε_mach at
-# np=1 and np=4). FixNodePeriodicHalo + UnifyPeriodicDuplicates are no-ops
-# when the axis is non-periodic or MPI-split (XLEN>1). SymmetrizeMaxwellImage
-# adds ~15% to the field-solve cost and is only observable on self-periodic
-# axes; harmless otherwise. All three now default true — the explicit lines
-# here document the set and make them visible to grep/diff for experiments.
+# The five flags below are the canonical set that closes iPIC3D's historical
+# 12-OoM energy-conservation gap vs ECSIM on DoubleGEM (now ε_mach at np=1
+# and np=4). ALL FIVE NOW DEFAULT TRUE (Step 67, 2026-04-24) — the explicit
+# lines are kept to document the set and make them visible to grep/diff for
+# experiments. FixNodePeriodicHalo + UnifyPeriodicDuplicates are no-ops when
+# the axis is non-periodic or MPI-split (XLEN>1). SymmetrizeMaxwellImage adds
+# ~15% to the field-solve cost and is only observable on self-periodic axes.
 
 FixNodePeriodicHalo            = 1                                             # Offset-by-one convention for self-periodic NODE halo
 UnifyPeriodicDuplicates        = 1                                             # Post-solve average of periodic-image duplicate DOFs
 SymmetrizeMaxwellImage         = 1                                             # Per-matvec unify on both input and output of MaxwellImage
 EnergyConservingSmoothing      = 1                                             # Extra halo refresh around Jxh and M*E (ECSIM-style)
 MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); default curl_curl is not self-adjoint
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                       EPSILON REPRODUCIBILITY (CI)                         %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# `EpsilonReproducibility=1` is a composite meta-flag that lifts the defaults
+# of the seven Kahan + determinism knobs below. Enabling it produces a run
+# where np=1 and np=4 match each other to ~2 ULPs on conserved quantities,
+# and each matches ECSIM's ε_mach energy-conservation class. NOT strict byte
+# reproducibility — residuals ~1-2 ULPs remain from MPI_Allreduce tree
+# ordering. Recommended use: dedicated CI reproducibility job, reference-run
+# generation, and regression detection below FP noise.
+#
+# Cost when enabled: gather single-threaded (loses OMP gather speedup), +2x
+# companion-array memory for deposited fields, ~10-20% wall-clock. Default
+# OFF so production runs keep legacy performance.
+#
+# Individual flags can still be overridden below. Uncomment to enable:
+# EpsilonReproducibility         = 1
+# Sub-flags (all default = EpsilonReproducibility; set explicitly to override):
+#   DeterministicMPIReductions   = 1                                           # Rank-ordered Gather+sum+Bcast
+#   DeterministicThreadMoments   = 1                                           # Force num_threads=1 in computeMoments
+#   DeterministicParticleComm    = 1                                           # Fixed-direction MPI_Wait (no MPI_Waitany)
+#   KahanParticleSums            = 1                                           # Neumaier in get_{kinetic_energy,total_charge,momentum}
+#   KahanGather                  = 1                                           # Kahan deposit in computeMoments
+#   KahanFieldEnergy             = 1                                           # Kahan in get_{E,B,Bext,bulk}_field_energy
+#   KahanHalo                    = 1                                           # Kahan sum-on-receive in communicateInterp
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                    BOX SIZE                                %
