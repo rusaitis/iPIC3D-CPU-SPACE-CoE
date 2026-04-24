@@ -238,6 +238,8 @@ class Collective
     bool   getLoadParticlesGlobal()          const { return LoadParticlesGlobal; }
     bool   getKahanParticleSums()            const { return KahanParticleSums; }
     bool   getKahanGather()                  const { return KahanGather; }
+    bool   getKahanFieldEnergy()             const { return KahanFieldEnergy; }
+    bool   getKahanHalo()                    const { return KahanHalo; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -473,6 +475,28 @@ class Collective
     //* companion array per accumulated field (4 × ns + 9 × ne_mass_ node
     //* arrays). Opt-in.
     bool   KahanGather;
+
+    //* Step 68c: Kahan-compensated grid field-energy reductions
+    //* (`get_E_field_energy`, `get_B_field_energy` and their per-axis
+    //* variants). Serial grid sums followed by `MPI_Allreduce`; at
+    //* different decompositions the per-rank partial walks different
+    //* nodes in different orders, drifting by O(ε) per node. Kahan brings
+    //* per-rank sums to ε², so `DeterministicMPIReductions` can combine
+    //* them cross-rank without adding noise. Opt-in, default off, zero
+    //* runtime cost when off (hoisted const branch).
+    bool   KahanFieldEnergy;
+
+    //* Step 68c: Kahan-aware halo exchange. The sum-on-receive in
+    //* `communicateInterp` (`addFace`/`addEdge*`/`addCorner`) plainly
+    //* accumulates neighbour ghost values into this rank's interior
+    //* boundary, which is the last cross-decomposition FP drift source
+    //* after Step 68b. Under `KahanHalo=true`, `NBDerivedHaloComm` takes an
+    //* optional companion pointer and dispatches the 5 sum-on-receive
+    //* sites to `*_kahan` variants; `communicateGhostP2G_{ecsim,mass_matrix}`
+    //* fold compensation once more after the halo to merge halo-add
+    //* residuals into the primary. Legacy path byte-identical when off.
+    //* Opt-in.
+    bool   KahanHalo;
 
     int CurrentCycle;
     int zeroCurrent;

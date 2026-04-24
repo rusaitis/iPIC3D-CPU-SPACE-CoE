@@ -557,6 +557,13 @@ void c_Solver::CalculateMoments()
 
     EMf->communicateGhostP2G_mass_matrix();
 
+    //* Step 68c: second fold — the Kahan-halo sum-on-receive lands residuals
+    //* in the companion arrays. Merge them back into the primaries now so the
+    //* field solve reads a single ε²-accurate value per node. No-op when
+    //* `KahanGather` is off (companions always zero in that case).
+    if (col->getKahanHalo())
+        EMf->foldKahanGatherCompensation();
+
     #ifdef __PROFILING__
     time_com.stop();
     #endif

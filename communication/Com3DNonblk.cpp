@@ -25,18 +25,34 @@
 //* Forward declaration of the n_ghost > 1 helper (definition further down).
 static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
-                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle);
+                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
+                                double ***vector_c = nullptr);
+
+//* Step 68c: forward declarations of the Kahan-compensated sum-on-receive
+//* helpers (definitions near the legacy `addFace`/`addEdge*`/`addCorner`
+//* further down). Same signature as the legacy helpers plus a companion
+//* `vector_c` compensation array.
+void addFace_kahan  (int nx, int ny, int nz, double ***vector, double ***vector_c, const VirtualTopology3D * vct, int n_ghost);
+void addEdgeX_kahan (int nx, int ny, int nz, double ***vector, double ***vector_c, const VirtualTopology3D * vct, int n_ghost);
+void addEdgeY_kahan (int nx, int ny, int nz, double ***vector, double ***vector_c, const VirtualTopology3D * vct, int n_ghost);
+void addEdgeZ_kahan (int nx, int ny, int nz, double ***vector, double ***vector_c, const VirtualTopology3D * vct, int n_ghost);
+void addCorner_kahan(int nx, int ny, int nz, double ***vector, double ***vector_c, const VirtualTopology3D * vct, int n_ghost);
 
 //! isCenterFlag: 1 = communicateCenter; 0 = communicateNode
+//! Step 68c: `vector_c` is the Kahan-compensation companion array. `= nullptr`
+//! is the legacy behaviour (byte-identical); a non-null pointer switches the
+//! sum-on-receive step (`addFace`/`addEdge*`/`addCorner`) to the Neumaier-
+//! compensated variants that land residuals in `vector_c`.
 void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, EMfields3D *EMf,
-                        bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle)
+                        bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
+                        double ***vector_c = nullptr)
 {
     //* Phase A.3b: dispatch wider ghost-slab exchanges to the loop-based helper.
     //  For n_ghost == 1 we fall through to the legacy fast path below, which
     //  uses merged edge/corner MPI datatypes and remains byte-identical.
     if (EMf->getNGhost() > 1) {
         NBDerivedHaloCommN(nx, ny, nz, vector, vct, EMf,
-                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle);
+                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vector_c);
         return;
     }
 
@@ -567,13 +583,25 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 
 	//if this is NodeInterpolation operation
 	if(needInterp){
-		addFace(nx, ny, nz, vector,  vct);
-
-		addEdgeZ(nx, ny, nz, vector, vct);
-		addEdgeY(nx, ny, nz, vector, vct);
-		addEdgeX(nx, ny, nz, vector, vct);
-
-		addCorner(nx, ny, nz, vector, vct);
+	    //* Step 68c: Kahan-aware sum-on-receive. Legacy path (`vector_c ==
+	    //* nullptr`) falls through to the plain `+=` helpers below, byte-
+	    //* identical to pre-Step-68c. When `vector_c` is supplied, the
+	    //* receiving interior cell is updated via a Neumaier step with the
+	    //* residual landing in `vector_c`; the caller folds `vector_c`
+	    //* back into `vector` after the halo exchange.
+	    if (vector_c != nullptr) {
+	        addFace_kahan  (nx, ny, nz, vector, vector_c, vct, 1);
+	        addEdgeZ_kahan (nx, ny, nz, vector, vector_c, vct, 1);
+	        addEdgeY_kahan (nx, ny, nz, vector, vector_c, vct, 1);
+	        addEdgeX_kahan (nx, ny, nz, vector, vector_c, vct, 1);
+	        addCorner_kahan(nx, ny, nz, vector, vector_c, vct, 1);
+	    } else {
+	        addFace  (nx, ny, nz, vector, vct);
+	        addEdgeZ (nx, ny, nz, vector, vct);
+	        addEdgeY (nx, ny, nz, vector, vct);
+	        addEdgeX (nx, ny, nz, vector, vct);
+	        addCorner(nx, ny, nz, vector, vct);
+	    }
 	}
 
 }
@@ -606,7 +634,8 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 //! ================================================================================
 static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
-                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle)
+                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
+                                double ***vector_c)
 {
     const int n_ghost_ = EMf->getNGhost();
 
@@ -1099,11 +1128,20 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  copy, stencils, moments) is self-consistently calibrated. Require
     //  nxc_r >= 2*n_ghost - 1 per rank for each self-periodic axis.
     if (needInterp) {
-        addFace (nx, ny, nz, vector, vct, n_ghost_);
-        addEdgeZ(nx, ny, nz, vector, vct, n_ghost_);
-        addEdgeY(nx, ny, nz, vector, vct, n_ghost_);
-        addEdgeX(nx, ny, nz, vector, vct, n_ghost_);
-        addCorner(nx, ny, nz, vector, vct, n_ghost_);
+        //* Step 68c: Kahan-aware sum-on-receive, n_ghost > 1 variant.
+        if (vector_c != nullptr) {
+            addFace_kahan  (nx, ny, nz, vector, vector_c, vct, n_ghost_);
+            addEdgeZ_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
+            addEdgeY_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
+            addEdgeX_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
+            addCorner_kahan(nx, ny, nz, vector, vector_c, vct, n_ghost_);
+        } else {
+            addFace  (nx, ny, nz, vector, vct, n_ghost_);
+            addEdgeZ (nx, ny, nz, vector, vct, n_ghost_);
+            addEdgeY (nx, ny, nz, vector, vct, n_ghost_);
+            addEdgeX (nx, ny, nz, vector, vct, n_ghost_);
+            addCorner(nx, ny, nz, vector, vct, n_ghost_);
+        }
     }
 }
 
@@ -1497,6 +1535,158 @@ void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D
             vector[n_ghost + gx][n_ghost + gy][n_ghost + gz] += vector[gx][gy][gz];
     }
 }
+
+//! ================================================================================
+//  Step 68c: Kahan-compensated parallel helpers for the sum-on-receive path.
+//  One-to-one with the addFace / addEdge{X,Y,Z} / addCorner helpers above, but
+//  each `interior += ghost` is replaced by a Neumaier-compensated add that
+//  updates the matching interior cell of `vector_c` alongside `vector`. The
+//  companion `vector_c` must be zero at entry (callers fold it into `vector`
+//  before the halo exchange; after halo, a second fold merges the residuals
+//  back into `vector` for the field solver).
+//
+//  Runs only when `KahanHalo=true` — same hot-loop shape as the legacy
+//  helpers, just doing ~3× FLOP per node pair. These touch only interior-
+//  boundary nodes so the extra cost is a small fraction of a matvec.
+//! ================================================================================
+
+static inline void kahan_add_inline(double& sum, double& comp, double term)
+{
+    const double t = sum + term;
+    if (std::fabs(sum) >= std::fabs(term))
+        comp += (sum - t) + term;
+    else
+        comp += (term - t) + sum;
+    sum = t;
+}
+
+#define KAHAN_ADD(DST_I, DST_J, DST_K, SRC_I, SRC_J, SRC_K)               \
+    kahan_add_inline(vector  [DST_I][DST_J][DST_K],                       \
+                     vector_c[DST_I][DST_J][DST_K],                       \
+                     vector  [SRC_I][SRC_J][SRC_K])
+
+void addFace_kahan(int nx, int ny, int nz, double ***vector, double ***vector_c,
+                   const VirtualTopology3D * vct, int n_ghost)
+{
+    for (int g = 0; g < n_ghost; g++) {
+        if (vct->hasXrghtNeighbor_P())
+            for (int j = 1; j <= ny - 2; j++)
+                for (int k = 1; k <= nz - 2; k++)
+                    KAHAN_ADD(nx - 1 - n_ghost - g, j, k,   nx - 1 - g, j, k);
+        if (vct->hasXleftNeighbor_P())
+            for (int j = 1; j <= ny - 2; j++)
+                for (int k = 1; k <= nz - 2; k++)
+                    KAHAN_ADD(n_ghost + g, j, k,   g, j, k);
+        if (vct->hasYrghtNeighbor_P())
+            for (int i = 1; i <= nx - 2; i++)
+                for (int k = 1; k <= nz - 2; k++)
+                    KAHAN_ADD(i, ny - 1 - n_ghost - g, k,   i, ny - 1 - g, k);
+        if (vct->hasYleftNeighbor_P())
+            for (int i = 1; i <= nx - 2; i++)
+                for (int k = 1; k <= nz - 2; k++)
+                    KAHAN_ADD(i, n_ghost + g, k,   i, g, k);
+        if (vct->hasZrghtNeighbor_P())
+            for (int i = 1; i <= nx - 2; i++)
+                for (int j = 1; j <= ny - 2; j++)
+                    KAHAN_ADD(i, j, nz - 1 - n_ghost - g,   i, j, nz - 1 - g);
+        if (vct->hasZleftNeighbor_P())
+            for (int i = 1; i <= nx - 2; i++)
+                for (int j = 1; j <= ny - 2; j++)
+                    KAHAN_ADD(i, j, n_ghost + g,   i, j, g);
+    }
+}
+
+void addEdgeZ_kahan(int nx, int ny, int nz, double ***vector, double ***vector_c,
+                    const VirtualTopology3D * vct, int n_ghost)
+{
+    for (int gx = 0; gx < n_ghost; gx++)
+    for (int gy = 0; gy < n_ghost; gy++)
+    {
+        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P())
+            for (int i = 1; i < (nz - 1); i++)
+                KAHAN_ADD(nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, i,   nx - 1 - gx, ny - 1 - gy, i);
+        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P())
+            for (int i = 1; i < (nz - 1); i++)
+                KAHAN_ADD(n_ghost + gx, n_ghost + gy, i,   gx, gy, i);
+        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P())
+            for (int i = 1; i < (nz - 1); i++)
+                KAHAN_ADD(nx - 1 - n_ghost - gx, n_ghost + gy, i,   nx - 1 - gx, gy, i);
+        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P())
+            for (int i = 1; i < (nz - 1); i++)
+                KAHAN_ADD(n_ghost + gx, ny - 1 - n_ghost - gy, i,   gx, ny - 1 - gy, i);
+    }
+}
+
+void addEdgeY_kahan(int nx, int ny, int nz, double ***vector, double ***vector_c,
+                    const VirtualTopology3D * vct, int n_ghost)
+{
+    for (int gx = 0; gx < n_ghost; gx++)
+    for (int gz = 0; gz < n_ghost; gz++)
+    {
+        if (vct->hasXrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+            for (int i = 1; i < (ny - 1); i++)
+                KAHAN_ADD(nx - 1 - n_ghost - gx, i, nz - 1 - n_ghost - gz,   nx - 1 - gx, i, nz - 1 - gz);
+        if (vct->hasXleftNeighbor_P() && vct->hasZleftNeighbor_P())
+            for (int i = 1; i < (ny - 1); i++)
+                KAHAN_ADD(n_ghost + gx, i, n_ghost + gz,   gx, i, gz);
+        if (vct->hasXleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+            for (int i = 1; i < (ny - 1); i++)
+                KAHAN_ADD(n_ghost + gx, i, nz - 1 - n_ghost - gz,   gx, i, nz - 1 - gz);
+        if (vct->hasXrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+            for (int i = 1; i < (ny - 1); i++)
+                KAHAN_ADD(nx - 1 - n_ghost - gx, i, n_ghost + gz,   nx - 1 - gx, i, gz);
+    }
+}
+
+void addEdgeX_kahan(int nx, int ny, int nz, double ***vector, double ***vector_c,
+                    const VirtualTopology3D * vct, int n_ghost)
+{
+    for (int gy = 0; gy < n_ghost; gy++)
+    for (int gz = 0; gz < n_ghost; gz++)
+    {
+        if (vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+            for (int i = 1; i < (nx - 1); i++)
+                KAHAN_ADD(i, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   i, ny - 1 - gy, nz - 1 - gz);
+        if (vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
+            for (int i = 1; i < (nx - 1); i++)
+                KAHAN_ADD(i, n_ghost + gy, n_ghost + gz,   i, gy, gz);
+        if (vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+            for (int i = 1; i < (nx - 1); i++)
+                KAHAN_ADD(i, n_ghost + gy, nz - 1 - n_ghost - gz,   i, gy, nz - 1 - gz);
+        if (vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+            for (int i = 1; i < (nx - 1); i++)
+                KAHAN_ADD(i, ny - 1 - n_ghost - gy, n_ghost + gz,   i, ny - 1 - gy, gz);
+    }
+}
+
+void addCorner_kahan(int nx, int ny, int nz, double ***vector, double ***vector_c,
+                     const VirtualTopology3D * vct, int n_ghost)
+{
+    for (int gx = 0; gx < n_ghost; gx++)
+    for (int gy = 0; gy < n_ghost; gy++)
+    for (int gz = 0; gz < n_ghost; gz++)
+    {
+        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+            KAHAN_ADD(nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   nx - 1 - gx, ny - 1 - gy, nz - 1 - gz);
+        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+            KAHAN_ADD(n_ghost + gx, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   gx, ny - 1 - gy, nz - 1 - gz);
+        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+            KAHAN_ADD(nx - 1 - n_ghost - gx, n_ghost + gy, nz - 1 - n_ghost - gz,   nx - 1 - gx, gy, nz - 1 - gz);
+        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+            KAHAN_ADD(n_ghost + gx, n_ghost + gy, nz - 1 - n_ghost - gz,   gx, gy, nz - 1 - gz);
+        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+            KAHAN_ADD(nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, n_ghost + gz,   nx - 1 - gx, ny - 1 - gy, gz);
+        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+            KAHAN_ADD(n_ghost + gx, ny - 1 - n_ghost - gy, n_ghost + gz,   gx, ny - 1 - gy, gz);
+        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
+            KAHAN_ADD(nx - 1 - n_ghost - gx, n_ghost + gy, n_ghost + gz,   nx - 1 - gx, gy, gz);
+        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P())
+            KAHAN_ADD(n_ghost + gx, n_ghost + gy, n_ghost + gz,   gx, gy, gz);
+    }
+}
+
+#undef KAHAN_ADD
+
 /** communicate and sum shared ghost cells */
 
 //? Used for communicating moments
@@ -1509,6 +1699,22 @@ void communicateInterp(int nx, int ny, int nz, arr3_double _vector, const Virtua
 {
     double ***vector=_vector.fetch_arr3();
 	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true);
+}
+
+//* Step 68c: Kahan-compensated variants. Forward the companion array into
+//* NBDerivedHaloComm so the sum-on-receive goes through `addFace_kahan` etc.
+void communicateInterp_kahan(int nx, int ny, int nz, double*** vector, double*** vector_c,
+                             const VirtualTopology3D * vct, EMfields3D *EMf)
+{
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true, vector_c);
+}
+
+void communicateInterp_kahan(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c,
+                             const VirtualTopology3D * vct, EMfields3D *EMf)
+{
+    double ***vector   = _vector.fetch_arr3();
+    double ***vector_c = _vector_c.fetch_arr3();
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true, vector_c);
 }
 
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf)

@@ -97,6 +97,14 @@ void communicateInterp(int nx, int ny, int nz, arr3_double _vector, const Virtua
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf);
 void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf);
 
+//* Step 68c: Kahan-compensated halo sum-on-receive for the moment
+//* interpolation. Companion `vector_c` must be zero on entry and is returned
+//* holding the halo-add residual; caller folds it into `vector` afterward.
+void communicateInterp_kahan(int nx, int ny, int nz, double*** vector, double*** vector_c,
+                             const VirtualTopology3D * vct, EMfields3D *EMf);
+void communicateInterp_kahan(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c,
+                             const VirtualTopology3D * vct, EMfields3D *EMf);
+
 void communicateNode_P_old(int nx, int ny, int nz, int ns, double ****vector, const VirtualTopology3D *vct, EMfields3D *EMf);
 // void communicateInterp(int nx, int ny, int nz, double ****vector, int ns, const VirtualTopology3D * vct);
 void communicateInterp_old(int nx, int ny, int nz, int ns, double ****vector, 

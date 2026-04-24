@@ -2440,15 +2440,34 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     double ***moment_Jyhs  = convert_to_arr3(Jyhs[is]);
     double ***moment_Jzhs  = convert_to_arr3(Jzhs[is]);
 
+    //* Step 68c: Kahan-aware halo sum when the flag is on. The companion
+    //* arrays were zeroed (and any fold residual from Step 68b already
+    //* merged into the primaries) before the halo exchange starts.
+    const bool kahan_halo = _col.getKahanHalo();
+
     //* Halo sum (interpolation pattern: face/edge/corner addFace into the
-    //  matching interior nodes).
+    //  matching interior nodes). Jxh / Jyh / Jzh aggregates are still 0 at
+    //  this point (sumOverSpecies runs later), so the Kahan route is
+    //  equivalent to legacy for those three calls — keep them on the
+    //  legacy path to save the companion-array bookkeeping.
     communicateInterp(nxn, nyn, nzn, Jxh,         vct, this);
     communicateInterp(nxn, nyn, nzn, Jyh,         vct, this);
     communicateInterp(nxn, nyn, nzn, Jzh,         vct, this);
-    communicateInterp(nxn, nyn, nzn, moment_Jxhs, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment_Jyhs, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment_Jzhs, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment_rhons, vct, this);
+    if (kahan_halo) {
+        double ***moment_rhons_c = convert_to_arr3(rhons_c[is]);
+        double ***moment_Jxhs_c  = convert_to_arr3(Jxhs_c[is]);
+        double ***moment_Jyhs_c  = convert_to_arr3(Jyhs_c[is]);
+        double ***moment_Jzhs_c  = convert_to_arr3(Jzhs_c[is]);
+        communicateInterp_kahan(nxn, nyn, nzn, moment_Jxhs,  moment_Jxhs_c,  vct, this);
+        communicateInterp_kahan(nxn, nyn, nzn, moment_Jyhs,  moment_Jyhs_c,  vct, this);
+        communicateInterp_kahan(nxn, nyn, nzn, moment_Jzhs,  moment_Jzhs_c,  vct, this);
+        communicateInterp_kahan(nxn, nyn, nzn, moment_rhons, moment_rhons_c, vct, this);
+    } else {
+        communicateInterp(nxn, nyn, nzn, moment_Jxhs, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Jyhs, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Jzhs, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_rhons, vct, this);
+    }
 
     //* Populate the ghost layers (no sum-on-receive, just copy from interior).
     communicateNode_P(nxn, nyn, nzn, Jxh,         vct, this);
@@ -2474,6 +2493,9 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     //  Each Mxx[m] is a contiguous (nxn x nyn x nzn) slab of the underlying
     //  array4_double, so convert_to_arr3 yields a valid 3D view per stencil
     //  group m in [0, ne_mass_).
+    //* Step 68c: Kahan-aware halo sum when the flag is on.
+    const bool kahan_halo = _col.getKahanHalo();
+
     for (int m = 0; m < ne_mass_; m++)
     {
         double ***moment_Mxx = convert_to_arr3(Mxx[m]);
@@ -2488,15 +2510,36 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
 
         //* Halo sum (interpolation pattern: face/edge/corner addFace into the
         //  matching interior nodes).
-        communicateInterp(nxn, nyn, nzn, moment_Mxx, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Mxy, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Mxz, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Myx, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Myy, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Myz, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Mzx, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Mzy, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Mzz, vct, this);
+        if (kahan_halo) {
+            double ***mc_Mxx = convert_to_arr3(Mxx_c[m]);
+            double ***mc_Mxy = convert_to_arr3(Mxy_c[m]);
+            double ***mc_Mxz = convert_to_arr3(Mxz_c[m]);
+            double ***mc_Myx = convert_to_arr3(Myx_c[m]);
+            double ***mc_Myy = convert_to_arr3(Myy_c[m]);
+            double ***mc_Myz = convert_to_arr3(Myz_c[m]);
+            double ***mc_Mzx = convert_to_arr3(Mzx_c[m]);
+            double ***mc_Mzy = convert_to_arr3(Mzy_c[m]);
+            double ***mc_Mzz = convert_to_arr3(Mzz_c[m]);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Mxx, mc_Mxx, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Mxy, mc_Mxy, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Mxz, mc_Mxz, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Myx, mc_Myx, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Myy, mc_Myy, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Myz, mc_Myz, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Mzx, mc_Mzx, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Mzy, mc_Mzy, vct, this);
+            communicateInterp_kahan(nxn, nyn, nzn, moment_Mzz, mc_Mzz, vct, this);
+        } else {
+            communicateInterp(nxn, nyn, nzn, moment_Mxx, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Mxy, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Mxz, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Myx, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Myy, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Myz, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Mzx, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Mzy, vct, this);
+            communicateInterp(nxn, nyn, nzn, moment_Mzz, vct, this);
+        }
 
         //* Populate the ghost layers (no sum-on-receive, just copy from interior).
         communicateNode_P(nxn, nyn, nzn, moment_Mxx, vct, this);
@@ -7306,70 +7349,92 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
 //*** Get energies ***//
 
 //! Electric field energy
-double EMfields3D::get_E_field_energy(void) 
+//* Step 68c: `use_kahan` hoisted as a runtime-constant bool; the inner-loop
+//* branch is predicted perfectly so the flag-off path is byte-identical
+//* to the legacy plain `+=`. With the flag on, per-rank sum becomes
+//* ε²-accurate regardless of node-walk order.
+double EMfields3D::get_E_field_energy(void)
 {
-    double localEenergy = 0.0;
+    double localEenergy = 0.0, compEenergy = 0.0;
     double totalEenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
-            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
-                localEenergy += .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k] + Ey[i][j][k] * Ey[i][j][k] + Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
+                const double term = .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k] + Ey[i][j][k] * Ey[i][j][k] + Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
+                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
+                else           localEenergy += term;
+            }
 
+    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
-double EMfields3D::get_Ex_field_energy(void) 
+double EMfields3D::get_Ex_field_energy(void)
 {
-    double localEenergy = 0.0;
+    double localEenergy = 0.0, compEenergy = 0.0;
     double totalEenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
-            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
-                localEenergy += .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k]) / (FourPI);
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
+                const double term = .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k]) / (FourPI);
+                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
+                else           localEenergy += term;
+            }
 
+    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
-double EMfields3D::get_Ey_field_energy(void) 
+double EMfields3D::get_Ey_field_energy(void)
 {
-    double localEenergy = 0.0;
+    double localEenergy = 0.0, compEenergy = 0.0;
     double totalEenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
-            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
-                localEenergy += .5 * dx * dy * dz * (Ey[i][j][k] * Ey[i][j][k]) / (FourPI);
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
+                const double term = .5 * dx * dy * dz * (Ey[i][j][k] * Ey[i][j][k]) / (FourPI);
+                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
+                else           localEenergy += term;
+            }
 
+    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
-double EMfields3D::get_Ez_field_energy(void) 
+double EMfields3D::get_Ez_field_energy(void)
 {
-    double localEenergy = 0.0;
+    double localEenergy = 0.0, compEenergy = 0.0;
     double totalEenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
-            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
-                localEenergy += .5 * dx * dy * dz * (Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
+                const double term = .5 * dx * dy * dz * (Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
+                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
+                else           localEenergy += term;
+            }
 
+    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
 //*! Get internal magnetic field energy
-double EMfields3D::get_B_field_energy(void) 
+double EMfields3D::get_B_field_energy(void)
 {
-    double localBenergy = 0.0;
+    double localBenergy = 0.0, compBenergy = 0.0;
     double totalBenergy = 0.0;
-    double Bxt = 0.0;
-    double Byt = 0.0;
-    double Bzt = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     //  Cells (B is on cell centers) are owned by exactly one rank, so the loop
     //  iterates [n_ghost_, nxc-n_ghost_) interior cells. For n_ghost_=1 this
@@ -7378,55 +7443,72 @@ double EMfields3D::get_B_field_energy(void)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++)
             {
-                Bxt = Bxc[i][j][k];
-                Byt = Byc[i][j][k];
-                Bzt = Bzc[i][j][k];
-
-                localBenergy += .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
+                const double Bxt = Bxc[i][j][k];
+                const double Byt = Byc[i][j][k];
+                const double Bzt = Bzc[i][j][k];
+                const double term = .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
+                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
+                else           localBenergy += term;
             }
 
+    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
 double EMfields3D::get_Bx_field_energy(void)
 {
-    double localBenergy = 0.0;
+    double localBenergy = 0.0, compBenergy = 0.0;
     double totalBenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
-            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
-                localBenergy += .5 * dx * dy * dz * (Bxc[i][j][k] * Bxc[i][j][k])/(FourPI);
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++) {
+                const double term = .5 * dx * dy * dz * (Bxc[i][j][k] * Bxc[i][j][k])/(FourPI);
+                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
+                else           localBenergy += term;
+            }
 
+    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
 double EMfields3D::get_By_field_energy(void)
 {
-    double localBenergy = 0.0;
+    double localBenergy = 0.0, compBenergy = 0.0;
     double totalBenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
-            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
-                localBenergy += .5 * dx * dy * dz * (Byc[i][j][k] * Byc[i][j][k])/(FourPI);
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++) {
+                const double term = .5 * dx * dy * dz * (Byc[i][j][k] * Byc[i][j][k])/(FourPI);
+                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
+                else           localBenergy += term;
+            }
 
+    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
 double EMfields3D::get_Bz_field_energy(void)
 {
-    double localBenergy = 0.0;
+    double localBenergy = 0.0, compBenergy = 0.0;
     double totalBenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
-            for (int k = n_ghost_; k < nzc - n_ghost_; k++)
-                localBenergy += .5 * dx * dy * dz * (Bzc[i][j][k] * Bzc[i][j][k])/(FourPI);
+            for (int k = n_ghost_; k < nzc - n_ghost_; k++) {
+                const double term = .5 * dx * dy * dz * (Bzc[i][j][k] * Bzc[i][j][k])/(FourPI);
+                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
+                else           localBenergy += term;
+            }
 
+    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
@@ -7434,23 +7516,23 @@ double EMfields3D::get_Bz_field_energy(void)
 //*! Get external magnetic field energy
 double EMfields3D::get_Bext_energy(void)
 {
-    double localBenergy = 0.0;
+    double localBenergy = 0.0, compBenergy = 0.0;
     double totalBenergy = 0.0;
-    double Bxt = 0.0;
-    double Byt = 0.0;
-    double Bzt = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++)
             {
-                Bxt = Bxc_ext[i][j][k];
-                Byt = Byc_ext[i][j][k];
-                Bzt = Bzc_ext[i][j][k];
-
-                localBenergy += .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
+                const double Bxt = Bxc_ext[i][j][k];
+                const double Byt = Byc_ext[i][j][k];
+                const double Bzt = Bzc_ext[i][j][k];
+                const double term = .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
+                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
+                else           localBenergy += term;
             }
 
+    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
@@ -7458,14 +7540,22 @@ double EMfields3D::get_Bext_energy(void)
 /*! get bulk kinetic energy*/
 double EMfields3D::get_bulk_energy(int is)
 {
-    double localBenergy = 0.0;
+    double localBenergy = 0.0, compBenergy = 0.0;
     double totalBenergy = 0.0;
+    const bool use_kahan = _col.getKahanFieldEnergy();
+
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
-            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
-                // Trying to avoid division by zero. Where rho iz 0, current must be 0.
-                localBenergy += (fabs(rhons[is][i][j][k]) > 1.e-20) ? (0.5 * dx * dy * dz * (Jxs[is][i][j][k] * Jxs[is][i][j][k] + Jys[is][i][j][k] * Jys[is][i][j][k] + Jzs[is][i][j][k] * Jzs[is][i][j][k]) / rhons[is][i][j][k]) : 0.0;
+            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
+                // Avoid division by zero. Where rho is 0, current must be 0.
+                const double term = (fabs(rhons[is][i][j][k]) > 1.e-20)
+                    ? (0.5 * dx * dy * dz * (Jxs[is][i][j][k] * Jxs[is][i][j][k] + Jys[is][i][j][k] * Jys[is][i][j][k] + Jzs[is][i][j][k] * Jzs[is][i][j][k]) / rhons[is][i][j][k])
+                    : 0.0;
+                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
+                else           localBenergy += term;
+            }
 
+    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy / qom[is]);
 }

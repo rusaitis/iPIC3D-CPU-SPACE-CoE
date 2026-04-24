@@ -214,6 +214,11 @@ void Collective::ReadInput(string inputfile)
         //* the atomic-update path while on. Memory cost: one companion per
         //* deposited field. Opt-in, default off.
         KahanGather         = config.read<bool>("KahanGather",         false);
+        //* Step 68c: Kahan on grid field-energy reductions + halo sum-on-receive.
+        //* Both opt-in, default off. Together they close the last cross-np
+        //* FP-drift sources after Step 68b.
+        KahanFieldEnergy    = config.read<bool>("KahanFieldEnergy",    false);
+        KahanHalo           = config.read<bool>("KahanHalo",           false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);
