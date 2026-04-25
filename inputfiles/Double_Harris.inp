@@ -106,13 +106,12 @@ SmoothCycle                    = 1	                                           # 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                             ENERGY CONSERVATION                            %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# The canonical set that closes iPIC3D's historical 12-OoM energy-conservation
-# gap vs ECSIM on DoubleGEM (now ε_mach at np=1 and np=4) is now hard-coded:
-#   - offset-by-one self-periodic NODE halo convention
+# Hard-coded fixes that close iPIC3D's historical energy-conservation gap to
+# ε_mach (DoubleGEM np=1 and np=4):
+#   - offset-by-one self-periodic NODE halo convention (Com3DNonblk.cpp)
 #   - subspace-projecting solver2phys/phys2solver pair (collapses duplicate
-#     periodic-DOFs out of the Krylov representation; replaces the old
-#     `SymmetrizeMaxwellImage` and `UnifyPeriodicDuplicates` patches)
-#   - lap_graddiv self-adjoint Maxwell operator
+#     periodic-DOFs out of the Krylov representation)
+#   - lap_graddiv self-adjoint Maxwell operator (selected below)
 
 MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); curl_curl is not self-adjoint
 

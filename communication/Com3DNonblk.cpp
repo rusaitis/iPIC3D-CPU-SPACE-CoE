@@ -47,9 +47,8 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
                         bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
                         double ***vector_c = nullptr)
 {
-    //* Phase A.3b: dispatch wider ghost-slab exchanges to the loop-based helper.
-    //  For n_ghost == 1 we fall through to the legacy fast path below, which
-    //  uses merged edge/corner MPI datatypes and remains byte-identical.
+    //* Wider ghost-slab path goes through the loop-based helper. n_ghost == 1
+    //* falls through to the legacy merged-datatype fast path below.
     if (EMf->getNGhost() > 1) {
         NBDerivedHaloCommN(nx, ny, nz, vector, vct, EMf,
                            isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vector_c);
@@ -142,29 +141,14 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
     assert_eq(recvcnt,sendcnt-recvcnt);
 
     //Buffer swap if any (done before waiting for receiving msg done to delay sync)
-    //* NODE-centered periodic arrays have a duplicate at indices {n_ghost, nx-n_ghost-1}
-    //* (the two images of the same physical boundary node). The offset-by-one self-swap
-    //*   ghost(0) = interior(nx-3),  ghost(nx-1) = interior(2)
-    //* maps the ghost to the proper periodic neighbour one step inside, matching the
-    //* MPI-send convention for XLEN>1 subdomains (sends interior(1+offset)/nx-2-offset
-    //* a few lines above) and ECSIM's `makeNodeFace` (ComParser3D.cpp:34-60). The
-    //* legacy `nx-2 / 1` mapped to the HIGH-side duplicate of the CENTER node — a
-    //* useless aliasing that biased stencils at the periodic boundary and produced
-    //* ~4e-5 l2_rel divergence in the cross-code MaxwellImage Stage C (raw M·E)
-    //* byte diff and 12 OoM of energy drift.
-    //*
-    //* The `communicateInterp` sum-on-receive addFace/Edge/Corner path (`needInterp`)
-    //* and the cell-centred halos (`isCenterFlag`) keep the legacy `nx-2 / 1`:
-    //* ECSIM's `makeCenterFace` (ComParser3D.cpp:91-116) reads from interior[1] /
-    //* interior[nx-2], so iPIC3D matches there.
-    //*
-    //* Non-periodic BC safety. The offset-by-one source indices are computed
-    //* unconditionally but only *read* when the self-swap blocks below fire, and
-    //* those gate on `right_neighborX == myrank == left_neighborX`. For non-periodic
-    //* axes, `MPI_Cart_create` with `periods[X]=false` returns `MPI_PROC_NULL` for
-    //* off-end neighbours, so the gate is false and the offset-by-one is dead code
-    //* on that axis. `PERIODICX_P` defaults to `PERIODICX` in main/Collective.cpp,
-    //* so the particle communicator agrees with the field one.
+    //* NODE arrays on a self-periodic axis carry duplicates at {n_ghost, nx-n_ghost-1}
+    //* (two images of the same physical boundary node). The offset-by-one self-swap
+    //* ghost(0)=interior(nx-3), ghost(nx-1)=interior(2) maps each ghost to the proper
+    //* periodic neighbour one step inside, matching ECSIM's `makeNodeFace` and the
+    //* MPI-send convention for XLEN>1. CENTER halos (`isCenterFlag`) and the
+    //* sum-on-receive path (`needInterp`) keep the legacy `nx-2 / 1`. Non-periodic
+    //* axes return `MPI_PROC_NULL` so the self-swap gate below is false and the
+    //* offset is unread.
     const bool node_halo_fix = !isCenterFlag && !needInterp;
     const int xlo_src = node_halo_fix ? (nx-3) : (nx-2);
     const int xhi_src = node_halo_fix ? 2      : 1;
@@ -610,27 +594,18 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 //! ================================================================================
 //  NBDerivedHaloCommN: wider ghost-slab variant of NBDerivedHaloComm.
 //
-//  Phase A.3b helper used only when grid->getNGhost() > 1. Instead of relying
-//  on the merged MPI edge/corner datatypes (which hard-code an n_ghost == 1
-//  outermost-only geometry), each layer of the n_ghost-thick ghost slab is
-//  exchanged via its own MPI call in a loop over layer offsets. The per-layer
-//  face/edge types come from EMfields3D.cpp; those were already widened in
-//  Phase A.2 so that one layer contains (n - 2*n_ghost)^2 doubles stripped of
-//  the inner y/z ghost corners.
+//  Used when grid->getNGhost() > 1. Each layer of the n_ghost-thick ghost slab
+//  is exchanged via its own MPI call in a loop over layer offsets, since the
+//  merged edge/corner datatypes hard-code n_ghost == 1 outermost-only geometry.
+//  Per-layer face/edge types come from EMfields3D.cpp.
 //
 //  Notes:
-//  - Corners fall back to scalar (MPI_DOUBLE) sends since there is no
-//    precomputed corner-cube datatype. For n_ghost == 2 that is 8 corners *
-//    n_ghost^3 = 64 doubles per X-direction per phase; acceptable as a first
-//    implementation.
-//  - Periodic-self buffer copies use a "constant extension" fallback that
-//    matches the legacy behaviour at n_ghost == 1 and is a safe starting
-//    point at n_ghost > 1. Strict periodic wrapping can be refined in Phase B
-//    if a periodic single-rank n_ghost > 1 run is added to the regression set.
-//  - The 4D legacy moment path (communicateInterp_old / communicateNode_P_old
-//    via ComParser3D) is NOT widened here; for n_ghost > 1 the per-species
-//    moment halo sum will be incorrect. Phase B adds that path, or routes it
-//    through the 3D modern exchange on each species slice.
+//  - Corner cubes fall back to scalar MPI_DOUBLE sends (no precomputed type).
+//  - Periodic-self buffer copies use a constant-extension fallback (matches
+//    legacy n_ghost == 1 behaviour).
+//  - The 4D legacy moment path (communicateInterp_old / communicateNode_P_old)
+//    is NOT widened here — for n_ghost > 1 the per-species moment halo sum
+//    routes through the 3D modern exchange.
 //! ================================================================================
 static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,

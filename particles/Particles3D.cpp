@@ -45,9 +45,6 @@ developers: Stefano Markidis, Giovanni Lapenta
 #include "debug.h"
 #include "ompdefs.h"                 // omp_get_max_threads
 #include <complex>
-#include <iomanip>
-#include <fstream>
-#include <sstream>                   // std::ostringstream α dump
 #include "../LeXInt_Timer.hpp"
 #include <cstdlib>
 
@@ -1003,14 +1000,6 @@ void Particles3D::ECSIM_velocity(Field *EMf)
     //* state enough to lose bit-reproducibility vs OMP_NUM_THREADS=1.
     const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
 
-    //* mover/gather α-parity audit dump. When flag is on, allocate a
-    //* per-particle buffer and fill [pidx, x, y, z, Bx, By, Bz, α00..α22]
-    //* inside the loop; master writes the full buffer after the parallel region.
-    const bool dump_alpha = col->getDumpAlphaBothPaths();
-    const int n_alpha_doubles = 16;
-    const long alpha_n_pcl = dump_alpha ? static_cast<long>(getNOP()) : 0L;
-    double* alpha_dump_buffer = dump_alpha ? new double[alpha_n_pcl * n_alpha_doubles] : nullptr;
-
     #pragma omp parallel num_threads(det_num_threads)
     {
         convertParticlesToAoS();
@@ -1118,31 +1107,6 @@ void Particles3D::ECSIM_velocity(Field *EMf)
             const pfloat omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
             const pfloat denom = 1.0 / (1.0 + omsq);
 
-            //* record α for the parity audit. When the flag is on we
-            //* always build the explicit 3×3 form (same expressions as the
-            //* gather's α) so the dump measures the canonical rotation tensor,
-            //* independent of whether the velocity update itself uses the
-            //* compact or explicit path. Cost: nine FMAs per particle.
-            if (dump_alpha)
-            {
-                const double a00 = ( 1.0 + (Omx*Omx))*denom;
-                const double a01 = ( Omz + (Omx*Omy))*denom;
-                const double a02 = (-Omy + (Omx*Omz))*denom;
-                const double a10 = (-Omz + (Omx*Omy))*denom;
-                const double a11 = ( 1.0 + (Omy*Omy))*denom;
-                const double a12 = ( Omx + (Omy*Omz))*denom;
-                const double a20 = ( Omy + (Omx*Omz))*denom;
-                const double a21 = (-Omx + (Omy*Omz))*denom;
-                const double a22 = ( 1.0 + (Omz*Omz))*denom;
-                double* slot = alpha_dump_buffer + static_cast<long>(pidx) * n_alpha_doubles;
-                slot[0]  = static_cast<double>(pidx);
-                slot[1]  = x_n; slot[2] = y_n; slot[3] = z_n;
-                slot[4]  = Bxl; slot[5] = Byl; slot[6] = Bzl;
-                slot[7]  = a00; slot[8]  = a01; slot[9]  = a02;
-                slot[10] = a10; slot[11] = a11; slot[12] = a12;
-                slot[13] = a20; slot[14] = a21; slot[15] = a22;
-            }
-
             const pfloat udotOm = u_temp * Omx + v_temp * Omy + w_temp * Omz;
 
             uavg = (u_temp + (v_temp * Omz - w_temp * Omy + udotOm * Omx)) * denom;
@@ -1156,18 +1120,6 @@ void Particles3D::ECSIM_velocity(Field *EMf)
         }
     }
     //! End of #pragma omp parallel
-
-    if (dump_alpha)
-    {
-        std::ostringstream path;
-        path << col->getSaveDirName() << "/alpha_mover_cyc" << col->getCurrentCycle()
-             << "_s" << ns << "_r" << vct->getCartesian_rank() << ".bin";
-        std::ofstream f(path.str(), std::ios::binary);
-        if (!f) eprintf("ECSIM_velocity: cannot open %s", path.str().c_str());
-        f.write(reinterpret_cast<const char*>(alpha_dump_buffer),
-                static_cast<std::streamsize>(alpha_n_pcl * n_alpha_doubles * sizeof(double)));
-        delete[] alpha_dump_buffer;
-    }
 }
 
 //! RelSIM - Relativistic semi-implicit method !//
@@ -1762,14 +1714,6 @@ void Particles3D::computeMoments(Field *EMf)
     const bool kahan_gather   = col->getKahanGather();
     const int det_num_threads = (col->getDeterministicThreadMoments() || kahan_gather) ? 1 : omp_get_max_threads();
 
-    //* mover/gather α-parity audit dump. Allocate per-particle scratch
-    //* when the flag is on; the per-thread loop fills each particle's 16-double
-    //* slot, and master writes the file after the parallel region exits.
-    const bool dump_alpha = col->getDumpAlphaBothPaths();
-    const int n_alpha_doubles = 16;
-    const long alpha_n_pcl = dump_alpha ? static_cast<long>(getNOP()) : 0L;
-    double* alpha_dump_buffer = dump_alpha ? new double[alpha_n_pcl * n_alpha_doubles] : nullptr;
-
     #pragma omp parallel num_threads(det_num_threads)
     {
         convertParticlesToAoS();
@@ -1972,18 +1916,6 @@ void Particles3D::computeMoments(Field *EMf)
             alpha[2][1] = (-Omx + (Omy*Omz))*denom;
             alpha[2][2] = ( 1.0 + (Omz*Omz))*denom;
 
-            //* record the gather's α tensor for the parity audit.
-            if (dump_alpha)
-            {
-                double* slot = alpha_dump_buffer + static_cast<long>(pidx) * n_alpha_doubles;
-                slot[0]  = static_cast<double>(pidx);
-                slot[1]  = x_n; slot[2] = y_n; slot[3] = z_n;
-                slot[4]  = Bxl; slot[5] = Byl; slot[6] = Bzl;
-                slot[7]  = alpha[0][0]; slot[8]  = alpha[0][1]; slot[9]  = alpha[0][2];
-                slot[10] = alpha[1][0]; slot[11] = alpha[1][1]; slot[12] = alpha[1][2];
-                slot[13] = alpha[2][0]; slot[14] = alpha[2][1]; slot[15] = alpha[2][2];
-            }
-
             double qau = q * (alpha[0][0]*(u_n + dt/2.*Fxl) + alpha[0][1]*(v_n + dt/2.*Fyl) + alpha[0][2]*(w_n + dt/2.*Fzl));
             double qav = q * (alpha[1][0]*(u_n + dt/2.*Fxl) + alpha[1][1]*(v_n + dt/2.*Fyl) + alpha[1][2]*(w_n + dt/2.*Fzl));
             double qaw = q * (alpha[2][0]*(u_n + dt/2.*Fxl) + alpha[2][1]*(v_n + dt/2.*Fyl) + alpha[2][2]*(w_n + dt/2.*Fzl));
@@ -2180,24 +2112,6 @@ void Particles3D::computeMoments(Field *EMf)
             time_mm.stop();
             #endif
         }
-    }
-
-    if (dump_alpha)
-    {
-        //* The gather runs at the TOP of a cycle-loop iteration; `CurrentCycle`
-        //* is still at its previous value because `ComputeEMFields` (which
-        //* advances it) hasn't run yet. Label the dump with +1 so gather and
-        //* mover from the same iteration share a cycle number, and the pairing
-        //* alpha_gather_cyc{i} ↔ alpha_mover_cyc{i} is self-consistent.
-        const int label_cycle = col->getCurrentCycle() + 1;
-        std::ostringstream path;
-        path << col->getSaveDirName() << "/alpha_gather_cyc" << label_cycle
-             << "_s" << ns << "_r" << vct->getCartesian_rank() << ".bin";
-        std::ofstream f(path.str(), std::ios::binary);
-        if (!f) eprintf("computeMoments: cannot open %s", path.str().c_str());
-        f.write(reinterpret_cast<const char*>(alpha_dump_buffer),
-                static_cast<std::streamsize>(alpha_n_pcl * n_alpha_doubles * sizeof(double)));
-        delete[] alpha_dump_buffer;
     }
 
     #ifdef __PROFILE_MOMENTS__

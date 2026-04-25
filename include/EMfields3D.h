@@ -178,71 +178,13 @@ public:
     //*                  >=0 -> force this kernel (post-solve Helmholtz reuse).
     void energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir, int kernel_override = -1);
 
-    //* Post-`calculateE` Helmholtz low-pass applied once per cycle to (Ex,Ey,Ez)
-    //* OUTSIDE the implicit operator. Decoupled from S·M·S — does not restructure
-    //* MaxwellImage.
+    //* Once-per-cycle Helmholtz low-pass on Eth, applied OUTSIDE the implicit
+    //* operator (does not restructure MaxwellImage).
     void post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field, arr3_double Ez_field, int nx, int ny, int nz);
 
-    //* Enforce equality of the periodic-duplicate interior nodes (indices n_ghost_
-    //* and nxn-n_ghost_-1 along each periodic axis) on the solved E-field. The
-    //* Maxwell solver treats the two images of the same physical node as
-    //* independent DOFs; communicateNodeBC refreshes ghost faces only, so
-    //* interior duplicates can disagree by O(relative solver tol).
+    //* Enforce equality of the periodic-duplicate interior nodes (n_ghost_ and
+    //* nxn-n_ghost_-1 on each periodic axis) on the solved E-field.
     void unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz);
-
-    //* Diagnostic: print the two grid-side work integrals
-    //*   I_J = dt · <Eth, Jxh>_unique     I_M = dt · <Eth, M·Eth>_unique
-    //* Summation range matches get_E_field_energy so the prints align with
-    //* ConservedQuantities.txt columns; external scripts derive R_part / R_field.
-    void dump_cycle_identity(int cycle);
-
-    //* Diagnostic: at the end of the first moment gather, print Frobenius-norm,
-    //* max-abs, and sum statistics of the 9-component mass matrix. Endpoint for
-    //* a cross-code byte compare against an ECSIM dump. Unique-node interior only.
-    void dump_mass_matrix_stats(int cycle);
-
-    //* raw-binary IEEE-754 double dump of all node fields at a given
-    //* cycle for cross-code (iPIC3D ↔ ECSIM) byte diff. Writes one file per
-    //* array to `{dir}/fields_cycle{N}_{name}.bin` plus a
-    //* `fields_cycle{N}.meta.txt` index. Row-major C order, k (z) fastest.
-    //* Cycle 0 = post-init (pre-solve) snapshot; cycle 1 = post-solve-1.
-    void dump_cycle_fields(int cycle, const std::string& dir);
-
-    //* programmatic self-adjointness probe for MaxwellImage.
-    //* Generates two deterministic pseudo-random Krylov-space vectors u, v,
-    //* applies the matrix-free operator A via MaxwellImage to each, and
-    //* reports <A·u, v> − <u, A·v>. A self-adjoint A makes the gap purely
-    //* FP round-off (~1e-13 relative at DoubleGEM scale). Any systematic
-    //* asymmetry above ~1e-12 rel indicates a structural break in one of the
-    //* six ECSIM-exact energy-identity conditions (#2: operator self-adjoint;
-    //* #6: consistent periodic-DOF handling). Gated by input flag
-    //* VerifyAdjoint; runs once at the chosen cycle (default cycle 1).
-    void probe_adjointness(int cycle);
-
-    //* Lapenta-2023 (Physics, 5, 72) adds one condition to the 2017 proof:
-    //* when smoothing fires (Smooth>0), the smoothing matrix S must be
-    //* symmetric (S_{gg'} = S_{g'g}) for exact energy conservation. The
-    //* probe applies S component-wise via `energy_conserve_smooth_direction`
-    //* to two deterministic pseudo-random Krylov vectors u, v and reports
-    //* <S·u, v> − <u, S·v> in raw, unify, and unique-DOF variants. The raw
-    //* gap measures input-inconsistency + ghost-handling; the unique gap
-    //* measures the matrix symmetry the 2023 paper calls out.
-    void probe_smooth_symmetry(int cycle);
-
-    //* Subspace-preservation probe. Generates a deterministic pseudo-random
-    //* Krylov vector u, projects it onto the consistent-periodic subspace
-    //* (so phys-space duplicates are equal by construction), applies
-    //* MaxwellImage, and reports the maximum |output[duplicate1] - output[duplicate2]|
-    //* across all periodic-self axes. A bit-preserving matvec gives ~ε; large
-    //* drift implicates the FP execution order in the operator itself.
-    void probe_subspace_preservation(int cycle);
-
-    //* per-stage dump inside MaxwellImage. `set_mi_dump_target(cycle)` is
-    //* called from the main loop so MaxwellImage knows when to dump. Dumps happen
-    //* only on the *first* matvec call of the target cycle (so cost is one
-    //* set of binary files per run, not per Krylov iteration).
-    void set_mi_dump_target(int cycle) { mi_dump_target_cycle_ = cycle; mi_matvec_count_ = 0; }
-    void dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3_double aY, arr3_double aZ);
 
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();
@@ -255,12 +197,8 @@ public:
     //! Set all elements of mass matrix to 0.0 !//
     void setZeroMassMatrix();
 
-    //! Kahan-compensated gather (KahanGather=true) helpers.
-    //* `setZeroKahanGatherCompensation` zeroes the companion compensation
-    //* buffers at the start of each gather cycle; `foldKahanGatherCompensation`
-    //* folds the accumulated compensation back into the primary field and
-    //* zeroes it. Called right before `communicateInterp` / `communicateNode_P`
-    //* so the halo exchange ships the ε²-accurate per-rank sum.
+    //! KahanGather=true companions. Zero at gather start; fold back into the
+    //* primaries before halo exchange so the halo ships an ε²-accurate value.
     void setZeroKahanGatherCompensation();
     void foldKahanGatherCompensation();
     /*! Sum rhon and J over species */
@@ -705,12 +643,6 @@ private:
     const Grid& _grid;
     const VirtualTopology3D&_vct;
 
-    //* per-stage MaxwellImage dump bookkeeping.
-    //* mi_dump_target_cycle_ is set from the main loop (currently 1); the first
-    //* call to MaxwellImage during that cycle dumps, later calls don't.
-    int mi_dump_target_cycle_ = -1;
-    int mi_matvec_count_      = 0;
-    
     /*! light speed */
     double c;
     /* 4*PI for normalization */
@@ -780,14 +712,6 @@ private:
 
     //? Implicit electric field (defined at nodes)
     array3_double Exth, Eyth, Ezth;
-    //* stashed MaxwellSource RHS in physical (node) space for the
-    //* cross-code cycle-N byte diff. Populated right after MaxwellSource and
-    //* before GMRES/PETSc so MaxwellImage iterations don't clobber them.
-    array3_double bXn, bYn, bZn;
-    //* direct operator diagnostic — result of applying MaxwellImage
-    //* to (bXn, bYn, bZn). If `b` matches across codes but `A·b` differs, the
-    //* operator is the source of the E_θ divergence.
-    array3_double AbXn, AbYn, AbZn;
 
     //? Magnetic field (defined at nodes)
     array3_double Bxn, Byn, Bzn;

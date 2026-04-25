@@ -181,15 +181,8 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
         }
     }
 
-    // KSP solver setup
-    // Restart=40 was empirically tuned in v2 Phase 9 sweeps:
-    // - dt=0.5 (~142 iters): r=20 optimal, r=40 only ~3% slower
-    // - dt=0.75 (~248 iters): r=50 +14.5%, r=40 +12.2%
-    // - dt=1.0 (~369 iters): r=50 +20.2%, r=40 +17.8%
-    // - 200x200 dt=0.5 (~149 iters): r=40 +5.7%, r=50 +5.9%
-    // - 3D 32^3 dt=0.5 (~125 iters): r=30 +4.9%, r=40 +2.4%
-    // r=40 is the consistent across-corpus winner (empirical sweep result).
-    // Override at runtime via -ksp_gmres_restart N.
+    // KSP solver setup. Restart=40 is the across-corpus empirical winner
+    // (dt 0.5..1.0, 2D + 3D). Override at runtime via -ksp_gmres_restart N.
     PetscCallAbort(PETSC_COMM_WORLD, KSPCreate(PETSC_COMM_WORLD, &ksp_));
     PetscCallAbort(PETSC_COMM_WORLD, KSPSetType(ksp_, KSPGMRES));
     PetscCallAbort(PETSC_COMM_WORLD, KSPGMRESSetRestart(ksp_, 40));

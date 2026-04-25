@@ -62,30 +62,20 @@ int main(int argc, char **argv)
 
         KCode.WriteOutput(KCode.FirstCycle());
 
-        //? Step 32 Phase D: dump post-init fields (pre-solve) for cross-code diff.
-        KCode.DumpCycleFields(0);
-
         for (int i = KCode.FirstCycle() + 1; i <= KCode.LastCycle(); i++)
         {
             if (KCode.get_myrank() == 0)
                 std::cout << std::endl << "=================== Cycle " << i << " ===================" << std::endl ;
-            
+
             //? Moment Gatherer --> Compute charge density, current density, and mass matrix
             time_MG.start();
             KCode.CalculateMoments();
             time_MG.stop();
 
-            //? Step 34c: probe gather/scatter transpose duality at cycle 1
-            //* (after CalculateMoments consumed x_n, before ParticlesMover advances).
-            KCode.ProbeGatherScatterDuality(i);
-
             //? Field Solver --> Compute E & B fields
             time_EF.start();
             KCode.ComputeEMFields(i);
             time_EF.stop();
-
-            //? Step 32: dump Jxh, M, Eth at cycle-1 end for cross-code byte diff.
-            KCode.DumpCycleFields(i);
 
             //? Particle Pusher --> Compute new velocities and positions of the particles
             time_PM.start();

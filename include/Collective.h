@@ -215,22 +215,10 @@ class Collective
     double getHelmholtzAlpha()          const { return HelmholtzAlpha; }
     int    getHelmholtzNiter()          const { return HelmholtzNiter; }
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
-    bool   getVerifyAdjoint()           const { return VerifyAdjoint; }
-    bool   getVerifySmoothSymmetry()    const { return VerifySmoothSymmetry; }
-    bool   getVerifySubspacePreservation() const { return VerifySubspacePreservation; }
-    bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
-    bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
-    bool   getLoadParticlesInit()       const { return LoadParticlesInit; }
-    const string& getParticlesInitDir() const { return ParticlesInitDir; }
-    bool   getDumpCycle1Fields()        const { return DumpCycle1Fields; }
-    bool   getDumpMaxwellImageStages()  const { return DumpMaxwellImageStages; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
-    bool   getDumpAlphaBothPaths()           const { return DumpAlphaBothPaths; }
     bool   getDeterministicParticleComm()    const { return DeterministicParticleComm; }
-    bool   getDumpParticlesGlobal()          const { return DumpParticlesGlobal; }
-    bool   getLoadParticlesGlobal()          const { return LoadParticlesGlobal; }
     bool   getKahanParticleSums()            const { return KahanParticleSums; }
     bool   getKahanGather()                  const { return KahanGather; }
     bool   getKahanFieldEnergy()             const { return KahanFieldEnergy; }
@@ -272,18 +260,11 @@ class Collective
     //* Smoothing parameters
     double Smooth; int num_smoothings; int SmoothCycle;
 
-    //* choice of binomial smoother kernel applied to E/J in energy_conserve_smooth_direction.
-    //*   "binomial"  (default) -> (1,2,1)/4 per-dim tensor product, 27-point 3D, 1-cell half-width.
-    //*   "binomial5"            -> (1,4,6,4,1)/16 per-dim tensor product, 125-point 3D, 2-cell half-width.
-    //*                             Needs n_ghost >= 2 (already the TSC default).
-    //* low-k–aware Helmholtz filter:
-    //*   "helmholtz" -> (I - α ∇²) S_new = S_old, solved per-call by a few CG iterations.
-    //*                  α has units of length²; default 0 -> auto = (max(Lx,Ly,Lz)/(2π))²
-    //*                  which puts the half-power point at the domain fundamental k = 2π/L.
-    //* bin5 decomposed into bin × halo refresh × bin (Finding 26 follow-up).
-    //*   "binomial5_refresh" -> per pass: (1,2,1)/4 → communicateNodeBC → (1,2,1)/4.
-    //*                          Equals binomial sm=2N bit-for-bit if Finding 26 is right
-    //*                          (the missing piece in plain binomial5 is the inter-pass halo refresh).
+    //* binomial smoother kernel for energy_conserve_smooth_direction:
+    //*   "binomial"          (1,2,1)/4 per-dim, 27-point 3D, 1-cell half-width (default).
+    //*   "binomial5"         (1,4,6,4,1)/16 per-dim, 125-point 3D, 2-cell half-width (n_ghost>=2).
+    //*   "helmholtz"         (I - α ∇²) S_new = S_old via inner CG, α auto from L_max.
+    //*   "binomial5_refresh" (1,2,1)/4 → halo → (1,2,1)/4 — equivalent to binomial sm=2N.
     string SmoothKernel;
     int    smoothKernelInt;     // 0 = binomial (3-pt), 1 = binomial5 (5-pt), 2 = helmholtz, 3 = binomial5_refresh
 
@@ -296,162 +277,48 @@ class Collective
     //* S·M·S so the implicit operator structure stays untouched.
     bool   PostSolveHelmholtz;
 
-    //* programmatic self-adjointness probe for MaxwellImage. When true,
-    //* at cycle 1 (after MaxwellSource, before the Krylov solve) computes
-    //* <A·u, v> − <u, A·v> on two deterministic pseudo-random Krylov vectors
-    //* and prints the absolute/relative gap. Off by default.
-    bool   VerifyAdjoint;
-
-    //* Smoothing-operator symmetry probe. When true, at cycle 1 applies S
-    //* (component-wise `energy_conserve_smooth_direction`) to two deterministic
-    //* pseudo-random Krylov vectors u, v and prints <S·u, v> − <u, S·v>.
-    //* Verifies Lapenta-2023 condition that the smoothing matrix is symmetric,
-    //* which is required for exact energy conservation when smoothing fires.
-    //* Off by default.
-    bool   VerifySmoothSymmetry;
-
-    //* Subspace-preservation probe. When true, at cycle 1 applies MaxwellImage
-    //* to a deterministic input that has been pre-projected onto the
-    //* consistent-periodic subspace (duplicate node pairs equal by construction)
-    //* and reports the max |output[duplicate1] - output[duplicate2]| across all
-    //* periodic-self axes. Distinguishes "matvec drifts off subspace at FP-ε"
-    //* from "matvec is bit-exact on subspace, GMRES iterates drift instead".
-    //* Off by default.
-    bool   VerifySubspacePreservation;
-
-
-    //* cycle-1 identity decomposition print. When true, calculateE prints
-    //* I_J = dt · <Eth, Jxh>_unique and I_M = dt · <Eth, M·Eth>_unique so external
-    //* post-processing can compute R_part = ΔKE − (I_J + I_M) and R_field =
-    //* ΔUE + ΔUB + (I_J + I_M). Cheap (~two extra matvec passes) but gated off.
-    bool   DumpCycleIdentity;
-
-    //* enable ECSIM-style combined velocity+position mover with adaptive
-    //* sub-cycling (dt_sub = π·c/(4·|qom|·B)), `NiterMover` inner midpoint iterations,
-    //* midpoint-velocity position update. Port of ecsim/particles/Particles3D.cpp:4209.
-    //* Default false — opt-in to compare with the legacy ECSIM_velocity+ECSIM_position path.
+    //* opt-in ECSIM-style combined velocity+position mover with adaptive
+    //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy
+    //* ECSIM_velocity+ECSIM_position path is the production path.
     bool   SubcycleMover;
 
-    //* particle-state dump / load for cross-code (iPIC3D ↔ ECSIM) byte diff.
-    //* `DumpParticlesInit`: after species init and before cycle 1, write each species'
-    //* particles to `{ParticlesInitDir}/particles_init_s{ns}_r{rank}.txt` — 17-digit
-    //* space-separated `x y z u v w q`, one line per particle, no ordering guarantee.
-    //* `LoadParticlesInit`: after the case's init has run (harmless filler), clear
-    //* `_pcls` and repopulate from the file. Default both off.
-    bool   DumpParticlesInit;
-    bool   LoadParticlesInit;
-    string ParticlesInitDir;
+    //* Bit-determinism opt-ins (default off). All trade some performance for
+    //* run-to-run / cross-decomposition reproducibility; see EpsilonReproducibility
+    //* for a one-flag composite.
 
-    //* after cycle 1 (the earliest point at which Jxh, M, and E_th have
-    //* all been updated from initial state), write raw-binary dumps of all node
-    //* fields into `{SaveDirName}/fields_cycle1_{name}.bin` — one IEEE-754 double
-    //* array per file, row-major C order with k (z) fastest. A companion
-    //* `fields_cycle1.meta.txt` lists names + shapes. Designed so ECSIM can
-    //* emit the same filename+layout convention for a trivial Python byte diff.
-    bool   DumpCycle1Fields;
-
-    //* inside MaxwellImage, at cycle 1, first matvec only, dump tempX/Y/Z,
-    //* imageX/Y/Z, temp2X/Y/Z at six composition stages (post-input-halo, post-curl²
-    //* assembly, pre-M·E, raw M·E, post-outer-smooth×invVOL, final A·E). Used with
-    //* `scripts/diff_maxwell_stages.py` for cross-code operator-interior byte diff.
-    bool   DumpMaxwellImageStages;
-
-    //* force bit-deterministic scalar MPI_SUM allreduce (rank-order gather→
-    //* sum→broadcast) for GMRES dot products / norms and energy diagnostics. Baseline
-    //* MPI_Allreduce trees can reassociate summation depending on process layout, so
-    //* two identical np>1 runs drift by ±1 ULP. Opt-in: adds 2·log(p) extra comms per
-    //* reduction but guarantees cross-run bit-reproducibility. Sets the module-level
-    //* `g_deterministic_mpi_reductions` flag in `utility/Basic.cpp` during init.
+    //* rank-order gather+sum+broadcast for scalar MPI_SUM reductions (GMRES dot
+    //* products, energy diagnostics). Plain MPI_Allreduce trees reassociate by
+    //* process layout and drift by ±1 ULP cross-run.
     bool   DeterministicMPIReductions;
 
-    //* serialize `computeMoments`' OpenMP parallel region (num_threads=1).
-    //* The ECSIM gather writes to shared grid nodes via `#pragma omp atomic update`;
-    //* atomics protect against races but the landing order of thread writes still
-    //* varies run to run, which drifts the result by ±1 ULP at the same node. Opt-in
-    //* flag that gives cross-OMP-thread-count bit-reproducibility at the cost of
-    //* losing OpenMP parallelism inside the gather. MPI parallelism is unaffected.
+    //* serialize `computeMoments`' OpenMP region (num_threads=1). Atomics protect
+    //* against races but the landing order of thread writes drifts by ±1 ULP per
+    //* node. Trades OMP gather speedup for cross-thread-count reproducibility.
     bool   DeterministicThreadMoments;
 
-    //* mover-gather α-parity audit. When true, both `computeMoments`
-    //* (gather) and `ECSIM_velocity` (mover) emit per-particle α tensors to
-    //* binary files `{SaveDirName}/alpha_{gather|mover}_cyc{N}_s{s}_r{r}.bin`.
-    //* Layout per particle: 16 doubles — [pidx_as_double, x, y, z, Bx, By, Bz,
-    //* α00..α22 (row-major)]. Post-process with `scripts/diff_alpha_paths.py`
-    //* to confirm ECSIM condition #4 (mover-α ≡ gather-α).
-    bool   DumpAlphaBothPaths;
-
-    //* process incoming particle blocks in fixed direction order
-    //* [XDN, XUP, YDN, YUP, ZDN, ZUP] instead of the OS-scheduled completion
-    //* order returned by `MPI_Waitany`. Each direction is drained fully
-    //* (via `MPI_Wait` on the streaming block communicator) before moving
-    //* to the next. Removes the last source of run-to-run non-determinism
-    //* in the particle pipeline at np>1: with `MPI_Waitany` the order that
-    //* particles are appended to `_pcls` varies per run, so subsequent serial
-    //* sums (kinetic energy, gather) walk the list in a different FP order
-    //* and drift by ±1 ULP even with `DeterministicMPIReductions` on.
-    //* Opt-in (default false) because switching to per-direction sequential
-    //* drain is a behavioural change even when the outputs are mathematically
-    //* equivalent. Combine with `DeterministicMPIReductions=1` and
-    //* `DeterministicThreadMoments=1` for full same-config bit reproducibility
-    //* at np>1.
+    //* drain incoming particle blocks in fixed direction order [XDN..ZUP] with
+    //* per-direction `MPI_Wait` instead of OS-scheduled `MPI_Waitany` completion.
+    //* Removes the last cross-run non-determinism at np>1.
     bool   DeterministicParticleComm;
 
-    //* global-to-local particle dump/load so an np=1 reference state
-    //* can be consumed by an np>1 run (and vice versa). Unlike
-    //* DumpParticlesInit/LoadParticlesInit — which write one file per
-    //* (species, rank) and therefore round-trip only at matched decomposition
-    //* — the "global" variants aggregate to rank 0 via `MPI_Gatherv` and emit
-    //* one file per species. On load, every rank reads the full file and
-    //* keeps only particles whose position falls in its local subdomain
-    //* (`Grid3DCU::get{X,Y,Z}{start,end}`), so the decomposition can change.
-    //* Opt-in. Cost is only the extra communication/disk during Init.
-    bool   DumpParticlesGlobal;
-    bool   LoadParticlesGlobal;
-
-    //* Kahan-compensated accumulation inside the serial per-particle
-    //* sums in `Particles3Dcomm::get_kinetic_energy`, `get_total_charge`,
-    //* `get_momentum`. Plain accumulation is FP-non-associative, so the
-    //* single-accumulator result at np=1 drifts from the per-rank-partial
-    //* result at np>1 by ~1 ULP per cycle even with matched particles and
-    //* `DeterministicMPIReductions`. Kahan reduces the per-addition error to
-    //* O(ε²) which is below IEEE 754's resolution, so per-rank partial sums
-    //* match the np=1 single accumulator to bit identity. Opt-in.
+    //* Neumaier-compensated per-particle sums in `get_kinetic_energy`,
+    //* `get_total_charge`, `get_momentum`. ε²-accurate regardless of particle order.
     bool   KahanParticleSums;
 
-    //* Kahan-compensated accumulation inside the particle→grid
-    //* gather (`Particles3D::computeMoments`). The default path accumulates
-    //* ρ, Jxh, Jyh, Jzh, and the 9-component mass matrix via `#pragma omp
-    //* atomic update`, so threads race on the same node and the landing
-    //* order is schedule-dependent. Under `KahanGather=true`, a companion
-    //* compensation array is allocated for each deposited field and the
-    //* accumulators do Neumaier-compensated adds (atomics replaced by
-    //* sequential single-thread sums — the flag forces `num_threads=1` in
-    //* the gather region). Before halo exchange, compensation is folded
-    //* back into the main field and zeroed. Result: each rank's local sum
-    //* is ε²-accurate regardless of particle ordering, and combined with
-    //* `DeterministicParticleComm` the per-cycle np=1 vs np=4 drift of ~3e-9
-    //* collapses toward the halo-exchange floor. Memory cost: one extra
-    //* companion array per accumulated field (4 × ns + 9 × ne_mass_ node
-    //* arrays). Opt-in.
+    //* Neumaier-compensated particle→grid gather. Allocates a companion array per
+    //* deposited field and folds compensation back before halo exchange. Forces
+    //* num_threads=1 inside the gather (atomics replaced by sequential adds).
     bool   KahanGather;
 
-    //* Kahan-compensated grid field-energy reductions
-    //* (`get_E_field_energy`, `get_B_field_energy` and their per-axis
-    //* variants). Serial grid sums followed by `MPI_Allreduce`; at
-    //* different decompositions the per-rank partial walks different
-    //* nodes in different orders, drifting by O(ε) per node. Kahan brings
-    //* per-rank sums to ε², so `DeterministicMPIReductions` can combine
-    //* them cross-rank without adding noise. Opt-in, default off, zero
-    //* runtime cost when off (hoisted const branch).
+    //* Neumaier-compensated grid field-energy reductions (E/B and per-axis).
+    //* Brings per-rank partials to ε² so `DeterministicMPIReductions` can combine
+    //* cross-rank without adding noise.
     bool   KahanFieldEnergy;
 
-    //* Kahan-aware halo exchange. The sum-on-receive in `communicateInterp`
-    //* (addFace/addEdge*/addCorner) plainly accumulates neighbour ghost values
-    //* into this rank's interior boundary — the last cross-decomposition FP
-    //* drift source after the Kahan-gather. Under `KahanHalo=true`,
-    //* `NBDerivedHaloComm` takes an optional companion pointer and dispatches
-    //* the 5 sum-on-receive sites to `*_kahan` variants; subsequent fold merges
-    //* halo-add residuals into the primary. Off-path is byte-identical to legacy.
+    //* Neumaier-aware halo exchange. `NBDerivedHaloComm` takes an optional
+    //* companion pointer and dispatches sum-on-receive to `*_kahan` variants; a
+    //* second fold merges halo-add residuals into the primary. Off-path is
+    //* byte-identical to legacy.
     bool   KahanHalo;
 
     int CurrentCycle;

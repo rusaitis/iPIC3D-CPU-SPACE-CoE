@@ -328,39 +328,6 @@ int c_Solver::Init(int argc, char **argv)
             particles[i].fixPosition();
         }
 
-        //* replace the freshly-initialised particle list with a dump from
-        //* a prior run (or ECSIM). Applied after the case-specific init so the
-        //* allocation sizing / topology setup is already correct; we just swap
-        //* the per-particle state.
-        if (col->getLoadParticlesInit())
-        {
-            for (int i = 0; i < ns; i++)
-                particles[i].load_particles_init(col->getParticlesInitDir());
-        }
-
-        //* Dump post-init particle state (canonical CSV) for cross-code byte diff.
-        //* Runs once at startup; free when off.
-        if (col->getDumpParticlesInit())
-        {
-            for (int i = 0; i < ns; i++)
-                particles[i].dump_particles_init(col->getSaveDirName());
-        }
-
-        //* global-to-local particle dump/load. Mirrors the per-rank dump hooks
-        //* but uses a single aggregated file per species, filtered by local
-        //* subdomain on load, so a reference state generated at one (np, MPI
-        //* layout) can seed a different one. Load runs before dump so a round
-        //* trip at the same np is a no-op rather than a crash.
-        if (col->getLoadParticlesGlobal())
-        {
-            for (int i = 0; i < ns; i++)
-                particles[i].load_particles_global(col->getParticlesInitDir());
-        }
-        if (col->getDumpParticlesGlobal())
-        {
-            for (int i = 0; i < ns; i++)
-                particles[i].dump_particles_global(col->getSaveDirName());
-        }
     }
 
     //* Allocate test particles (if any)
@@ -544,10 +511,8 @@ void c_Solver::CalculateMoments()
     time_com.start();
     #endif
 
-    //* fold the Kahan-gather compensation into the primaries once
-    //* all species have finished depositing and before any halo exchange
-    //* runs, so `communicateInterp` / `communicateNode_P` ship a single
-    //* ε²-accurate value per node rather than a (sum, comp) pair.
+    //* Fold Kahan-gather compensation before halo exchange so the halo ships
+    //* one ε²-accurate value per node, not a (sum, comp) pair.
     if (col->getKahanGather())
         EMf->foldKahanGatherCompensation();
 
@@ -557,10 +522,8 @@ void c_Solver::CalculateMoments()
 
     EMf->communicateGhostP2G_mass_matrix();
 
-    //* second fold — the Kahan-halo sum-on-receive lands residuals
-    //* in the companion arrays. Merge them back into the primaries now so the
-    //* field solve reads a single ε²-accurate value per node. No-op when
-    //* `KahanGather` is off (companions always zero in that case).
+    //* Second fold merges the Kahan-halo sum-on-receive residuals back into
+    //* the primaries. No-op when KahanGather is off.
     if (col->getKahanHalo())
         EMf->foldKahanGatherCompensation();
 
@@ -604,11 +567,6 @@ void c_Solver::CalculateMoments()
 void c_Solver::ComputeEMFields(int cycle)
 {
     col->setCurrentCycle(cycle);
-
-    //* arm per-stage MaxwellImage dumps on cycle 1's first matvec.
-    //* Cheap no-op when DumpMaxwellImageStages flag is off.
-    if (cycle == 1 && col->getDumpMaxwellImageStages())
-        EMf->set_mi_dump_target(1);
 
     #ifdef __PROFILING__
     LeXInt::timer time_e, time_b, time_div, time_total;
@@ -676,170 +634,6 @@ void c_Solver::ComputeEMFields(int cycle)
         cout << "FieldSolver()              : " << time_total.total() << " s" << endl << endl;
     }
     #endif
-}
-
-//* cycle-N field dump hook. Called from the main loop and just after
-//* Init(). At cycle 0 captures pure init state (pre-solve); at cycle 1 captures
-//* Jxh/M from the first gather + Eth from the first solve. Opt-in via
-//* DumpCycle1Fields flag (kept name for backward compat).
-void c_Solver::DumpCycleFields(int cycle)
-{
-    if (!col->getDumpCycle1Fields()) return;
-    if (cycle != 0 && cycle != 1) return;
-    EMf->dump_cycle_fields(cycle, col->getSaveDirName());
-}
-
-//* programmatic gather/scatter transpose-duality probe.
-//*
-//* Tests condition #3 of the six ECSIM-exact energy-identity conditions:
-//*   <gather(f), q>_particle = <f, scatter(q)>_grid
-//*
-//* Builds a decomposition-independent random scalar field f on the grid and a
-//* deterministic per-particle weight q_p, then loops over all species and all
-//* particles using iPIC3D's exact weight kernel (`get_safe_cell_and_weights`).
-//* Each particle contributes q_p · gather(f, x_p) to L (gather side) and adds
-//* w_c · q_p at its 8 neighbouring nodes to Q (scatter side). At the end it
-//* computes R = <f, Q> over the full grid (interior + halos, so the gather
-//* footprint matches the scatter footprint exactly).
-//*
-//* With byte-identical gather and scatter weights, L and R are algebraically
-//* equal. Any FP-scale gap (beyond ULP × O(N_particles)) indicates a subtle
-//* break — OpenMP accumulation order, atomic collision, or a weight-kernel
-//* divergence we haven't noticed.
-void c_Solver::ProbeGatherScatterDuality(int cycle)
-{
-    if (!col->getVerifyAdjoint() || cycle != 1) return;
-
-    const int nxn = grid->getNXN();
-    const int nyn = grid->getNYN();
-    const int nzn = grid->getNZN();
-    const int n_ghost = grid->getNGhost();
-    const int kx_int = nxn - 2*n_ghost;
-    const int ky_int = nyn - 2*n_ghost;
-    const int kz_int = nzn - 2*n_ghost;
-
-    const int coord_x = vct->getCoordinates(0);
-    const int coord_y = vct->getCoordinates(1);
-    const int coord_z = vct->getCoordinates(2);
-    const int gy_int  = ky_int * vct->getYLEN();
-    const int gz_int  = kz_int * vct->getZLEN();
-
-    auto hash01 = [](uint64_t idx, uint64_t seed) -> double {
-        uint64_t h = idx * 2654435761u + seed;
-        h = h * 6364136223846793005ULL + 1442695040888963407ULL;
-        return (static_cast<double>((h >> 11) & ((1ULL<<53)-1)) / static_cast<double>(1ULL<<53)) * 2.0 - 1.0;
-    };
-
-    //* Scalar random field f on the full local grid (interior + halos).
-    //* Interior entries are filled from the *global* deterministic sequence so
-    //* the same f is obtained for any MPI decomposition. Halo entries are left
-    //* zero — they are NOT touched by either path in this probe (gather reads
-    //* interior-indexed neighbors and scatter writes to interior indices
-    //* because get_safe_cell_and_weights returns cx ∈ [0, nxn-1) after clamp).
-    //* That said, particles near the periodic boundary may generate cx such
-    //* that cx or cx+1 lands in the halo layer; include halos in R to match.
-    std::vector<double> f(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-    auto lin = [nyn, nzn](int i, int j, int k) {
-        return (static_cast<size_t>(i)*nyn + j)*nzn + k;
-    };
-    for (int i = n_ghost; i < nxn - n_ghost; ++i) {
-        const int gi = coord_x * kx_int + (i - n_ghost);
-        for (int j = n_ghost; j < nyn - n_ghost; ++j) {
-            const int gj = coord_y * ky_int + (j - n_ghost);
-            for (int k = n_ghost; k < nzn - n_ghost; ++k) {
-                const int gk = coord_z * kz_int + (k - n_ghost);
-                const uint64_t idx = (static_cast<uint64_t>(gi)*gy_int + gj)*gz_int + gk;
-                f[lin(i, j, k)] = hash01(idx, 0xD157A4C10FFEEULL);
-            }
-        }
-    }
-
-    std::vector<double> Q(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-    double L_local = 0.0;
-
-    for (int is = 0; is < ns; ++is) {
-        Particles3D* p = &particles[is];
-        const int nop = p->getNOP();
-        for (int pidx = 0; pidx < nop; ++pidx) {
-            const double x = p->getX(pidx);
-            const double y = p->getY(pidx);
-            const double z = p->getZ(pidx);
-
-            int cx, cy, cz;
-            double w[8];
-            grid->get_safe_cell_and_weights(x, y, z, cx, cy, cz, w);
-
-            //* Deterministic per-particle probe weight. Seed combines species
-            //* index and particle index. Matches neither ρ, J, nor M — it is
-            //* a fresh random coefficient so L and R test the weight kernel
-            //* directly, not a trivially-zero product.
-            const uint64_t pseed = (static_cast<uint64_t>(is) << 48)
-                                 ^ static_cast<uint64_t>(pidx);
-            const double q_probe = hash01(pseed, 0xBADA55CAFEULL);
-
-            //* Gather: 8-node mapping matches get_field_components_for_cell
-            //*   c=0..7 → (cx+1 or cx, cy+1 or cy, cz+1 or cz) permutation
-            const int ix = cx + 1;
-            const int iy = cy + 1;
-            const int iz = cz + 1;
-            double gathered = 0.0;
-            gathered += w[0] * f[lin(ix, iy, iz)];
-            gathered += w[1] * f[lin(ix, iy, cz)];
-            gathered += w[2] * f[lin(ix, cy, iz)];
-            gathered += w[3] * f[lin(ix, cy, cz)];
-            gathered += w[4] * f[lin(cx, iy, iz)];
-            gathered += w[5] * f[lin(cx, iy, cz)];
-            gathered += w[6] * f[lin(cx, cy, iz)];
-            gathered += w[7] * f[lin(cx, cy, cz)];
-            L_local += q_probe * gathered;
-
-            //* Scatter: node mapping matches add_Rho / add_Jxh (X=ix, Y=iy, Z=iz,
-            //* index = i*4 + j*2 + k → Q[X-i][Y-j][Z-k]). No atomics needed —
-            //* probe runs single-threaded inside a single pass.
-            Q[lin(ix, iy, iz)] += w[0] * q_probe;
-            Q[lin(ix, iy, cz)] += w[1] * q_probe;
-            Q[lin(ix, cy, iz)] += w[2] * q_probe;
-            Q[lin(ix, cy, cz)] += w[3] * q_probe;
-            Q[lin(cx, iy, iz)] += w[4] * q_probe;
-            Q[lin(cx, iy, cz)] += w[5] * q_probe;
-            Q[lin(cx, cy, iz)] += w[6] * q_probe;
-            Q[lin(cx, cy, cz)] += w[7] * q_probe;
-        }
-    }
-
-    //* R = Σ_n f[n] · Q[n] over the entire local grid (halos zero in f so they
-    //* don't contribute even if Q deposited into them). Matches L exactly
-    //* under bit-identical gather/scatter weights.
-    double R_local = 0.0;
-    for (size_t n = 0; n < f.size(); ++n)
-        R_local += f[n] * Q[n];
-
-    double L = 0.0, R = 0.0;
-    MPI_Comm fieldcomm = vct->getFieldComm();
-    allreduce_sum(&L_local, &L, 1, fieldcomm);
-    allreduce_sum(&R_local, &R, 1, fieldcomm);
-
-    const double gap_abs = L - R;
-    const double scale   = 0.5 * (std::abs(L) + std::abs(R));
-    const double gap_rel = (scale > 0.0) ? std::abs(gap_abs) / scale : 0.0;
-
-    long long nop_total_local = 0;
-    for (int is = 0; is < ns; ++is) nop_total_local += particles[is].getNOP();
-    long long nop_total = 0;
-    MPI_Allreduce(&nop_total_local, &nop_total, 1, MPI_LONG_LONG, MPI_SUM, fieldcomm);
-
-    if (vct->getCartesian_rank() == 0) {
-        std::cout.setf(std::ios::scientific);
-        std::cout.precision(15);
-        std::cout << "[duality-probe cycle=" << cycle << "]"
-                  << " N_pcl=" << nop_total
-                  << " <q*G[f]>=" << L
-                  << " <f,S[q]>=" << R
-                  << " gap_abs=" << gap_abs
-                  << " gap_rel=" << gap_rel
-                  << std::endl;
-        std::cout.unsetf(std::ios::scientific);
-    }
 }
 
 //! Compute positions and velocities of particles

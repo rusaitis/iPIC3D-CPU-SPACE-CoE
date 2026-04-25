@@ -143,20 +143,6 @@ public:
         _pcls.push_back(SpeciesParticle(u,v,w,q,x,y,z,t));
     }
 
-    //* dump / load particle state for cross-code byte-diff. Canonical
-    //* file format: one line per particle with 17-digit `x y z u v w q`, in
-    //* insertion order. Writes `{dir}/particles_init_s{ns}_r{rank}.txt`.
-    void dump_particles_init(const std::string& dir) const;
-    void load_particles_init(const std::string& dir);
-
-    //* cross-decomposition particle dump/load. Aggregates all ranks
-    //* via MPI_Gatherv to rank 0 on dump; each rank reads the single file and
-    //* keeps only particles whose (x, y, z) fall inside its local subdomain
-    //* on load. Round-trips across any np change at fixed global particle
-    //* count.
-    void dump_particles_global(const std::string& dir) const;
-    void load_particles_global(const std::string& dir);
-
     //* Add particle to the list
     void add_new_particle(double u, double v, double w, double q,
                           double x, double y, double z, double t)

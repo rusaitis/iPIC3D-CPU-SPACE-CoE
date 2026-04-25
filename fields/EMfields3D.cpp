@@ -42,13 +42,8 @@
 #include "PETSC.h"
 #endif
 #include "asserts.h"
-#include <iomanip>
-#include <vector>
-#include <sstream>
 #include <iostream>
-#include <fstream>
 #include "../LeXInt_Timer.hpp"
-#include <filesystem>
 #include <cstring>
 
 #ifndef NO_HDF5
@@ -117,14 +112,6 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Exth    (nxn, nyn, nzn),
     Eyth    (nxn, nyn, nzn),
     Ezth    (nxn, nyn, nzn),
-    //* MaxwellSource RHS cache in node space (cross-code byte diff).
-    bXn     (nxn, nyn, nzn),
-    bYn     (nxn, nyn, nzn),
-    bZn     (nxn, nyn, nzn),
-    //* A·b diagnostic cache.
-    AbXn    (nxn, nyn, nzn),
-    AbYn    (nxn, nyn, nzn),
-    AbZn    (nxn, nyn, nzn),
 
     Bxn     (nxn, nyn, nzn),
     Byn     (nxn, nyn, nzn),
@@ -2307,15 +2294,10 @@ void EMfields3D::sumMoments_vectorized_AoS(const Particles3Dcomm* part)
 //* not break energy conservation in the bulk, but enough to keep us in bounds.
 void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz, const_arr3_double vectX, const_arr3_double vectY, const_arr3_double vectZ, int i, int j, int k)
 {
-    //* Phase 8c: Kahan (compensated) summation on resX/resY/resZ. For the TSC
-    //* stencil (63 groups × forward+backward ≈ 125 partner adds × 3-term dot
-    //* product ≈ 375 multiply-adds per component per node) the O(N·ε) rounding
-    //* from plain summation dominates cycle-1 energy drift in the unsmoothed
-    //* operator. Kahan drops the TSC no-smooth floor from 6.67e-06 → 3.58e-07
-    //* (18×) and improves the production smoothed case dE(10) from 1.99e-04 →
-    //* 7.76e-05 (~2.5×). CIC is unaffected (14 groups). iPIC3D builds with -O2
-    //* (no -ffast-math/-Ofast), so IEEE-754 semantics are preserved and the
-    //* (t - sum) - y compensator is not optimized away.
+    //* Kahan summation on resX/resY/resZ. The TSC stencil (~375 multiply-adds
+    //* per component per node) lets plain summation's O(N·ε) rounding dominate
+    //* cycle-1 drift; Kahan drops the no-smooth floor ~18× on TSC and ~2.5× in
+    //* the production smoothed case. CIC (14 groups) is essentially unaffected.
     double resX = 0.0, cX = 0.0;
     double resY = 0.0, cY = 0.0;
     double resZ = 0.0, cZ = 0.0;
@@ -2425,16 +2407,12 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     const VirtualTopology3D *vct = &get_vct();
     int rank = vct->getCartesian_rank();
 
-    //* Phase B: route the per-species moment halo through the modern 3D path
-    //  via slice views. The legacy 4D ComParser3D helpers
-    //  (communicateInterp_old / communicateNode_P_old) are hard-coded to
-    //  n_ghost == 1 and produce wrong results when n_ghost > 1; the modern
-    //  NBDerivedHaloComm path goes through NBDerivedHaloCommN for n_ghost > 1.
+    //* Per-species moment halo via the modern 3D path (NBDerivedHaloCommN
+    //* handles n_ghost > 1; the legacy 4D ComParser3D helpers hard-code n_ghost==1
+    //* and silently corrupt the result otherwise).
     //
-    //  The Jxh / Jyh / Jzh aggregates are still 0 here (sumOverSpecies is
-    //  called later), so the calls on them are no-ops. Keeping them for
-    //  parity with the legacy structure — they will become meaningful once
-    //  this routine is restructured to sum first.
+    //  Jxh/Jyh/Jzh aggregates are still 0 here (sumOverSpecies runs later), so
+    //  these calls are no-ops; kept for parity with the legacy structure.
     double ***moment_rhons = convert_to_arr3(rhons[is]);
     double ***moment_Jxhs  = convert_to_arr3(Jxhs[is]);
     double ***moment_Jyhs  = convert_to_arr3(Jyhs[is]);
@@ -2481,12 +2459,10 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
 {
     const VirtualTopology3D * vct = &get_vct();
 
-    //* Phase D: route the per-stencil-group mass-matrix halo through the modern
-    //  3D path via slice views, mirroring communicateGhostP2G_ecsim above. The
-    //  legacy 4D ComParser3D helpers (communicateInterp_old / communicateNode_P_old)
-    //  are hard-coded to n_ghost == 1 and silently corrupt Mxx..Mzz at MPI faces
-    //  when n_ghost > 1; the modern NBDerivedHaloComm path goes through
-    //  NBDerivedHaloCommN for n_ghost > 1.
+    //* Per-stencil-group mass-matrix halo via the modern 3D path (mirrors
+    //* communicateGhostP2G_ecsim). NBDerivedHaloCommN handles n_ghost > 1;
+    //* the legacy 4D ComParser3D path hard-codes n_ghost==1 and corrupts M
+    //* at MPI faces otherwise.
     //
     //  Each Mxx[m] is a contiguous (nxn x nyn x nzn) slab of the underlying
     //  array4_double, so convert_to_arr3 yields a valid 3D view per stencil
@@ -2851,28 +2827,11 @@ void EMfields3D::calculateE()
     time_ms.start();
     #endif
 
-    //* Prepare the source (bXn/bYn/bZn are snapshotted inside MaxwellSource
-    //* so both PETSc and built-in GMRES paths capture the RHS consistently)
     MaxwellSource(bkrylov);
 
     #ifdef __PROFILE_FIELDS__
     time_ms.stop();
     #endif
-
-    //* Cycle-1 self-adjointness probe (post-MaxwellSource, pre-Krylov).
-    if (col->getVerifyAdjoint() && col->getCurrentCycle() == 1) {
-        probe_adjointness(col->getCurrentCycle());
-    }
-
-    //* Lapenta-2023 S-symmetry probe at cycle 1.
-    if (col->getVerifySmoothSymmetry() && col->getCurrentCycle() == 1) {
-        probe_smooth_symmetry(col->getCurrentCycle());
-    }
-
-    //* Subspace-preservation probe at cycle 1.
-    if (col->getVerifySubspacePreservation() && col->getCurrentCycle() == 1) {
-        probe_subspace_preservation(col->getCurrentCycle());
-    }
 
     //* Periodic-self axes use the subspace-projecting pack/unpack so GMRES
     //* iterates stay strictly in the consistent-periodic subspace.
@@ -2927,20 +2886,10 @@ void EMfields3D::calculateE()
     time_com.stop();
     #endif
 
-    //* Once-per-cycle Helmholtz low-pass on Eth, applied BEFORE Ex/Ey/Ez are
-    //* derived. Decoupled from MaxwellImage's S·M·S to keep the implicit
-    //* operator structure unchanged.
+    //* Once-per-cycle Helmholtz low-pass on Eth (post-solve, outside the
+    //* implicit S·M·S operator).
     if (col->getPostSolveHelmholtz())
         post_solve_filter_E(Exth, Eyth, Ezth, nxn, nyn, nzn);
-
-    //* Identity decomposition print once Exth is finalized.
-    if (col->getDumpCycleIdentity())
-    {
-        dump_cycle_identity(col->getCurrentCycle());
-        //* Mass-matrix stats — cycle 1 only (M stable within a cycle).
-        if (col->getCurrentCycle() == 1)
-            dump_mass_matrix_stats(col->getCurrentCycle());
-    }
 
     //* E(x,y,z) = -(1.0 - th)/th * E(x,y,z) + 1.0/th * Eth(x,y,z): scale the electric field values
     addscale(1.0/th, -(1.0 - th)/th, Ex, Exth, nxn, nyn, nzn);
@@ -3065,23 +3014,6 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 
     //* Physical space --> Krylov space
     phys2solver(bkrylov, tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
-
-    //* Snapshot RHS in node space (cross-code byte diff). Captures bXn/bYn/bZn
-    //* before any downstream MaxwellImage iteration.
-    eqValue(0.0, bXn, nxn, nyn, nzn);
-    eqValue(0.0, bYn, nxn, nyn, nzn);
-    eqValue(0.0, bZn, nxn, nyn, nzn);
-    solver2phys(bXn, bYn, bZn, bkrylov, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
-
-    //* A·b = MaxwellImage applied to RHS, stashed in node space — isolates the
-    //* operator from the solver path for cross-code diff.
-    const int krylov_size_diag = 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_);
-    std::vector<double> Ab_krylov(krylov_size_diag, 0.0);
-    MaxwellImage(Ab_krylov.data(), bkrylov);
-    eqValue(0.0, AbXn, nxn, nyn, nzn);
-    eqValue(0.0, AbYn, nxn, nyn, nzn);
-    eqValue(0.0, AbZn, nxn, nyn, nzn);
-    solver2phys(AbXn, AbYn, AbZn, Ab_krylov.data(), nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 }
 
 //? RHS of the Maxwell solver
@@ -3124,36 +3056,6 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 // ghost nodes before returning to the Krylov solver. With the definitions above, phys2solver() would simply zero
 // the ghost nodes and solver2phys() would populate them via communication. Note that it would also be possible, if
 // desired, to give duplicated nodes equal weight by rescaling their values in these two methods.
-//* Binary dump of an intermediate MaxwellImage stage. Writes
-//* `{SaveDirName}/maxwell_stage_c{cycle}_m{matvec}_{stage}_{x|y|z}.bin`,
-//* full nxn×nyn×nzn node array, row-major C order, k fastest.
-void EMfields3D::dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3_double aY, arr3_double aZ)
-{
-    const Collective *col = &get_col();
-    const int rank = (&get_vct())->getCartesian_rank();
-
-    auto write_arr3 = [&](const char* comp, arr3_double a)
-    {
-        std::ostringstream p;
-        p << col->getSaveDirName() << "/maxwell_stage_c" << mi_dump_target_cycle_
-          << "_m" << mi_matvec_count_ << "_" << stage_name << "_" << comp
-          << "_r" << rank << ".bin";
-        std::ofstream f(p.str(), std::ios::binary);
-        if (!f) eprintf("dump_maxwell_stage: cannot open %s", p.str().c_str());
-        for (int i = 0; i < nxn; i++)
-            for (int j = 0; j < nyn; j++)
-                for (int k = 0; k < nzn; k++)
-                {
-                    const double v = a[i][j][k];
-                    f.write(reinterpret_cast<const char*>(&v), sizeof(double));
-                }
-    };
-
-    write_arr3("x", aX);
-    write_arr3("y", aY);
-    write_arr3("z", aZ);
-}
-
 void EMfields3D::MaxwellImage(double *im, double* vector)
 {
     //* double *im      : Output
@@ -3162,13 +3064,6 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     const Collective *col = &get_col();
     const VirtualTopology3D *vct = &get_vct();
     const Grid *grid = &get_grid();
-
-    //* Dump 5 composition stages on the first matvec of the target cycle for
-    //* cross-code byte diff. Stages: input halo, curl² assembly, raw M·E,
-    //* outer smooth+invVOL, final sum.
-    const bool mi_dump = col->getDumpMaxwellImageStages()
-                      && (col->getCurrentCycle() == mi_dump_target_cycle_)
-                      && (mi_matvec_count_ == 0);
 
     eqValue(0.0, im, 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_));
 
@@ -3186,10 +3081,6 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     communicateNodeBC(nxn, nyn, nzn, tempX, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
-
-    //* Stage A — post input halo refresh. Equals S·E under the "halo refresh
-    //* = smoothing at Smooth=0" reading.
-    if (mi_dump) dump_maxwell_stage("A_post_halo_in", tempX, tempY, tempZ);
 
     //? curl²(E) assembly. Two paths selected by MaxwellOperator:
     //*   "curl_curl"   — legacy composition curlC2N(curlN2C(E)).
@@ -3236,16 +3127,8 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageZ[i][j][k] = tempZ[i][j][k] + factor * imageZ[i][j][k];
             }
 
-    //* Stage B — post (I + (cθΔt)²·curl²)·E assembly, before M·E block.
-    //* curl² alone conserves exactly; gap here points at the stencil
-    //* implementation (lap_graddiv vs curl_curl) or the (I + ...) order.
-    if (mi_dump) dump_maxwell_stage("B_post_curl2", imageX, imageY, imageZ);
-
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(tempX, tempY, tempZ, nxn, nyn, nzn);
-
-    //* Stage B2 — tempX after the inner smoothing that precedes M·E.
-    if (mi_dump) dump_maxwell_stage("B2_pre_ME_temp", tempX, tempY, tempZ);
 
     //* mass_matrix_times_vector handles bounds internally for the wider TSC stencil
     //* (mass-matrix product cube reaches +/- stencil_order_ nodes), so we keep the
@@ -3264,9 +3147,6 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Z[i][j][k] = dt*th*FourPI*MEz;
             }
 
-    //* Stage C — raw M·E output × (dt·θ·4π), pre outer halo and smoothing.
-    if (mi_dump) dump_maxwell_stage("C_raw_ME", temp2X, temp2Y, temp2Z);
-
     //* Energy-conserving smoothing of M·E before the invVOL scaling. The directional
     //* smoother refreshes the halo on entry, so no extra `communicateNodeBC` is
     //* needed here — when `Smooth=0` this is a no-op.
@@ -3281,10 +3161,6 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Z[i][j][k] *= invVOL;
             }
 
-    //* Stage D — S·M·S·E, post outer halo + smooth + invVOL. Added to
-    //* (I + (cθΔt)²·curl²)·E in the next loop.
-    if (mi_dump) dump_maxwell_stage("D_SMS_invVOL", temp2X, temp2Y, temp2Z);
-
     for (int i = n_ghost_; i < nxn - n_ghost_; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_; j++)
             for (int k = n_ghost_; k < nzn - n_ghost_; k++)
@@ -3294,17 +3170,9 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageZ[i][j][k] = temp2Z[i][j][k] + imageZ[i][j][k];
             }
 
-    //* Stage E — full A·E assembled.
-    if (mi_dump) dump_maxwell_stage("E_full_Ae", imageX, imageY, imageZ);
-
     //? Move from physical space to Krylov space (averages LO+HI duplicate
     //? Krylov entries into LO and zeros HI on each periodic-self axis).
     phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
-
-    //* Per-stage-dump bookkeeping.
-    if (col->getDumpMaxwellImageStages()
-        && col->getCurrentCycle() == mi_dump_target_cycle_)
-        mi_matvec_count_++;
 }
 
 //? Update the values of magnetic field at the nodes at time n+1
@@ -3403,11 +3271,7 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
     //? Initialise temporary arrays with zeros
     double ***temp = newArr3(double, nx, ny, nz);
 
-    //* Phase D: switched to modern n_ghost-aware halo. The legacy "old" comment
-    //  ("Using new communication routines results in energy growth") was from
-    //  the era when NBDerivedHaloComm had its own n_ghost=1 bugs (commit c6000ce
-    //  era); after Phase A.3b's NBDerivedHaloComm[N] fixes the modern path is
-    //  the only one that's correct for n_ghost > 1.
+    //* Modern n_ghost-aware halo — the only path that's correct for n_ghost > 1.
     communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
 
     //* kernel_override lets the post-solve Helmholtz hook reuse this method
@@ -3714,868 +3578,6 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
     communicateNodeBC(nxn, nyn, nzn, Exf, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
     communicateNodeBC(nxn, nyn, nzn, Eyf, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
     communicateNodeBC(nxn, nyn, nzn, Ezf, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
-}
-
-//* Summary stats over the stored 9-component mass matrix — endpoint for
-//* a cross-code M byte diff against ECSIM. One pass per array.
-void EMfields3D::dump_mass_matrix_stats(int cycle)
-{
-    auto walk = [&](arr4_double M, const char *name)
-    {
-        double local_sum = 0.0, local_sqsum = 0.0, local_max = 0.0;
-        long   local_cnt = 0;
-        for (int g = 0; g < ne_mass_; ++g)
-            for (int i = n_ghost_; i < nxn - n_ghost_ - 1; ++i)
-                for (int j = n_ghost_; j < nyn - n_ghost_ - 1; ++j)
-                    for (int k = n_ghost_; k < nzn - n_ghost_ - 1; ++k)
-                    {
-                        const double v = M.get(g, i, j, k);
-                        local_sum   += v;
-                        local_sqsum += v * v;
-                        const double av = std::fabs(v);
-                        if (av > local_max) local_max = av;
-                        ++local_cnt;
-                    }
-
-        double sum = 0.0, sqsum = 0.0, maxabs = 0.0;
-        long   cnt = 0;
-        allreduce_sum(&local_sum, &sum, 1, (&get_vct())->getFieldComm());
-        allreduce_sum(&local_sqsum, &sqsum, 1, (&get_vct())->getFieldComm());
-        MPI_Allreduce(&local_max,   &maxabs, 1, MPI_DOUBLE, MPI_MAX, (&get_vct())->getFieldComm());
-        MPI_Allreduce(&local_cnt,   &cnt,    1, MPI_LONG,   MPI_SUM, (&get_vct())->getFieldComm());
-
-        if ((&get_vct())->getCartesian_rank() == 0)
-        {
-            using std::cout;
-            using std::endl;
-            cout << std::scientific << std::setprecision(15);
-            cout << "[MassStats] cycle=" << cycle << " " << name
-                 << " sum="    << sum
-                 << " frob="   << std::sqrt(sqsum)
-                 << " maxabs=" << maxabs
-                 << " n="      << cnt << endl;
-        }
-    };
-
-    walk(Mxx, "Mxx");
-    walk(Myy, "Myy");
-    walk(Mzz, "Mzz");
-    walk(Mxy, "Mxy");
-    walk(Myx, "Myx");
-    walk(Mxz, "Mxz");
-    walk(Mzx, "Mzx");
-    walk(Myz, "Myz");
-    walk(Mzy, "Mzy");
-}
-
-//* Cycle-1 identity decomposition print. Uses the same unique-node range
-//* [n_ghost_, n{x,y,z}n - n_ghost_ - 1) as get_E_field_energy so the values
-//* line up with ConservedQuantities.txt columns II/III/IV.
-void EMfields3D::dump_cycle_identity(int cycle)
-{
-    double local_I_J = 0.0;
-    double local_I_M = 0.0;
-
-    for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
-        for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
-            for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++)
-            {
-                local_I_J += Exth[i][j][k] * Jxh[i][j][k]
-                           + Eyth[i][j][k] * Jyh[i][j][k]
-                           + Ezth[i][j][k] * Jzh[i][j][k];
-
-                double MEx, MEy, MEz;
-                mass_matrix_times_vector(&MEx, &MEy, &MEz, Exth, Eyth, Ezth, i, j, k);
-                local_I_M += Exth[i][j][k] * MEx
-                           + Eyth[i][j][k] * MEy
-                           + Ezth[i][j][k] * MEz;
-            }
-
-    double I_J = 0.0, I_M = 0.0;
-    allreduce_sum(&local_I_J, &I_J, 1, (&get_vct())->getFieldComm());
-    allreduce_sum(&local_I_M, &I_M, 1, (&get_vct())->getFieldComm());
-
-    I_J *= dt;
-    I_M *= dt;
-
-    if ((&get_vct())->getCartesian_rank() == 0)
-    {
-        using std::cout;
-        using std::endl;
-        cout << std::scientific << std::setprecision(15);
-        cout << "[StepID] cycle=" << cycle
-             << " I_J=" << I_J
-             << " I_M=" << I_M
-             << " I_total=" << (I_J + I_M) << endl;
-    }
-}
-
-//* Raw-binary dump of cycle-N fields for cross-code byte diff.
-//* Layout: row-major C order, k (z) fastest — matches how iPIC3D's arr3_double
-//* stores data. One double per grid point, 8 bytes, IEEE-754 little-endian.
-//* Writes per cycle N:
-//*   fields_cycle{N}_Exth.bin, Eyth, Ezth     (node, nxn*nyn*nzn)
-//*   fields_cycle{N}_Ex.bin, Ey, Ez           (node, full E = Eth unrotated)
-//*   fields_cycle{N}_Jxh.bin, Jyh, Jzh        (node)
-//*   fields_cycle{N}_Bxn.bin, Byn, Bzn        (node)
-//*   fields_cycle{N}_Mxx.bin … Mzy.bin        (ne_mass × nxn × nyn × nzn)
-//* Plus `fields_cycle{N}.meta.txt` listing names, shapes, and byte offsets for
-//* programmatic loading.
-void EMfields3D::dump_cycle_fields(int cycle, const std::string& dir)
-{
-    const int rank = (&get_vct())->getCartesian_rank();
-    if (rank != 0) return;  // dump from rank 0 only for now (np=1 diagnostic)
-
-    auto write_arr3 = [&](const char* name, arr3_double a)
-    {
-        std::ostringstream p;
-        p << dir << "/fields_cycle" << cycle << "_" << name << ".bin";
-        std::ofstream f(p.str(), std::ios::binary);
-        if (!f) eprintf("dump_cycle_fields: cannot open %s", p.str().c_str());
-        for (int i = 0; i < nxn; i++)
-            for (int j = 0; j < nyn; j++)
-                for (int k = 0; k < nzn; k++)
-                {
-                    const double v = a[i][j][k];
-                    f.write(reinterpret_cast<const char*>(&v), sizeof(double));
-                }
-    };
-
-    auto write_arr4 = [&](const char* name, arr4_double a)
-    {
-        std::ostringstream p;
-        p << dir << "/fields_cycle" << cycle << "_" << name << ".bin";
-        std::ofstream f(p.str(), std::ios::binary);
-        if (!f) eprintf("dump_cycle_fields: cannot open %s", p.str().c_str());
-        for (int g = 0; g < ne_mass_; g++)
-            for (int i = 0; i < nxn; i++)
-                for (int j = 0; j < nyn; j++)
-                    for (int k = 0; k < nzn; k++)
-                    {
-                        const double v = a.get(g, i, j, k);
-                        f.write(reinterpret_cast<const char*>(&v), sizeof(double));
-                    }
-    };
-
-    write_arr3("Exth", Exth);  write_arr3("Eyth", Eyth);  write_arr3("Ezth", Ezth);
-    write_arr3("Ex",   Ex);    write_arr3("Ey",   Ey);    write_arr3("Ez",   Ez);
-    write_arr3("Jxh",  Jxh);   write_arr3("Jyh",  Jyh);   write_arr3("Jzh",  Jzh);
-    write_arr3("Bxn",  Bxn);   write_arr3("Byn",  Byn);   write_arr3("Bzn",  Bzn);
-    //* RHS b = E_n + θ·dt·(c·∇×B − 4π·S(Jxh)).
-    write_arr3("bx",   bXn);   write_arr3("by",   bYn);   write_arr3("bz",   bZn);
-    //* A·b for direct operator diff.
-    write_arr3("Abx",  AbXn);  write_arr3("Aby",  AbYn);  write_arr3("Abz",  AbZn);
-
-    write_arr4("Mxx",  Mxx);   write_arr4("Myy",  Myy);   write_arr4("Mzz",  Mzz);
-    write_arr4("Mxy",  Mxy);   write_arr4("Myx",  Myx);
-    write_arr4("Mxz",  Mxz);   write_arr4("Mzx",  Mzx);
-    write_arr4("Myz",  Myz);   write_arr4("Mzy",  Mzy);
-
-    //* Sidecar metadata: shapes and byte layout. Python reader uses this.
-    std::ostringstream mp;
-    mp << dir << "/fields_cycle" << cycle << ".meta.txt";
-    std::ofstream m(mp.str());
-    m << "# iPIC3D cycle-" << cycle << " field dump — IEEE-754 double little-endian\n";
-    m << "# grid_node_shape " << nxn << " " << nyn << " " << nzn
-      << "  (row-major C order, k fastest)\n";
-    m << "# grid_mass_shape " << ne_mass_ << " " << nxn << " " << nyn << " " << nzn << "\n";
-    m << "# n_ghost " << n_ghost_ << "\n";
-    m << "# arr3: Exth Eyth Ezth Ex Ey Ez Jxh Jyh Jzh Bxn Byn Bzn bx by bz Abx Aby Abz\n";
-    m << "# arr4: Mxx Myy Mzz Mxy Myx Mxz Mzx Myz Mzy\n";
-    m.close();
-
-    std::cout << "[DumpCycle" << cycle << "] wrote node + M arrays to " << dir << std::endl;
-}
-
-
-//* Programmatic self-adjointness probe for MaxwellImage.
-//*
-//* Samples two deterministic pseudo-random vectors u, v in Krylov space, applies
-//* the matrix-free operator A via MaxwellImage to each, and computes the inner
-//* products <A·u, v> and <u, A·v>. For a self-adjoint A under the Krylov inner
-//* product, the gap is purely FP round-off.
-//*
-//* Three variants are reported per call to tease apart input inconsistency from
-//* real operator asymmetry:
-//*
-//*   [raw]    — u, v are the raw random Krylov vectors. Periodic-image
-//*              duplicate DOFs (i=n_ghost and i=nxn-n_ghost-1 on self-periodic
-//*              axes) will disagree in u/v before A is applied.
-//*   [unify]  — u, v are projected onto the consistent-periodic subspace
-//*              (the two duplicate images of each physical node set equal to
-//*              their average) before A is applied. This isolates real
-//*              operator asymmetry from input inconsistency.
-//*   [unique] — same setup as [unify] but the inner products are computed
-//*              only over *unique* physical DOFs (skipping the right-image
-//*              duplicate on each self-periodic axis), matching the
-//*              unique-node reductions used by get_E_field_energy.
-//*
-//* Cost: four extra MaxwellImage applications plus a handful of dotP calls.
-//* Gated by input flag VerifyAdjoint; invoked once at the chosen cycle.
-void EMfields3D::probe_adjointness(int cycle)
-{
-    const VirtualTopology3D *vct = &get_vct();
-    const Collective *col = &get_col();
-    const int rank    = vct->getCartesian_rank();
-    MPI_Comm fieldcomm = vct->getFieldComm();
-
-    const int kx = nxn - 2*n_ghost_;
-    const int ky = nyn - 2*n_ghost_;
-    const int kz = nzn - 2*n_ghost_;
-    const int krylov_size = 3 * kx * ky * kz;
-
-    std::vector<double> u_raw(krylov_size, 0.0);
-    std::vector<double> v_raw(krylov_size, 0.0);
-    std::vector<double> u_uni(krylov_size, 0.0);
-    std::vector<double> v_uni(krylov_size, 0.0);
-    std::vector<double> Au(krylov_size, 0.0);
-    std::vector<double> Av(krylov_size, 0.0);
-
-    //* Deterministic, decomposition-independent pseudo-random fill: every rank
-    //* generates the *global* Krylov sequence using the global (i,j,k) indices,
-    //* but only stores the entries that belong to its local interior. The
-    //* sequence is an LCG so it's cheap and bit-reproducible.
-    const int coord_x = vct->getCoordinates(0);
-    const int coord_y = vct->getCoordinates(1);
-    const int coord_z = vct->getCoordinates(2);
-    const int gy = ky * vct->getYLEN();
-    const int gz = kz * vct->getZLEN();
-
-    auto hash_to_unit = [](uint64_t h) -> double {
-        h = h * 6364136223846793005ULL + 1442695040888963407ULL;
-        return (static_cast<double>((h >> 11) & ((1ULL<<53)-1)) / static_cast<double>(1ULL<<53)) * 2.0 - 1.0;
-    };
-    auto global_u = [&](int gi, int gj, int gk, int c) -> double {
-        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
-        return hash_to_unit(idx * 2654435761u + 0xDEADBEEFu);
-    };
-    auto global_v = [&](int gi, int gj, int gk, int c) -> double {
-        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
-        return hash_to_unit(idx * 40503u + 0xFEEDFACEu);
-    };
-
-    int p = 0;
-    for (int i = 0; i < kx; i++) {
-        const int gi = coord_x * kx + i;
-        for (int j = 0; j < ky; j++) {
-            const int gj = coord_y * ky + j;
-            for (int k = 0; k < kz; k++) {
-                const int gk = coord_z * kz + k;
-                u_raw[p]   = global_u(gi, gj, gk, 0);
-                v_raw[p++] = global_v(gi, gj, gk, 0);
-                u_raw[p]   = global_u(gi, gj, gk, 1);
-                v_raw[p++] = global_v(gi, gj, gk, 1);
-                u_raw[p]   = global_u(gi, gj, gk, 2);
-                v_raw[p++] = global_v(gi, gj, gk, 2);
-            }
-        }
-    }
-
-    //* Project u, v onto the periodic-consistent subspace by lifting to phys
-    //* space, unifying duplicates, and lowering back.
-    const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
-    const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
-    const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
-    auto unify_krylov = [&](std::vector<double>& w) {
-        //* Lift into phys space, apply unify, lower back.
-        solver2phys(tempX, tempY, tempZ, w.data(), nxn, nyn, nzn, n_ghost_);
-        if (periodicX_global || periodicY_global || periodicZ_global)
-            unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
-        phys2solver(w.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
-    };
-    u_uni = u_raw;
-    v_uni = v_raw;
-    unify_krylov(u_uni);
-    unify_krylov(v_uni);
-
-    //* --- [raw] variant -------------------------------------------------------
-    MaxwellImage(Au.data(), u_raw.data());
-    MaxwellImage(Av.data(), v_raw.data());
-    const double raw_Au_v = dotP(Au.data(), v_raw.data(), krylov_size, &fieldcomm);
-    const double raw_u_Av = dotP(u_raw.data(), Av.data(), krylov_size, &fieldcomm);
-
-    //* --- [unify] variant (consistent inputs, Krylov inner product) -----------
-    MaxwellImage(Au.data(), u_uni.data());
-    MaxwellImage(Av.data(), v_uni.data());
-    const double uni_Au_v = dotP(Au.data(), v_uni.data(), krylov_size, &fieldcomm);
-    const double uni_u_Av = dotP(u_uni.data(), Av.data(), krylov_size, &fieldcomm);
-
-    //* --- [unique] variant (consistent inputs, unique-DOF inner product) ------
-    //* Reuses the Au, Av just computed (Au ≡ A·u_uni on entry). Switch to the
-    //* phys-space representation and sum only over the unique-DOF interior.
-    auto dot_unique = [&](arr3_double Xa, arr3_double Ya, arr3_double Za,
-                          arr3_double Xb, arr3_double Yb, arr3_double Zb) {
-        const int ilo = n_ghost_;
-        const int jlo = n_ghost_;
-        const int klo = n_ghost_;
-        const int ihi = periodicX_global ? nxn - n_ghost_ - 1 : nxn - n_ghost_;
-        const int jhi = periodicY_global ? nyn - n_ghost_ - 1 : nyn - n_ghost_;
-        const int khi = periodicZ_global ? nzn - n_ghost_ - 1 : nzn - n_ghost_;
-        double local = 0.0;
-        for (int i = ilo; i < ihi; ++i)
-            for (int j = jlo; j < jhi; ++j)
-                for (int k = klo; k < khi; ++k)
-                    local += Xa[i][j][k]*Xb[i][j][k]
-                           + Ya[i][j][k]*Yb[i][j][k]
-                           + Za[i][j][k]*Zb[i][j][k];
-        double sum = 0.0;
-        allreduce_sum(&local, &sum, 1, fieldcomm);
-        return sum;
-    };
-
-    //* Au currently holds A·u_uni (Krylov). Lift it to phys via imageX/Y/Z by
-    //* reusing tempX (unify path clobbered them), so we need two fresh scratch
-    //* fields per side. imageX/Y/Z are members — use them as scratch here.
-    solver2phys(imageX, imageY, imageZ, Au.data(), nxn, nyn, nzn, n_ghost_);
-    //* tempX/Y/Z currently hold v_uni (from the last unify_krylov(v_uni)) — we
-    //* need fresh phys images of v_uni and u_uni for the dot_unique calls.
-    //* Just lift v_uni.
-    solver2phys(tempX, tempY, tempZ, v_uni.data(), nxn, nyn, nzn, n_ghost_);
-    const double uniq_Au_v = dot_unique(imageX, imageY, imageZ, tempX, tempY, tempZ);
-    //* Lift u_uni into Bx_ext-like scratch by reusing imageX/Y/Z (we already
-    //* consumed A·u_uni from them). Now imageX holds u_uni, tempX stays on v_uni.
-    solver2phys(imageX, imageY, imageZ, u_uni.data(), nxn, nyn, nzn, n_ghost_);
-    //* Then lift A·v_uni into temp via lateral use of phys buffers. tempX/Y/Z
-    //* would collide, so allocate a small scratch directly.
-    std::vector<double> scratch_Av_x(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-    std::vector<double> scratch_Av_y(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-    std::vector<double> scratch_Av_z(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-    //* Manually scatter A·v_uni into the scratch arrays (same unique-interior range).
-    {
-        int pp = 0;
-        for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-            for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-                for (int k = n_ghost_; k < nzn - n_ghost_; ++k) {
-                    const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
-                    scratch_Av_x[lin] = Av[pp++];
-                    scratch_Av_y[lin] = Av[pp++];
-                    scratch_Av_z[lin] = Av[pp++];
-                }
-    }
-    //* Compute <u_uni, A·v_uni>_unique by direct triple loop on arrays.
-    const int ilo = n_ghost_;
-    const int jlo = n_ghost_;
-    const int klo = n_ghost_;
-    const int ihi = periodicX_global ? nxn - n_ghost_ - 1 : nxn - n_ghost_;
-    const int jhi = periodicY_global ? nyn - n_ghost_ - 1 : nyn - n_ghost_;
-    const int khi = periodicZ_global ? nzn - n_ghost_ - 1 : nzn - n_ghost_;
-    double local_uniq_u_Av = 0.0;
-    for (int i = ilo; i < ihi; ++i)
-        for (int j = jlo; j < jhi; ++j)
-            for (int k = klo; k < khi; ++k) {
-                const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
-                local_uniq_u_Av += imageX[i][j][k] * scratch_Av_x[lin]
-                                 + imageY[i][j][k] * scratch_Av_y[lin]
-                                 + imageZ[i][j][k] * scratch_Av_z[lin];
-            }
-    double uniq_u_Av = 0.0;
-    allreduce_sum(&local_uniq_u_Av, &uniq_u_Av, 1, fieldcomm);
-
-    auto report = [&](const char* tag, double left, double right) {
-        if (rank != 0) return;
-        const double gap_abs = left - right;
-        const double scale   = 0.5 * (std::abs(left) + std::abs(right));
-        const double gap_rel = (scale > 0.0) ? std::abs(gap_abs) / scale : 0.0;
-        std::cout.setf(std::ios::scientific);
-        std::cout.precision(15);
-        std::cout << "[adjoint-probe cycle=" << cycle << " " << tag << "]"
-                  << " <A*u,v>=" << left
-                  << " <u,A*v>=" << right
-                  << " gap_abs=" << gap_abs
-                  << " gap_rel=" << gap_rel
-                  << std::endl;
-        std::cout.unsetf(std::ios::scientific);
-    };
-    report("raw",    raw_Au_v, raw_u_Av);
-    report("unify",  uni_Au_v, uni_u_Av);
-    report("unique", uniq_Au_v, uniq_u_Av);
-
-    //* --- [smoothed] variants — band-limit u, v to progressively lower k ----
-    //* Question the smoothed sweep answers: is the 15% unique-DOF asymmetry on
-    //* white-noise random vectors a grid-scale artifact (orthogonal to physics)
-    //* or does it reach the low-k modes that actually carry the reconnection
-    //* dynamics?
-    //*
-    //* Apply N passes of the 3D (1,2,1)/4 binomial kernel (the same kernel used
-    //* by energy_conserve_smooth_direction when kernel=0) to the consistent u,
-    //* v in phys space. Each pass roughly halves the Nyquist-band amplitude;
-    //* N ~ 4–8 brings the band down to ~8-cell scale, comparable to the skin
-    //* depth in DoubleGEM. If the unique gap collapses to ULP as N grows, the
-    //* operator asymmetry is a *high-k* artifact and fixing it would not move
-    //* the long-run drift.
-    auto binomial_pass = [&](arr3_double F, const int bcx[6]) {
-        //* One 3D (1,2,1)/4 pass (27-point stencil / 64, bit-identical to
-        //* `energy_conserve_smooth_direction`'s kernel==0 branch, single iter).
-        //* Refresh halo first so the stencil at interior-boundary reads
-        //* consistent duplicates.
-        communicateNodeBC(nxn, nyn, nzn, F, bcx[0], bcx[1], bcx[2], bcx[3], bcx[4], bcx[5], vct, this);
-        array3_double tmp(nxn, nyn, nzn);
-        for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-            for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-                for (int k = n_ghost_; k < nzn - n_ghost_; ++k) {
-                    const double s =
-                        8.0*F[i][j][k]
-                      + 4.0*(F[i-1][j][k]+F[i+1][j][k]+F[i][j-1][k]+F[i][j+1][k]+F[i][j][k-1]+F[i][j][k+1])
-                      + 2.0*(F[i-1][j-1][k]+F[i+1][j-1][k]+F[i-1][j+1][k]+F[i+1][j+1][k]
-                           + F[i-1][j][k-1]+F[i+1][j][k-1]+F[i][j-1][k-1]+F[i][j+1][k-1]
-                           + F[i-1][j][k+1]+F[i+1][j][k+1]+F[i][j-1][k+1]+F[i][j+1][k+1])
-                      + 1.0*(F[i-1][j-1][k-1]+F[i+1][j-1][k-1]+F[i-1][j+1][k-1]+F[i+1][j+1][k-1]
-                           + F[i-1][j-1][k+1]+F[i+1][j-1][k+1]+F[i-1][j+1][k+1]+F[i+1][j+1][k+1]);
-                    tmp[i][j][k] = s * 0.015625;
-                }
-        for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-            for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-                for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
-                    F[i][j][k] = tmp[i][j][k];
-    };
-
-    auto smooth_krylov = [&](std::vector<double>& w, int Npasses) {
-        solver2phys(tempX, tempY, tempZ, w.data(), nxn, nyn, nzn, n_ghost_);
-        for (int p = 0; p < Npasses; ++p) {
-            binomial_pass(tempX, col->bcEx);
-            binomial_pass(tempY, col->bcEy);
-            binomial_pass(tempZ, col->bcEz);
-        }
-        if (periodicX_global || periodicY_global || periodicZ_global)
-            unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
-        phys2solver(w.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
-    };
-
-    const int smooth_levels[] = {1, 2, 4, 8, 16, 32};
-    for (int N : smooth_levels) {
-        std::vector<double> u_s = u_uni;
-        std::vector<double> v_s = v_uni;
-        smooth_krylov(u_s, N);
-        smooth_krylov(v_s, N);
-
-        MaxwellImage(Au.data(), u_s.data());
-        MaxwellImage(Av.data(), v_s.data());
-
-        //* Unique-DOF inner product via direct phys-space buffers; reuse the
-        //* same decomposition as the [unique] variant above.
-        solver2phys(imageX, imageY, imageZ, Au.data(), nxn, nyn, nzn, n_ghost_);
-        //* tempX/Y/Z currently hold (the last smoothed) v_s after phys2solver;
-        //* re-lift v_s to tempX for the <Au,v> sum.
-        solver2phys(tempX, tempY, tempZ, v_s.data(), nxn, nyn, nzn, n_ghost_);
-        const int ihi_s = periodicX_global ? nxn - n_ghost_ - 1 : nxn - n_ghost_;
-        const int jhi_s = periodicY_global ? nyn - n_ghost_ - 1 : nyn - n_ghost_;
-        const int khi_s = periodicZ_global ? nzn - n_ghost_ - 1 : nzn - n_ghost_;
-        double local_Au_v = 0.0;
-        for (int i = n_ghost_; i < ihi_s; ++i)
-            for (int j = n_ghost_; j < jhi_s; ++j)
-                for (int k = n_ghost_; k < khi_s; ++k)
-                    local_Au_v += imageX[i][j][k]*tempX[i][j][k]
-                                + imageY[i][j][k]*tempY[i][j][k]
-                                + imageZ[i][j][k]*tempZ[i][j][k];
-        double s_Au_v = 0.0;
-        allreduce_sum(&local_Au_v, &s_Au_v, 1, fieldcomm);
-
-        //* Now lift u_s and A·v_s into scratch buffers for <u, A·v>
-        solver2phys(imageX, imageY, imageZ, u_s.data(), nxn, nyn, nzn, n_ghost_);
-        std::vector<double> sAv_x(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-        std::vector<double> sAv_y(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-        std::vector<double> sAv_z(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-        {
-            int pp = 0;
-            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-                for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-                    for (int k = n_ghost_; k < nzn - n_ghost_; ++k) {
-                        const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
-                        sAv_x[lin] = Av[pp++];
-                        sAv_y[lin] = Av[pp++];
-                        sAv_z[lin] = Av[pp++];
-                    }
-        }
-        double local_u_Av = 0.0;
-        for (int i = n_ghost_; i < ihi_s; ++i)
-            for (int j = n_ghost_; j < jhi_s; ++j)
-                for (int k = n_ghost_; k < khi_s; ++k) {
-                    const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
-                    local_u_Av += imageX[i][j][k]*sAv_x[lin]
-                                + imageY[i][j][k]*sAv_y[lin]
-                                + imageZ[i][j][k]*sAv_z[lin];
-                }
-        double s_u_Av = 0.0;
-        allreduce_sum(&local_u_Av, &s_u_Av, 1, fieldcomm);
-
-        //* Also compute |u|, |v|, |Au|, |Av| on the same unique-DOF range so
-        //* we can normalize the gap by |u|·|v| → estimate of ‖A − A^T‖.
-        double local_uu = 0.0, local_vv = 0.0;
-        double local_AuAu = 0.0, local_AvAv = 0.0;
-        for (int i = n_ghost_; i < ihi_s; ++i)
-            for (int j = n_ghost_; j < jhi_s; ++j)
-                for (int k = n_ghost_; k < khi_s; ++k) {
-                    const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
-                    //* imageX/Y/Z currently hold u_s (lifted just above).
-                    local_uu += imageX[i][j][k]*imageX[i][j][k]
-                              + imageY[i][j][k]*imageY[i][j][k]
-                              + imageZ[i][j][k]*imageZ[i][j][k];
-                    local_vv += tempX[i][j][k]*tempX[i][j][k]
-                              + tempY[i][j][k]*tempY[i][j][k]
-                              + tempZ[i][j][k]*tempZ[i][j][k];
-                    local_AvAv += sAv_x[lin]*sAv_x[lin] + sAv_y[lin]*sAv_y[lin] + sAv_z[lin]*sAv_z[lin];
-                }
-        //* |A·u|² requires lifting A·u back into phys scratch arrays.
-        std::vector<double> sAu_x(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-        std::vector<double> sAu_y(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-        std::vector<double> sAu_z(static_cast<size_t>(nxn)*nyn*nzn, 0.0);
-        {
-            int pp = 0;
-            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-                for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-                    for (int k = n_ghost_; k < nzn - n_ghost_; ++k) {
-                        const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
-                        sAu_x[lin] = Au[pp++];
-                        sAu_y[lin] = Au[pp++];
-                        sAu_z[lin] = Au[pp++];
-                    }
-        }
-        for (int i = n_ghost_; i < ihi_s; ++i)
-            for (int j = n_ghost_; j < jhi_s; ++j)
-                for (int k = n_ghost_; k < khi_s; ++k) {
-                    const size_t lin = (static_cast<size_t>(i)*nyn + j)*nzn + k;
-                    local_AuAu += sAu_x[lin]*sAu_x[lin] + sAu_y[lin]*sAu_y[lin] + sAu_z[lin]*sAu_z[lin];
-                }
-        double uu=0, vv=0, AuAu=0, AvAv=0;
-        allreduce_sum(&local_uu, &uu, 1, fieldcomm);
-        allreduce_sum(&local_vv, &vv, 1, fieldcomm);
-        allreduce_sum(&local_AuAu, &AuAu, 1, fieldcomm);
-        allreduce_sum(&local_AvAv, &AvAv, 1, fieldcomm);
-        const double nu = std::sqrt(uu), nv = std::sqrt(vv);
-        const double nAu = std::sqrt(AuAu), nAv = std::sqrt(AvAv);
-
-        char tag[64];
-        std::snprintf(tag, sizeof(tag), "smooth_N%02d_unique", N);
-        if (rank == 0) {
-            const double gap = s_Au_v - s_u_Av;
-            const double scale_self = 0.5 * (std::abs(s_Au_v) + std::abs(s_u_Av));
-            const double rel_self = (scale_self > 0.0) ? std::abs(gap)/scale_self : 0.0;
-            const double asym_est = (nu*nv > 0.0) ? std::abs(gap)/(nu*nv) : 0.0;
-            std::cout.setf(std::ios::scientific); std::cout.precision(15);
-            std::cout << "[adjoint-probe cycle=" << cycle << " " << tag << "]"
-                      << " <A*u,v>=" << s_Au_v
-                      << " <u,A*v>=" << s_u_Av
-                      << " gap_abs=" << gap
-                      << " gap_rel=" << rel_self
-                      << " ||u||=" << nu
-                      << " ||v||=" << nv
-                      << " ||A*u||=" << nAu
-                      << " ||A*v||=" << nAv
-                      << " asym_est=" << asym_est
-                      << std::endl;
-            std::cout.unsetf(std::ios::scientific);
-        }
-    }
-}
-
-//* Lapenta-2023 S-symmetry probe. Applies S component-wise via
-//* `energy_conserve_smooth_direction` to two deterministic pseudo-random
-//* Krylov vectors u, v and reports <S·u, v> vs <u, S·v>. Three variants:
-//*   [raw]    — u, v straight from the RNG (duplicate DOFs disagree)
-//*   [unify]  — u, v projected onto the consistent-periodic subspace first
-//*   [unique] — inner product taken over unique physical DOFs only
-//* The unique-DOF variant is the cleanest check of the 2023 condition:
-//* "the matrix representing S is symmetric" (p. 79). Seeds and unify
-//* machinery mirror `probe_adjointness` so gaps are directly comparable.
-void EMfields3D::probe_smooth_symmetry(int cycle)
-{
-    const VirtualTopology3D *vct = &get_vct();
-    const Collective *col = &get_col();
-    const int rank    = vct->getCartesian_rank();
-    MPI_Comm fieldcomm = vct->getFieldComm();
-
-    const int kx = nxn - 2*n_ghost_;
-    const int ky = nyn - 2*n_ghost_;
-    const int kz = nzn - 2*n_ghost_;
-    const int krylov_size = 3 * kx * ky * kz;
-
-    std::vector<double> u_raw(krylov_size, 0.0);
-    std::vector<double> v_raw(krylov_size, 0.0);
-    std::vector<double> u_uni(krylov_size, 0.0);
-    std::vector<double> v_uni(krylov_size, 0.0);
-    std::vector<double> Su(krylov_size, 0.0);
-    std::vector<double> Sv(krylov_size, 0.0);
-
-    //* Same deterministic global-LCG seeding as probe_adjointness so the two
-    //* probes are applied to the same random vectors.
-    const int coord_x = vct->getCoordinates(0);
-    const int coord_y = vct->getCoordinates(1);
-    const int coord_z = vct->getCoordinates(2);
-    const int gy = ky * vct->getYLEN();
-    const int gz = kz * vct->getZLEN();
-
-    auto hash_to_unit = [](uint64_t h) -> double {
-        h = h * 6364136223846793005ULL + 1442695040888963407ULL;
-        return (static_cast<double>((h >> 11) & ((1ULL<<53)-1)) / static_cast<double>(1ULL<<53)) * 2.0 - 1.0;
-    };
-    auto global_u = [&](int gi, int gj, int gk, int c) -> double {
-        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
-        return hash_to_unit(idx * 2654435761u + 0xDEADBEEFu);
-    };
-    auto global_v = [&](int gi, int gj, int gk, int c) -> double {
-        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
-        return hash_to_unit(idx * 40503u + 0xFEEDFACEu);
-    };
-
-    int p = 0;
-    for (int i = 0; i < kx; i++) {
-        const int gi = coord_x * kx + i;
-        for (int j = 0; j < ky; j++) {
-            const int gj = coord_y * ky + j;
-            for (int k = 0; k < kz; k++) {
-                const int gk = coord_z * kz + k;
-                u_raw[p]   = global_u(gi, gj, gk, 0);
-                v_raw[p++] = global_v(gi, gj, gk, 0);
-                u_raw[p]   = global_u(gi, gj, gk, 1);
-                v_raw[p++] = global_v(gi, gj, gk, 1);
-                u_raw[p]   = global_u(gi, gj, gk, 2);
-                v_raw[p++] = global_v(gi, gj, gk, 2);
-            }
-        }
-    }
-
-    const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
-    const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
-    const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
-    auto unify_krylov = [&](std::vector<double>& w) {
-        solver2phys(tempX, tempY, tempZ, w.data(), nxn, nyn, nzn, n_ghost_);
-        if (periodicX_global || periodicY_global || periodicZ_global)
-            unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
-        phys2solver(w.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
-    };
-    u_uni = u_raw;
-    v_uni = v_raw;
-    unify_krylov(u_uni);
-    unify_krylov(v_uni);
-
-    //* Apply S to a Krylov vector in place via phys-space scratch. Lift to
-    //* (tempX, tempY, tempZ), run `energy_conserve_smooth_direction` per
-    //* component along its own axis (same call sequence MaxwellImage uses
-    //* inside `energy_conserve_smooth`), then lower back.
-    auto apply_S = [&](const std::vector<double>& in, std::vector<double>& out) {
-        solver2phys(tempX, tempY, tempZ, const_cast<double*>(in.data()), nxn, nyn, nzn, n_ghost_);
-        //* Three calls mirror energy_conserve_smooth(arr3, arr3, arr3, ...)
-        //* but without the SmoothCycle / Smooth gate — the probe always
-        //* exercises the operator so we can measure its matrix symmetry
-        //* even in configurations where the gate is off.
-        energy_conserve_smooth_direction(tempX, nxn, nyn, nzn, 0);
-        energy_conserve_smooth_direction(tempY, nxn, nyn, nzn, 1);
-        energy_conserve_smooth_direction(tempZ, nxn, nyn, nzn, 2);
-        phys2solver(out.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
-    };
-
-    //* --- [raw] variant -------------------------------------------------------
-    apply_S(u_raw, Su);
-    apply_S(v_raw, Sv);
-    const double raw_Su_v = dotP(Su.data(), v_raw.data(), krylov_size, &fieldcomm);
-    const double raw_u_Sv = dotP(u_raw.data(), Sv.data(), krylov_size, &fieldcomm);
-
-    //* --- [unify] variant -----------------------------------------------------
-    apply_S(u_uni, Su);
-    apply_S(v_uni, Sv);
-    const double uni_Su_v = dotP(Su.data(), v_uni.data(), krylov_size, &fieldcomm);
-    const double uni_u_Sv = dotP(u_uni.data(), Sv.data(), krylov_size, &fieldcomm);
-
-    //* --- [unique] variant ----------------------------------------------------
-    //* Inner products restricted to unique physical DOFs (skip right-image
-    //* duplicates on self-periodic axes) — matches `get_E_field_energy`'s
-    //* reduction stencil, which is the physically meaningful norm.
-    const int ilo = n_ghost_;
-    const int jlo = n_ghost_;
-    const int klo = n_ghost_;
-    const int ihi = periodicX_global ? nxn - n_ghost_ - 1 : nxn - n_ghost_;
-    const int jhi = periodicY_global ? nyn - n_ghost_ - 1 : nyn - n_ghost_;
-    const int khi = periodicZ_global ? nzn - n_ghost_ - 1 : nzn - n_ghost_;
-
-    //* Compute both inner products on the same phys-space scratch in two
-    //* passes to avoid juggling more scratch arrays than the class provides.
-    auto unique_dot = [&](std::vector<double>& leftK, arr3_double rightX,
-                          arr3_double rightY, arr3_double rightZ) {
-        //* Lift leftK into imageX/Y/Z scratch, then dot against the arr3 triple.
-        solver2phys(imageX, imageY, imageZ, leftK.data(), nxn, nyn, nzn, n_ghost_);
-        double local = 0.0;
-        for (int i = ilo; i < ihi; ++i)
-            for (int j = jlo; j < jhi; ++j)
-                for (int k = klo; k < khi; ++k)
-                    local += imageX[i][j][k]*rightX[i][j][k]
-                           + imageY[i][j][k]*rightY[i][j][k]
-                           + imageZ[i][j][k]*rightZ[i][j][k];
-        double sum = 0.0;
-        allreduce_sum(&local, &sum, 1, fieldcomm);
-        return sum;
-    };
-
-    //* First: <S·u_uni, v_uni>_unique. Apply S to u_uni, leave S·u_uni in
-    //* Su (Krylov); lift v_uni into tempX/Y/Z for the dot.
-    apply_S(u_uni, Su);
-    solver2phys(tempX, tempY, tempZ, v_uni.data(), nxn, nyn, nzn, n_ghost_);
-    const double uniq_Su_v = unique_dot(Su, tempX, tempY, tempZ);
-
-    //* Second: <u_uni, S·v_uni>_unique. Apply S to v_uni → Sv (Krylov);
-    //* lift Sv into tempX/Y/Z, then dot with u_uni (lifted into imageX/Y/Z).
-    apply_S(v_uni, Sv);
-    solver2phys(tempX, tempY, tempZ, Sv.data(), nxn, nyn, nzn, n_ghost_);
-    const double uniq_u_Sv = unique_dot(u_uni, tempX, tempY, tempZ);
-
-    auto report = [&](const char* tag, double left, double right) {
-        if (rank != 0) return;
-        const double gap_abs = left - right;
-        const double scale   = 0.5 * (std::abs(left) + std::abs(right));
-        const double gap_rel = (scale > 0.0) ? std::abs(gap_abs) / scale : 0.0;
-        std::cout.setf(std::ios::scientific);
-        std::cout.precision(15);
-        std::cout << "[smooth-probe cycle=" << cycle << " " << tag << "]"
-                  << " <S*u,v>=" << left
-                  << " <u,S*v>=" << right
-                  << " gap_abs=" << gap_abs
-                  << " gap_rel=" << gap_rel
-                  << std::endl;
-        std::cout.unsetf(std::ios::scientific);
-    };
-    report("raw",    raw_Su_v, raw_u_Sv);
-    report("unify",  uni_Su_v, uni_u_Sv);
-    report("unique", uniq_Su_v, uniq_u_Sv);
-}
-
-
-//* Subspace-preservation probe. Builds a deterministic Krylov vector u,
-//* projects it onto the consistent-periodic subspace (so phys-space duplicates
-//* `tempX[n_ghost] == tempX[nxn-n_ghost-1]` etc by construction), applies
-//* MaxwellImage, and reports max |output[duplicate1] - output[duplicate2]|
-//* on every periodic-self axis. After the subspace-projecting solver2phys/
-//* phys2solver pair landed, this probe is a confirmation test rather than a
-//* diagnostic — it should always report drift = 0 (the lift back to phys via
-//* the matching 11-arg solver2phys overload copies LO duplicates to HI by
-//* construction). Pre-fix, it distinguished "matvec drifts the duplicates at
-//* FP-ε per call" from "matvec is bit-exact on the subspace, GMRES iterates
-//* drift instead"; the answer was the latter, which motivated the Krylov-
-//* representation fix.
-void EMfields3D::probe_subspace_preservation(int cycle)
-{
-    const VirtualTopology3D *vct = &get_vct();
-    const Collective *col = &get_col();
-    const int rank    = vct->getCartesian_rank();
-    MPI_Comm fieldcomm = vct->getFieldComm();
-
-    const int kx = nxn - 2*n_ghost_;
-    const int ky = nyn - 2*n_ghost_;
-    const int kz = nzn - 2*n_ghost_;
-    const int krylov_size = 3 * kx * ky * kz;
-
-    std::vector<double> u_uni(krylov_size, 0.0);
-    std::vector<double> Au(krylov_size, 0.0);
-
-    //* Same deterministic LCG as probe_adjointness so Au is comparable.
-    const int coord_x = vct->getCoordinates(0);
-    const int coord_y = vct->getCoordinates(1);
-    const int coord_z = vct->getCoordinates(2);
-    const int gy = ky * vct->getYLEN();
-    const int gz = kz * vct->getZLEN();
-    auto hash_to_unit = [](uint64_t h) -> double {
-        h = h * 6364136223846793005ULL + 1442695040888963407ULL;
-        return (static_cast<double>((h >> 11) & ((1ULL<<53)-1)) / static_cast<double>(1ULL<<53)) * 2.0 - 1.0;
-    };
-    auto global_u = [&](int gi, int gj, int gk, int c) -> double {
-        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
-        return hash_to_unit(idx * 2654435761u + 0xDEADBEEFu);
-    };
-    int p = 0;
-    for (int i = 0; i < kx; i++) {
-        const int gi = coord_x * kx + i;
-        for (int j = 0; j < ky; j++) {
-            const int gj = coord_y * ky + j;
-            for (int k = 0; k < kz; k++) {
-                const int gk = coord_z * kz + k;
-                u_uni[p++] = global_u(gi, gj, gk, 0);
-                u_uni[p++] = global_u(gi, gj, gk, 1);
-                u_uni[p++] = global_u(gi, gj, gk, 2);
-            }
-        }
-    }
-
-    //* Project u onto the consistent-periodic subspace (input by construction
-    //* satisfies tempX[n_ghost] == tempX[nxn-n_ghost-1] etc on periodic-self axes).
-    const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
-    const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
-    const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
-    solver2phys(tempX, tempY, tempZ, u_uni.data(), nxn, nyn, nzn, n_ghost_);
-    if (periodicX_global || periodicY_global || periodicZ_global)
-        unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
-    phys2solver(u_uni.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
-
-    //* Sanity check: re-lift u_uni and confirm input duplicates ARE equal at ULP.
-    solver2phys(tempX, tempY, tempZ, u_uni.data(), nxn, nyn, nzn, n_ghost_);
-    auto axis_drift = [&](arr3_double f, int axis) -> double {
-        const int lo = n_ghost_;
-        double d = 0.0;
-        if (axis == 0 && periodicX_global) {
-            const int hi = nxn - n_ghost_ - 1;
-            for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-                for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
-                    d = std::max(d, std::fabs(f[lo][j][k] - f[hi][j][k]));
-        } else if (axis == 1 && periodicY_global) {
-            const int hi = nyn - n_ghost_ - 1;
-            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-                for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
-                    d = std::max(d, std::fabs(f[i][lo][k] - f[i][hi][k]));
-        } else if (axis == 2 && periodicZ_global) {
-            const int hi = nzn - n_ghost_ - 1;
-            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-                for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-                    d = std::max(d, std::fabs(f[i][j][lo] - f[i][j][hi]));
-        }
-        return d;
-    };
-    auto reduce_max = [&](double local) {
-        double global = 0.0;
-        MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MAX, fieldcomm);
-        return global;
-    };
-    const double in_drift_x = reduce_max(std::max({axis_drift(tempX, 0), axis_drift(tempY, 0), axis_drift(tempZ, 0)}));
-    const double in_drift_y = reduce_max(std::max({axis_drift(tempX, 1), axis_drift(tempY, 1), axis_drift(tempZ, 1)}));
-    const double in_drift_z = reduce_max(std::max({axis_drift(tempX, 2), axis_drift(tempY, 2), axis_drift(tempZ, 2)}));
-
-    //* Apply the operator. After the structural fix (subspace-projecting
-    //* solver2phys/phys2solver), Au has 0 at the HI duplicate slot and lifting
-    //* via the legacy 8-arg solver2phys would write 0 at the HI duplicate phys
-    //* position — turning the probe into a measurement of the new pack/unpack
-    //* convention rather than the operator. So we use the matching 11-arg
-    //* overload (copies LO duplicate to HI in phys), which reports the actual
-    //* operator output. Drift = 0 confirms the structural fix is enforced.
-    MaxwellImage(Au.data(), u_uni.data());
-    solver2phys(imageX, imageY, imageZ, Au.data(), nxn, nyn, nzn, n_ghost_,
-                periodicX_global, periodicY_global, periodicZ_global);
-
-    const double out_drift_x = reduce_max(std::max({axis_drift(imageX, 0), axis_drift(imageY, 0), axis_drift(imageZ, 0)}));
-    const double out_drift_y = reduce_max(std::max({axis_drift(imageX, 1), axis_drift(imageY, 1), axis_drift(imageZ, 1)}));
-    const double out_drift_z = reduce_max(std::max({axis_drift(imageX, 2), axis_drift(imageY, 2), axis_drift(imageZ, 2)}));
-
-    //* Reference scale: max |Au| (so reader can see drift relative to output magnitude).
-    double local_max_au = 0.0;
-    for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
-        for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
-            for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
-                local_max_au = std::max({local_max_au,
-                                         std::fabs(imageX[i][j][k]),
-                                         std::fabs(imageY[i][j][k]),
-                                         std::fabs(imageZ[i][j][k])});
-    const double max_au = reduce_max(local_max_au);
-
-    if (rank == 0) {
-        std::cout.setf(std::ios::scientific);
-        std::cout.precision(3);
-        std::cout << "subspace-probe cycle=" << cycle
-                  << " periodic_self=(" << (periodicX_global?'X':'.')
-                  << (periodicY_global?'Y':'.')
-                  << (periodicZ_global?'Z':'.') << ")"
-                  << std::endl;
-        std::cout << "  input   max|dup1-dup2|: x=" << in_drift_x  << " y=" << in_drift_y  << " z=" << in_drift_z << std::endl;
-        std::cout << "  output  max|dup1-dup2|: x=" << out_drift_x << " y=" << out_drift_y << " z=" << out_drift_z
-                  << "  (ref max|Au|=" << max_au << ")" << std::endl;
-        const double max_out = std::max({out_drift_x, out_drift_y, out_drift_z});
-        std::cout << "  output  rel-drift = " << (max_au > 0.0 ? max_out / max_au : 0.0) << std::endl;
-        std::cout.unsetf(std::ios::scientific);
-    }
 }
 
 
