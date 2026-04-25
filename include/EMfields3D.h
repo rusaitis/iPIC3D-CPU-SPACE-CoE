@@ -222,6 +222,16 @@ public:
     //* VerifyAdjoint; runs once at the chosen cycle (default cycle 1).
     void probe_adjointness(int cycle);
 
+    //* Lapenta-2023 (Physics, 5, 72) adds one condition to the 2017 proof:
+    //* when `EnergyConservingSmoothing` is on, the smoothing matrix S must
+    //* be symmetric (S_{gg'} = S_{g'g}) for exact energy conservation. The
+    //* probe applies S component-wise via `energy_conserve_smooth_direction`
+    //* to two deterministic pseudo-random Krylov vectors u, v and reports
+    //* <S·u, v> − <u, S·v> in raw, unify, and unique-DOF variants. The raw
+    //* gap measures input-inconsistency + ghost-handling; the unique gap
+    //* measures the matrix symmetry the 2023 paper calls out.
+    void probe_smooth_symmetry(int cycle);
+
     //* Step 38: per-stage dump inside MaxwellImage. `set_mi_dump_target(cycle)` is
     //* called from the main loop so MaxwellImage knows when to dump. Dumps happen
     //* only on the *first* matvec call of the target cycle (so cost is one

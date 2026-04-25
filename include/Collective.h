@@ -218,6 +218,7 @@ class Collective
     bool   getUnifyPeriodicDuplicates() const { return UnifyPeriodicDuplicates; }
     bool   getFixNodePeriodicHalo()     const { return FixNodePeriodicHalo; }
     bool   getVerifyAdjoint()           const { return VerifyAdjoint; }
+    bool   getVerifySmoothSymmetry()    const { return VerifySmoothSymmetry; }
     bool   getSymmetrizeMaxwellImage()  const { return SymmetrizeMaxwellImage; }
     bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
     bool   getEnergyConservingSmoothing() const { return EnergyConservingSmoothing; }
@@ -309,6 +310,14 @@ class Collective
     //* <A·u, v> − <u, A·v> on two deterministic pseudo-random Krylov vectors
     //* and prints the absolute/relative gap. Off by default.
     bool   VerifyAdjoint;
+
+    //* Smoothing-operator symmetry probe. When true, at cycle 1 applies S
+    //* (component-wise `energy_conserve_smooth_direction`) to two deterministic
+    //* pseudo-random Krylov vectors u, v and prints <S·u, v> − <u, S·v>.
+    //* Verifies Lapenta-2023 condition that the smoothing matrix is symmetric,
+    //* which is required for exact energy conservation when
+    //* EnergyConservingSmoothing is on. Off by default.
+    bool   VerifySmoothSymmetry;
 
     //* Step 34d: per-matvec symmetrization of MaxwellImage. When true, applies
     //* unify_periodic_duplicates on both INPUT (after solver2phys+halo refresh,

@@ -2721,6 +2721,12 @@ void EMfields3D::calculateE()
         probe_adjointness(col->getCurrentCycle());
     }
 
+    //* Lapenta-2023 S-symmetry probe at cycle 1. Independent of VerifyAdjoint
+    //* so either can be toggled separately.
+    if (col->getVerifySmoothSymmetry() && col->getCurrentCycle() == 1) {
+        probe_smooth_symmetry(col->getCurrentCycle());
+    }
+
     //* Move to Krylov space from physical space
     phys2solver(xkrylov, Ex, Ey, Ez, nxn, nyn, nzn, n_ghost_);
 
@@ -4187,6 +4193,175 @@ void EMfields3D::probe_adjointness(int cycle)
             std::cout.unsetf(std::ios::scientific);
         }
     }
+}
+
+//* Lapenta-2023 S-symmetry probe. Applies S component-wise via
+//* `energy_conserve_smooth_direction` to two deterministic pseudo-random
+//* Krylov vectors u, v and reports <S·u, v> vs <u, S·v>. Three variants:
+//*   [raw]    — u, v straight from the RNG (duplicate DOFs disagree)
+//*   [unify]  — u, v projected onto the consistent-periodic subspace first
+//*   [unique] — inner product taken over unique physical DOFs only
+//* The unique-DOF variant is the cleanest check of the 2023 condition:
+//* "the matrix representing S is symmetric" (p. 79). Seeds and unify
+//* machinery mirror `probe_adjointness` so gaps are directly comparable.
+void EMfields3D::probe_smooth_symmetry(int cycle)
+{
+    const VirtualTopology3D *vct = &get_vct();
+    const Collective *col = &get_col();
+    const int rank    = vct->getCartesian_rank();
+    MPI_Comm fieldcomm = vct->getFieldComm();
+
+    const int kx = nxn - 2*n_ghost_;
+    const int ky = nyn - 2*n_ghost_;
+    const int kz = nzn - 2*n_ghost_;
+    const int krylov_size = 3 * kx * ky * kz;
+
+    std::vector<double> u_raw(krylov_size, 0.0);
+    std::vector<double> v_raw(krylov_size, 0.0);
+    std::vector<double> u_uni(krylov_size, 0.0);
+    std::vector<double> v_uni(krylov_size, 0.0);
+    std::vector<double> Su(krylov_size, 0.0);
+    std::vector<double> Sv(krylov_size, 0.0);
+
+    //* Same deterministic global-LCG seeding as probe_adjointness so the two
+    //* probes are applied to the same random vectors.
+    const int coord_x = vct->getCoordinates(0);
+    const int coord_y = vct->getCoordinates(1);
+    const int coord_z = vct->getCoordinates(2);
+    const int gy = ky * vct->getYLEN();
+    const int gz = kz * vct->getZLEN();
+
+    auto hash_to_unit = [](uint64_t h) -> double {
+        h = h * 6364136223846793005ULL + 1442695040888963407ULL;
+        return (static_cast<double>((h >> 11) & ((1ULL<<53)-1)) / static_cast<double>(1ULL<<53)) * 2.0 - 1.0;
+    };
+    auto global_u = [&](int gi, int gj, int gk, int c) -> double {
+        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
+        return hash_to_unit(idx * 2654435761u + 0xDEADBEEFu);
+    };
+    auto global_v = [&](int gi, int gj, int gk, int c) -> double {
+        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
+        return hash_to_unit(idx * 40503u + 0xFEEDFACEu);
+    };
+
+    int p = 0;
+    for (int i = 0; i < kx; i++) {
+        const int gi = coord_x * kx + i;
+        for (int j = 0; j < ky; j++) {
+            const int gj = coord_y * ky + j;
+            for (int k = 0; k < kz; k++) {
+                const int gk = coord_z * kz + k;
+                u_raw[p]   = global_u(gi, gj, gk, 0);
+                v_raw[p++] = global_v(gi, gj, gk, 0);
+                u_raw[p]   = global_u(gi, gj, gk, 1);
+                v_raw[p++] = global_v(gi, gj, gk, 1);
+                u_raw[p]   = global_u(gi, gj, gk, 2);
+                v_raw[p++] = global_v(gi, gj, gk, 2);
+            }
+        }
+    }
+
+    const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
+    const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
+    const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
+    auto unify_krylov = [&](std::vector<double>& w) {
+        solver2phys(tempX, tempY, tempZ, w.data(), nxn, nyn, nzn, n_ghost_);
+        if (periodicX_global || periodicY_global || periodicZ_global)
+            unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
+        phys2solver(w.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
+    };
+    u_uni = u_raw;
+    v_uni = v_raw;
+    unify_krylov(u_uni);
+    unify_krylov(v_uni);
+
+    //* Apply S to a Krylov vector in place via phys-space scratch. Lift to
+    //* (tempX, tempY, tempZ), run `energy_conserve_smooth_direction` per
+    //* component along its own axis (same call sequence MaxwellImage uses
+    //* when EnergyConservingSmoothing is on), then lower back.
+    auto apply_S = [&](const std::vector<double>& in, std::vector<double>& out) {
+        solver2phys(tempX, tempY, tempZ, const_cast<double*>(in.data()), nxn, nyn, nzn, n_ghost_);
+        //* Three calls mirror energy_conserve_smooth(arr3, arr3, arr3, ...)
+        //* but without the SmoothCycle / Smooth gate — the probe always
+        //* exercises the operator so we can measure its matrix symmetry
+        //* even in configurations where the gate is off.
+        energy_conserve_smooth_direction(tempX, nxn, nyn, nzn, 0);
+        energy_conserve_smooth_direction(tempY, nxn, nyn, nzn, 1);
+        energy_conserve_smooth_direction(tempZ, nxn, nyn, nzn, 2);
+        phys2solver(out.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
+    };
+
+    //* --- [raw] variant -------------------------------------------------------
+    apply_S(u_raw, Su);
+    apply_S(v_raw, Sv);
+    const double raw_Su_v = dotP(Su.data(), v_raw.data(), krylov_size, &fieldcomm);
+    const double raw_u_Sv = dotP(u_raw.data(), Sv.data(), krylov_size, &fieldcomm);
+
+    //* --- [unify] variant -----------------------------------------------------
+    apply_S(u_uni, Su);
+    apply_S(v_uni, Sv);
+    const double uni_Su_v = dotP(Su.data(), v_uni.data(), krylov_size, &fieldcomm);
+    const double uni_u_Sv = dotP(u_uni.data(), Sv.data(), krylov_size, &fieldcomm);
+
+    //* --- [unique] variant ----------------------------------------------------
+    //* Inner products restricted to unique physical DOFs (skip right-image
+    //* duplicates on self-periodic axes) — matches `get_E_field_energy`'s
+    //* reduction stencil, which is the physically meaningful norm.
+    const int ilo = n_ghost_;
+    const int jlo = n_ghost_;
+    const int klo = n_ghost_;
+    const int ihi = periodicX_global ? nxn - n_ghost_ - 1 : nxn - n_ghost_;
+    const int jhi = periodicY_global ? nyn - n_ghost_ - 1 : nyn - n_ghost_;
+    const int khi = periodicZ_global ? nzn - n_ghost_ - 1 : nzn - n_ghost_;
+
+    //* Compute both inner products on the same phys-space scratch in two
+    //* passes to avoid juggling more scratch arrays than the class provides.
+    auto unique_dot = [&](std::vector<double>& leftK, arr3_double rightX,
+                          arr3_double rightY, arr3_double rightZ) {
+        //* Lift leftK into imageX/Y/Z scratch, then dot against the arr3 triple.
+        solver2phys(imageX, imageY, imageZ, leftK.data(), nxn, nyn, nzn, n_ghost_);
+        double local = 0.0;
+        for (int i = ilo; i < ihi; ++i)
+            for (int j = jlo; j < jhi; ++j)
+                for (int k = klo; k < khi; ++k)
+                    local += imageX[i][j][k]*rightX[i][j][k]
+                           + imageY[i][j][k]*rightY[i][j][k]
+                           + imageZ[i][j][k]*rightZ[i][j][k];
+        double sum = 0.0;
+        allreduce_sum(&local, &sum, 1, fieldcomm);
+        return sum;
+    };
+
+    //* First: <S·u_uni, v_uni>_unique. Apply S to u_uni, leave S·u_uni in
+    //* Su (Krylov); lift v_uni into tempX/Y/Z for the dot.
+    apply_S(u_uni, Su);
+    solver2phys(tempX, tempY, tempZ, v_uni.data(), nxn, nyn, nzn, n_ghost_);
+    const double uniq_Su_v = unique_dot(Su, tempX, tempY, tempZ);
+
+    //* Second: <u_uni, S·v_uni>_unique. Apply S to v_uni → Sv (Krylov);
+    //* lift Sv into tempX/Y/Z, then dot with u_uni (lifted into imageX/Y/Z).
+    apply_S(v_uni, Sv);
+    solver2phys(tempX, tempY, tempZ, Sv.data(), nxn, nyn, nzn, n_ghost_);
+    const double uniq_u_Sv = unique_dot(u_uni, tempX, tempY, tempZ);
+
+    auto report = [&](const char* tag, double left, double right) {
+        if (rank != 0) return;
+        const double gap_abs = left - right;
+        const double scale   = 0.5 * (std::abs(left) + std::abs(right));
+        const double gap_rel = (scale > 0.0) ? std::abs(gap_abs) / scale : 0.0;
+        std::cout.setf(std::ios::scientific);
+        std::cout.precision(15);
+        std::cout << "[smooth-probe cycle=" << cycle << " " << tag << "]"
+                  << " <S*u,v>=" << left
+                  << " <u,S*v>=" << right
+                  << " gap_abs=" << gap_abs
+                  << " gap_rel=" << gap_rel
+                  << std::endl;
+        std::cout.unsetf(std::ios::scientific);
+    };
+    report("raw",    raw_Su_v, raw_u_Sv);
+    report("unify",  uni_Su_v, uni_u_Sv);
+    report("unique", uniq_Su_v, uniq_u_Sv);
 }
 
 

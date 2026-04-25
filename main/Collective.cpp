@@ -155,6 +155,11 @@ void Collective::ReadInput(string inputfile)
         //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
         VerifyAdjoint = config.read<bool>("VerifyAdjoint", false);
 
+        //* Lapenta-2023 S-symmetry probe. Verifies that the smoothing
+        //* matrix is symmetric — required for exact energy conservation
+        //* when EnergyConservingSmoothing is on.
+        VerifySmoothSymmetry = config.read<bool>("VerifySmoothSymmetry", false);
+
         //* Step 34d: per-matvec symmetrization of MaxwellImage (calls
         //* `unify_periodic_duplicates` on MaxwellImage input and output). Required for
         //* cross-cycle Exth consistency when UnifyPeriodicDuplicates is on; turning this
