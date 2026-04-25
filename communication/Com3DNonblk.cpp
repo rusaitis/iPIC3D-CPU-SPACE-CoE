@@ -28,7 +28,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                                 bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
                                 double ***vector_c = nullptr);
 
-//* Step 68c: forward declarations of the Kahan-compensated sum-on-receive
+//* forward declarations of the Kahan-compensated sum-on-receive
 //* helpers (definitions near the legacy `addFace`/`addEdge*`/`addCorner`
 //* further down). Same signature as the legacy helpers plus a companion
 //* `vector_c` compensation array.
@@ -39,7 +39,7 @@ void addEdgeZ_kahan (int nx, int ny, int nz, double ***vector, double ***vector_
 void addCorner_kahan(int nx, int ny, int nz, double ***vector, double ***vector_c, const VirtualTopology3D * vct, int n_ghost);
 
 //! isCenterFlag: 1 = communicateCenter; 0 = communicateNode
-//! Step 68c: `vector_c` is the Kahan-compensation companion array. `= nullptr`
+//! `vector_c` is the Kahan-compensation companion array. `= nullptr`
 //! is the legacy behaviour (byte-identical); a non-null pointer switches the
 //! sum-on-receive step (`addFace`/`addEdge*`/`addCorner`) to the Neumaier-
 //! compensated variants that land residuals in `vector_c`.
@@ -296,7 +296,7 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 
 		sendcnt = recvcnt;
 
-		//* Step 61 fix: edge/corner MPI sends inherit the face-send offset-by-one
+		//* edge/corner MPI sends inherit the face-send offset-by-one
 		//* convention so rank-boundary corner ghosts use the same periodic-duplicate
 		//* source as face ghosts do. Face sends at lines 113-124 already apply
 		//*   base_idx = isCenterFlag ? legacy : 1+offset (= 2 for node-copy)
@@ -361,7 +361,7 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 		assert_eq(recvcnt,sendcnt-recvcnt);
 
 		//Swap Local Edges
-		//* Step 34a: edge swaps honour the Step 23 node_halo_fix so the
+		//* edge swaps honour the node_halo_fix so the
 		//* periodic-self X/Y/Z wrap uses the offset-by-one source convention
 		//* (xlo_src/xhi_src etc.) matching the face swaps above. Without this,
 		//* corner/edge ghosts inherit the legacy nx-2/1 mapping while face
@@ -485,7 +485,7 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 
 			sendcnt=recvcnt;
 
-			//* Step 61 fix: corner send uses the offset-by-one X source,
+			//* corner send uses the offset-by-one X source,
 			//* matching face/edge sends.
 			if(communicationCnt[0] == 1){
 				MPI_Isend(&vector[1+offset][0][0],   1,cornertype,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
@@ -498,7 +498,7 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 		assert_eq(recvcnt,sendcnt-recvcnt);
 
 
-		//Delay local data copy — Step 34a: corner self-swaps honour the same
+		//Delay local data copy — corner self-swaps honour the same
 		//* node_halo_fix offset as face/edge swaps so all three periodic-wrap
 		//* source indices agree.
 		if (left_neighborX== myrank && right_neighborX == myrank){
@@ -583,7 +583,7 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 
 	//if this is NodeInterpolation operation
 	if(needInterp){
-	    //* Step 68c: Kahan-aware sum-on-receive. Legacy path (`vector_c ==
+	    //* Kahan-aware sum-on-receive. Legacy path (`vector_c ==
 	    //* nullptr`) falls through to the plain `+=` helpers below, byte-
 	    //* identical to pre-Step-68c. When `vector_c` is supplied, the
 	    //* receiving interior cell is updated via a Neumaier step with the
@@ -1128,7 +1128,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  copy, stencils, moments) is self-consistently calibrated. Require
     //  nxc_r >= 2*n_ghost - 1 per rank for each self-periodic axis.
     if (needInterp) {
-        //* Step 68c: Kahan-aware sum-on-receive, n_ghost > 1 variant.
+        //* Kahan-aware sum-on-receive, n_ghost > 1 variant.
         if (vector_c != nullptr) {
             addFace_kahan  (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeZ_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
@@ -1537,7 +1537,7 @@ void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D
 }
 
 //! ================================================================================
-//  Step 68c: Kahan-compensated parallel helpers for the sum-on-receive path.
+//  Kahan-compensated parallel helpers for the sum-on-receive path.
 //  One-to-one with the addFace / addEdge{X,Y,Z} / addCorner helpers above, but
 //  each `interior += ghost` is replaced by a Neumaier-compensated add that
 //  updates the matching interior cell of `vector_c` alongside `vector`. The
@@ -1701,7 +1701,7 @@ void communicateInterp(int nx, int ny, int nz, arr3_double _vector, const Virtua
 	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true);
 }
 
-//* Step 68c: Kahan-compensated variants. Forward the companion array into
+//* Kahan-compensated variants. Forward the companion array into
 //* NBDerivedHaloComm so the sum-on-receive goes through `addFace_kahan` etc.
 void communicateInterp_kahan(int nx, int ny, int nz, double*** vector, double*** vector_c,
                              const VirtualTopology3D * vct, EMfields3D *EMf)

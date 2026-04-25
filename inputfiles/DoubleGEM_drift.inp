@@ -1,4 +1,4 @@
-###! Step 33: 100-cycle energy drift test with matched ECSIM config +
+###! 100-cycle energy drift test with matched ECSIM config +
 ###! Steps 22/23 periodic-halo fixes + lap_graddiv operator + PETSc solver.
 ###! Fields init / particle init are code-native (no cross-code load).
 

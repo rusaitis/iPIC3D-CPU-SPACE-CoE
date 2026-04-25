@@ -174,44 +174,41 @@ public:
 
     //* Energy-conserving smoothing
     void energy_conserve_smooth(arr3_double data_X, arr3_double data_Y, arr3_double data_Z, int nx, int ny, int nz);
-    //* kernel_override: -1 (default) -> use col->getSmoothKernelInt();
-    //*                  >=0          -> force this kernel (Phase 10m: post-solve Helmholtz reuse)
+    //* kernel_override: -1 -> use col->getSmoothKernelInt();
+    //*                  >=0 -> force this kernel (post-solve Helmholtz reuse).
     void energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir, int kernel_override = -1);
 
-    //* Phase 10m: post-`calculateE` Helmholtz low-pass applied once per cycle to (Ex, Ey, Ez)
-    //* OUTSIDE the implicit operator. Decoupled from `S·M·S` so it does not restructure
-    //* `MaxwellImage` the way Phase 10k's drop-in attempt did.
+    //* Post-`calculateE` Helmholtz low-pass applied once per cycle to (Ex,Ey,Ez)
+    //* OUTSIDE the implicit operator. Decoupled from S·M·S — does not restructure
+    //* MaxwellImage.
     void post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field, arr3_double Ez_field, int nx, int ny, int nz);
 
-    //* Step 22: enforce equality of the periodic-duplicate interior nodes (indices n_ghost_ and
-    //*          nxn-n_ghost_-1 along each periodic axis) on the solved E-field arrays.
-    //* The Maxwell solver treats the two images of the same physical periodic node as independent
-    //* DOFs. communicateNodeBC refreshes ghost faces only, so interior duplicates can disagree by
-    //* O(relative solver tol). See plan-energy-conservation.md Step 21 Sub-test (c).
+    //* Enforce equality of the periodic-duplicate interior nodes (indices n_ghost_
+    //* and nxn-n_ghost_-1 along each periodic axis) on the solved E-field. The
+    //* Maxwell solver treats the two images of the same physical node as
+    //* independent DOFs; communicateNodeBC refreshes ghost faces only, so
+    //* interior duplicates can disagree by O(relative solver tol).
     void unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz);
 
-    //* Step 25 diagnostic: at end of calculateE, print the two grid-side work integrals
+    //* Diagnostic: print the two grid-side work integrals
     //*   I_J = dt · <Eth, Jxh>_unique     I_M = dt · <Eth, M·Eth>_unique
-    //* Summation range is the unique-node interior [n_ghost_, n{x,y,z}n - n_ghost_ - 1)
-    //* matching get_E_field_energy, so the prints align with ConservedQuantities.txt
-    //* columns and external scripts can derive R_part / R_field per cycle.
+    //* Summation range matches get_E_field_energy so the prints align with
+    //* ConservedQuantities.txt columns; external scripts derive R_part / R_field.
     void dump_cycle_identity(int cycle);
 
-    //* Step 27 diagnostic: at the end of the first moment gather, print Frobenius-norm,
-    //* max-abs, and sum statistics of the 9-component stored mass matrix. Cheap probe
-    //* designed as the iPIC3D endpoint for a cross-code byte compare against an ECSIM
-    //* dump. Shape-preserving (unique-node interior only) so differences are localised
-    //* and not polluted by halo wrap.
+    //* Diagnostic: at the end of the first moment gather, print Frobenius-norm,
+    //* max-abs, and sum statistics of the 9-component mass matrix. Endpoint for
+    //* a cross-code byte compare against an ECSIM dump. Unique-node interior only.
     void dump_mass_matrix_stats(int cycle);
 
-    //* Step 32: raw-binary IEEE-754 double dump of all node fields at a given
+    //* raw-binary IEEE-754 double dump of all node fields at a given
     //* cycle for cross-code (iPIC3D ↔ ECSIM) byte diff. Writes one file per
     //* array to `{dir}/fields_cycle{N}_{name}.bin` plus a
     //* `fields_cycle{N}.meta.txt` index. Row-major C order, k (z) fastest.
     //* Cycle 0 = post-init (pre-solve) snapshot; cycle 1 = post-solve-1.
     void dump_cycle_fields(int cycle, const std::string& dir);
 
-    //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
+    //* programmatic self-adjointness probe for MaxwellImage.
     //* Generates two deterministic pseudo-random Krylov-space vectors u, v,
     //* applies the matrix-free operator A via MaxwellImage to each, and
     //* reports <A·u, v> − <u, A·v>. A self-adjoint A makes the gap purely
@@ -240,7 +237,7 @@ public:
     //* drift implicates the FP execution order in the operator itself.
     void probe_subspace_preservation(int cycle);
 
-    //* Step 38: per-stage dump inside MaxwellImage. `set_mi_dump_target(cycle)` is
+    //* per-stage dump inside MaxwellImage. `set_mi_dump_target(cycle)` is
     //* called from the main loop so MaxwellImage knows when to dump. Dumps happen
     //* only on the *first* matvec call of the target cycle (so cost is one
     //* set of binary files per run, not per Krylov iteration).
@@ -258,7 +255,7 @@ public:
     //! Set all elements of mass matrix to 0.0 !//
     void setZeroMassMatrix();
 
-    //! Step 68b: Kahan-compensated gather (KahanGather=true) helpers.
+    //! Kahan-compensated gather (KahanGather=true) helpers.
     //* `setZeroKahanGatherCompensation` zeroes the companion compensation
     //* buffers at the start of each gather cycle; `foldKahanGatherCompensation`
     //* folds the accumulated compensation back into the primary field and
@@ -335,7 +332,7 @@ public:
         Jzhs[is][X][Y][Z] += value;
     }
 
-    //* Step 68b: Neumaier (Kahan-Babuska) compensated add helper.
+    //* Neumaier (Kahan-Babuska) compensated add helper.
     //* Used by the `*_kahan` deposit variants below when `KahanGather=true`.
     //* The companion `comp` scalar accumulates the floating-point residual
     //* that a plain `sum += term` would discard; folding it back at the end
@@ -350,7 +347,7 @@ public:
         sum = t;
     }
 
-    //* Step 68b: Kahan-compensated single-node deposit helpers (TSC + CIC
+    //* Kahan-compensated single-node deposit helpers (TSC + CIC
     //* alike). No atomic pragma: `KahanGather=true` also pins the gather to
     //* num_threads=1, so these are safe and cheaper than the atomic variants.
     inline void add_Rho_node_kahan(double value, int X, int Y, int Z, int is)
@@ -376,7 +373,7 @@ public:
 
     void add_Mass(double value[3][3], int X, int Y, int Z, int ind);
 
-    //* Step 68b: Kahan-compensated 8-corner CIC deposits + mass matrix. See
+    //* Kahan-compensated 8-corner CIC deposits + mass matrix. See
     //* the companion `*_c` arrays and `kahan_add` helper below. Used when
     //* `KahanGather=true`.
     void add_Rho_kahan(double weight[8], int X, int Y, int Z, int is);
@@ -708,7 +705,7 @@ private:
     const Grid& _grid;
     const VirtualTopology3D&_vct;
 
-    //* Step 38: per-stage MaxwellImage dump bookkeeping.
+    //* per-stage MaxwellImage dump bookkeeping.
     //* mi_dump_target_cycle_ is set from the main loop (currently 1); the first
     //* call to MaxwellImage during that cycle dumps, later calls don't.
     int mi_dump_target_cycle_ = -1;
@@ -783,11 +780,11 @@ private:
 
     //? Implicit electric field (defined at nodes)
     array3_double Exth, Eyth, Ezth;
-    //* Step 33: stashed MaxwellSource RHS in physical (node) space for the
+    //* stashed MaxwellSource RHS in physical (node) space for the
     //* cross-code cycle-N byte diff. Populated right after MaxwellSource and
     //* before GMRES/PETSc so MaxwellImage iterations don't clobber them.
     array3_double bXn, bYn, bZn;
-    //* Step 33: direct operator diagnostic — result of applying MaxwellImage
+    //* direct operator diagnostic — result of applying MaxwellImage
     //* to (bXn, bYn, bZn). If `b` matches across codes but `A·b` differs, the
     //* operator is the source of the E_θ divergence.
     array3_double AbXn, AbYn, AbZn;
@@ -822,7 +819,7 @@ private:
     //! Mass matrix components (defined at nodes)
     array4_double Mxx, Mxy, Mxz, Myx, Myy, Myz, Mzx, Mzy, Mzz;
 
-    //! Step 68b: Kahan-compensated gather companion arrays.
+    //! Kahan-compensated gather companion arrays.
     //* Populated only while `KahanGather=true`; sized identically to their
     //* primary partner. Each gathered field (ρ_s, Jxh_s, Jyh_s, Jzh_s, and
     //* the 9-component mass matrix) gets a per-node compensation scalar used
@@ -840,7 +837,7 @@ private:
     //? Current densities for each species (defined at nodes)
     array4_double Jxs, Jys, Jzs, Jxhs, Jyhs, Jzhs;
 
-    //? Step 68b: Kahan companions for species-level gather accumulators.
+    //? Kahan companions for species-level gather accumulators.
     array4_double rhons_c, Jxhs_c, Jyhs_c, Jzhs_c;
     
     //! Supplementary moments
@@ -1011,7 +1008,7 @@ inline void EMfields3D::add_Jzh(double weight[8], int X, int Y, int Z, int is)
             }
 }
 
-//* Step 68b: Kahan-compensated CIC (8-corner) deposit variants.
+//* Kahan-compensated CIC (8-corner) deposit variants.
 inline void EMfields3D::add_Rho_kahan(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
@@ -1263,7 +1260,7 @@ inline void EMfields3D::add_Mass(double value[3][3], int X, int Y, int Z, int in
     Mzz[ind][X][Y][Z] += value[2][2];
 }
 
-//* Step 68b: Kahan-compensated mass matrix accumulator.
+//* Kahan-compensated mass matrix accumulator.
 inline void EMfields3D::add_Mass_kahan(double value[3][3], int X, int Y, int Z, int ind)
 {
     kahan_add(Mxx[ind][X][Y][Z], Mxx_c[ind][X][Y][Z], value[0][0]);

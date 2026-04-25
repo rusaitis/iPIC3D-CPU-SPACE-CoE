@@ -1,4 +1,4 @@
-###! Step 32 Phase D: iPIC3D DoubleGEM input matched to ECSIM DoubleGEM.inp
+###! iPIC3D DoubleGEM input matched to ECSIM DoubleGEM.inp
 ###! for cross-code byte diff at cycle 0 (post-init) and cycle 1 (post-solve).
 ###! Mirrors geometry, physics, seed layout from /Users/leo/projects/ecsim/inputfiles/DoubleGEM.inp
 
@@ -22,7 +22,7 @@ FieldOutputTag                 = B + E + rho + J
 ParticlesOutputTag             = position + velocity + q
 ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
 
-#* Step 32 diagnostic: raw binary dump at cycles 0 and 1.
+#* raw binary dump at cycles 0 and 1.
 DumpCycle1Fields               = true
 
 #* Dump initial particles so ECSIM can load the SAME state.
@@ -31,10 +31,10 @@ DumpParticlesInit              = true
 #* Match ECSIM's operator: self-adjoint curl(curl) = -Δ + grad div.
 MaxwellOperator                = lap_graddiv
 
-#* Step 22+23: fix XLEN=1 self-periodic halo off-by-one and average the two
+#* fix XLEN=1 self-periodic halo off-by-one and average the two
 #* periodic-duplicate interior DOFs after the field solve.
 
-#* Step 33 probe: use PETSc solver (same Krylov as ECSIM) to rule out the
+#* use PETSc solver (same Krylov as ECSIM) to rule out the
 #* iPIC3D-GMRES vs ECSIM-PETSc path as a confounder for the E_θ divergence.
 SolverType                     = PETSc
 

@@ -27,7 +27,7 @@
 #include "TimeTasks.h"
 #include "errors.h"
 
-//* Step 62: deterministic-MPI switch. Off by default (legacy MPI_Allreduce).
+//* deterministic-MPI switch. Off by default (legacy MPI_Allreduce).
 bool g_deterministic_mpi_reductions = false;
 
 void det_allreduce_sum(const double *local, double *global, int count, MPI_Comm comm)

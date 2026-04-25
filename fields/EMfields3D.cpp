@@ -117,11 +117,11 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Exth    (nxn, nyn, nzn),
     Eyth    (nxn, nyn, nzn),
     Ezth    (nxn, nyn, nzn),
-    //* Step 33: MaxwellSource RHS cache in node space.
+    //* MaxwellSource RHS cache in node space (cross-code byte diff).
     bXn     (nxn, nyn, nzn),
     bYn     (nxn, nyn, nzn),
     bZn     (nxn, nyn, nzn),
-    //* Step 33: A·b diagnostic cache.
+    //* A·b diagnostic cache.
     AbXn    (nxn, nyn, nzn),
     AbYn    (nxn, nyn, nzn),
     AbZn    (nxn, nyn, nzn),
@@ -171,7 +171,7 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Myz (ne_mass_, nxn, nyn, nzn),
     Mzy (ne_mass_, nxn, nyn, nzn),
 
-    //! Step 68b: Kahan companions for the mass matrix (same shape).
+    //! Kahan companions for the mass matrix (same shape).
     Mxx_c (ne_mass_, nxn, nyn, nzn),
     Myy_c (ne_mass_, nxn, nyn, nzn),
     Mzz_c (ne_mass_, nxn, nyn, nzn),
@@ -193,7 +193,7 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Jyhs      (ns, nxn, nyn, nzn),
     Jzhs      (ns, nxn, nyn, nzn),
 
-    //! Step 68b: Kahan companions for species gather accumulators.
+    //! Kahan companions for species gather accumulators.
     rhons_c   (ns, nxn, nyn, nzn),
     Jxhs_c    (ns, nxn, nyn, nzn),
     Jyhs_c    (ns, nxn, nyn, nzn),
@@ -2440,9 +2440,7 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     double ***moment_Jyhs  = convert_to_arr3(Jyhs[is]);
     double ***moment_Jzhs  = convert_to_arr3(Jzhs[is]);
 
-    //* Step 68c: Kahan-aware halo sum when the flag is on. The companion
-    //* arrays were zeroed (and any fold residual from Step 68b already
-    //* merged into the primaries) before the halo exchange starts.
+    //* Kahan-aware halo sum (companions zeroed before halo exchange).
     const bool kahan_halo = _col.getKahanHalo();
 
     //* Halo sum (interpolation pattern: face/edge/corner addFace into the
@@ -2493,7 +2491,7 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     //  Each Mxx[m] is a contiguous (nxn x nyn x nzn) slab of the underlying
     //  array4_double, so convert_to_arr3 yields a valid 3D view per stencil
     //  group m in [0, ne_mass_).
-    //* Step 68c: Kahan-aware halo sum when the flag is on.
+    //* Kahan-aware halo sum.
     const bool kahan_halo = _col.getKahanHalo();
 
     for (int m = 0; m < ne_mass_; m++)
@@ -2861,31 +2859,23 @@ void EMfields3D::calculateE()
     time_ms.stop();
     #endif
 
-    //* Step 34b: one-shot self-adjointness probe at cycle 1.
-    //* Sits here (post-MaxwellSource, pre-Krylov) so A is defined by the exact
-    //* same state the production solver sees. Output is a single line per run.
+    //* Cycle-1 self-adjointness probe (post-MaxwellSource, pre-Krylov).
     if (col->getVerifyAdjoint() && col->getCurrentCycle() == 1) {
         probe_adjointness(col->getCurrentCycle());
     }
 
-    //* Lapenta-2023 S-symmetry probe at cycle 1. Independent of VerifyAdjoint
-    //* so either can be toggled separately.
+    //* Lapenta-2023 S-symmetry probe at cycle 1.
     if (col->getVerifySmoothSymmetry() && col->getCurrentCycle() == 1) {
         probe_smooth_symmetry(col->getCurrentCycle());
     }
 
-    //* Subspace-preservation probe at cycle 1. Tests whether MaxwellImage maps
-    //* the consistent-periodic subspace into itself at FP-ULP, or whether it
-    //* drifts the duplicates and so feeds the SymmetrizeMaxwellImage band-aid.
+    //* Subspace-preservation probe at cycle 1.
     if (col->getVerifySubspacePreservation() && col->getCurrentCycle() == 1) {
         probe_subspace_preservation(col->getCurrentCycle());
     }
 
-    //* Periodic-self axes use the subspace-projecting pack/unpack (Krylov vector
-    //* zeros the HI duplicate slot, lifts to phys with both duplicates equal).
-    //* Production GMRES then iterates strictly inside the consistent-periodic
-    //* subspace, making `unify_periodic_duplicates` and `SymmetrizeMaxwellImage`
-    //* mathematically redundant.
+    //* Periodic-self axes use the subspace-projecting pack/unpack so GMRES
+    //* iterates stay strictly in the consistent-periodic subspace.
     const bool ps_x = col->getPERIODICX() && vct->getXLEN() == 1;
     const bool ps_y = col->getPERIODICY() && vct->getYLEN() == 1;
     const bool ps_z = col->getPERIODICZ() && vct->getZLEN() == 1;
@@ -2905,11 +2895,11 @@ void EMfields3D::calculateE()
     } else
 #endif
     {
-        // Restart=40 chosen 2026-04-09 from empirical sweep (plan-preconditioners.md §Phase 9b):
-        // r=40 gives +5-20% wall-clock vs r=20 on stiff cases (dt≥0.75) and matches v1 baseline on
-        // easy cases (dt<0.5). Total iter budget kept at 1000 by halving max-restart from 50 to 25.
-        // Phase 10f: if input param NiterGMRES > 0 is set, force m=N, max_iter=1 (hard-cap Krylov
-        // iterations at exactly N, no restart) for the GMRES-iter bisection experiment.
+        // Restart=40 from empirical sweep: +5-20% wall-clock vs r=20 on stiff
+        // cases (dt≥0.75) and matches v1 baseline on easy cases (dt<0.5).
+        // Iter budget = 40 × 25 = 1000.
+        // NiterGMRES > 0 forces m=N, max_iter=1 (hard-cap, no restart) for
+        // Krylov-iter bisection experiments.
         const int niter_override = col->getNiterGMRES();
         if (niter_override > 0)
             GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, niter_override, 1, GMREStol, this);
@@ -2937,18 +2927,17 @@ void EMfields3D::calculateE()
     time_com.stop();
     #endif
 
-    //* Phase 10m: post-`calculateE` Helmholtz low-pass on the time-centered field Eth.
-    //* Applied BEFORE Ex/Ey/Ez are derived from Eth, so the time-advanced E inherits the
-    //* filtering automatically. Decoupled from MaxwellImage's S·M·S — the implicit operator
-    //* structure is unchanged, sidestepping the Phase 10k drop-in failure mode.
+    //* Once-per-cycle Helmholtz low-pass on Eth, applied BEFORE Ex/Ey/Ez are
+    //* derived. Decoupled from MaxwellImage's S·M·S to keep the implicit
+    //* operator structure unchanged.
     if (col->getPostSolveHelmholtz())
         post_solve_filter_E(Exth, Eyth, Ezth, nxn, nyn, nzn);
 
-    //* Step 25: print grid-side identity decomposition once Exth is finalized.
+    //* Identity decomposition print once Exth is finalized.
     if (col->getDumpCycleIdentity())
     {
         dump_cycle_identity(col->getCurrentCycle());
-        //* Step 27: mass-matrix summary stats — cycle 1 only (M is stable within a cycle).
+        //* Mass-matrix stats — cycle 1 only (M stable within a cycle).
         if (col->getCurrentCycle() == 1)
             dump_mass_matrix_stats(col->getCurrentCycle());
     }
@@ -3077,18 +3066,15 @@ void EMfields3D::MaxwellSource(double *bkrylov)
     //* Physical space --> Krylov space
     phys2solver(bkrylov, tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
-    //* Step 33: snapshot the RHS in node space for cross-code byte diff. Runs
-    //* at the tail of MaxwellSource so both PETSc and built-in GMRES paths
-    //* capture bXn/bYn/bZn before any downstream MaxwellImage iterations.
+    //* Snapshot RHS in node space (cross-code byte diff). Captures bXn/bYn/bZn
+    //* before any downstream MaxwellImage iteration.
     eqValue(0.0, bXn, nxn, nyn, nzn);
     eqValue(0.0, bYn, nxn, nyn, nzn);
     eqValue(0.0, bZn, nxn, nyn, nzn);
     solver2phys(bXn, bYn, bZn, bkrylov, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
-    //* Step 33 diagnostic: also compute A·b by calling MaxwellImage once on
-    //* bkrylov and stash the node-space result. Isolates the operator from the
-    //* solver path — if `b` matches across codes but `A·b` differs, the
-    //* divergence is in MaxwellImage itself.
+    //* A·b = MaxwellImage applied to RHS, stashed in node space — isolates the
+    //* operator from the solver path for cross-code diff.
     const int krylov_size_diag = 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_);
     std::vector<double> Ab_krylov(krylov_size_diag, 0.0);
     MaxwellImage(Ab_krylov.data(), bkrylov);
@@ -3138,9 +3124,9 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 // ghost nodes before returning to the Krylov solver. With the definitions above, phys2solver() would simply zero
 // the ghost nodes and solver2phys() would populate them via communication. Note that it would also be possible, if
 // desired, to give duplicated nodes equal weight by rescaling their values in these two methods.
-//* Step 38: binary dump of an intermediate 3D stage inside MaxwellImage. Writes
-//* `{SaveDirName}/maxwell_stage_c{cycle}_m{matvec}_{stage}_{x|y|z}.bin`. Rank-0
-//* only, full nxn×nyn×nzn node array, row-major C order, k fastest.
+//* Binary dump of an intermediate MaxwellImage stage. Writes
+//* `{SaveDirName}/maxwell_stage_c{cycle}_m{matvec}_{stage}_{x|y|z}.bin`,
+//* full nxn×nyn×nzn node array, row-major C order, k fastest.
 void EMfields3D::dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3_double aY, arr3_double aZ)
 {
     const Collective *col = &get_col();
@@ -3177,20 +3163,18 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     const VirtualTopology3D *vct = &get_vct();
     const Grid *grid = &get_grid();
 
-    //* Step 38: dump at 5 composition stages on the first matvec of the target
-    //* cycle only. Cross-diff against ECSIM isolates which stage (input halo,
-    //* curl² assembly, raw M·E, outer smooth+invVOL, final sum) carries the
-    //* residual 1.83e-6 A·b l2_rel divergence. Zero cost when flag is off.
+    //* Dump 5 composition stages on the first matvec of the target cycle for
+    //* cross-code byte diff. Stages: input halo, curl² assembly, raw M·E,
+    //* outer smooth+invVOL, final sum.
     const bool mi_dump = col->getDumpMaxwellImageStages()
                       && (col->getCurrentCycle() == mi_dump_target_cycle_)
                       && (mi_matvec_count_ == 0);
 
     eqValue(0.0, im, 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_));
 
-    //* Periodic-self subspace flags. The matching solver2phys/phys2solver overloads
-    //* below maintain `tempX[lo]==tempX[hi]` on entry and zero the HI Krylov slot
-    //* on exit, so the matvec runs on consistent data and GMRES iterates inside
-    //* the consistent-periodic subspace. Replaces the SymmetrizeMaxwellImage patch.
+    //* Periodic-self subspace flags. The matching solver2phys/phys2solver
+    //* overloads keep `tempX[lo]==tempX[hi]` on entry and zero the HI Krylov
+    //* slot on exit — GMRES iterates strictly in the consistent-periodic subspace.
     const bool ps_x = col->getPERIODICX() && vct->getXLEN() == 1;
     const bool ps_y = col->getPERIODICY() && vct->getYLEN() == 1;
     const bool ps_z = col->getPERIODICZ() && vct->getZLEN() == 1;
@@ -3198,28 +3182,19 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //? Move from Krylov space to physical space
     solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
-    //* Phase B: switched to the modern n_ghost-aware NBDerivedHaloComm path
-    //  (was communicateNodeBC_old which uses ComParser3D helpers hardcoded to
-    //  n_ghost == 1). The legacy path stayed for historical reasons; both
-    //  produce identical data movement at n_ghost == 1, so this is a no-op
-    //  there.
+    //* n_ghost-aware halo (legacy ComParser3D path was n_ghost==1 only).
     communicateNodeBC(nxn, nyn, nzn, tempX, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
 
-    //* Stage A — post input halo refresh. This is S·E under the
-    //* "halo refresh = smoothing at Smooth=0" reading. Cross-diff pins down
-    //* halo convention differences (corner averaging, ghost fill pattern).
+    //* Stage A — post input halo refresh. Equals S·E under the "halo refresh
+    //* = smoothing at Smooth=0" reading.
     if (mi_dump) dump_maxwell_stage("A_post_halo_in", tempX, tempY, tempZ);
 
-    //? curl(curl(E)) assembly. Two paths selected by MaxwellOperator:
-    //*   "curl_curl"   (default) — legacy composition curlC2N(curlN2C(E)).
-    //*   "lap_graddiv"           — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E)
-    //*                             via composed node-centered lapN2N and
-    //*                             divN2C→gradC2N.
-    //* Step 11 measured both on DoubleGEM (np=1, 30 cyc): |dE/E₀| = 2.16e-04 vs
-    //* 2.15e-04 — neither recovers ECSIM's 2.4e-14 machine precision, so the flag
-    //* is a cross-code comparison knob, not an energy-conservation fix.
+    //? curl²(E) assembly. Two paths selected by MaxwellOperator:
+    //*   "curl_curl"   — legacy composition curlC2N(curlN2C(E)).
+    //*   "lap_graddiv" — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E) via
+    //*                   composed lapN2N and divN2C→gradC2N (default).
     const std::string maxwell_op = col->getMaxwellOperator();
     if (maxwell_op == "lap_graddiv")
     {
@@ -3261,20 +3236,15 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageZ[i][j][k] = tempZ[i][j][k] + factor * imageZ[i][j][k];
             }
 
-    //* Stage B — post (I + (cθΔt)²·curl²)·E assembly, before the M·E block.
-    //* Isolates the Maxwell stencil half of the operator from the particle
-    //* (M·E) half. Step 36 showed curl² alone conserves exactly, so this
-    //* should cross-diff cleanly against ECSIM; any gap here points at
-    //* the stencil implementation (lap+graddiv vs curl²) or (I + ...) order.
+    //* Stage B — post (I + (cθΔt)²·curl²)·E assembly, before M·E block.
+    //* curl² alone conserves exactly; gap here points at the stencil
+    //* implementation (lap_graddiv vs curl_curl) or the (I + ...) order.
     if (mi_dump) dump_maxwell_stage("B_post_curl2", imageX, imageY, imageZ);
 
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(tempX, tempY, tempZ, nxn, nyn, nzn);
 
     //* Stage B2 — tempX after the inner smoothing that precedes M·E.
-    //* Step 38: if A/B match across codes but C diverges, the gap must live
-    //* in *either* this smoothing (energy_conserve_smooth vs applySmoothing)
-    //* *or* the matvec kernel itself. Dumping right before M·E disambiguates.
     if (mi_dump) dump_maxwell_stage("B2_pre_ME_temp", tempX, tempY, tempZ);
 
     //* mass_matrix_times_vector handles bounds internally for the wider TSC stencil
@@ -3294,9 +3264,7 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Z[i][j][k] = dt*th*FourPI*MEz;
             }
 
-    //* Stage C — raw M·E output × (dt·θ·4π), pre outer halo refresh and smoothing.
-    //* With M storage bit-identical to ECSIM (Step 27), any gap here comes from
-    //* the matvec kernel itself (Kahan vs plain, bounds-check, iteration order).
+    //* Stage C — raw M·E output × (dt·θ·4π), pre outer halo and smoothing.
     if (mi_dump) dump_maxwell_stage("C_raw_ME", temp2X, temp2Y, temp2Z);
 
     //* Energy-conserving smoothing of M·E before the invVOL scaling. The directional
@@ -3313,9 +3281,8 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Z[i][j][k] *= invVOL;
             }
 
-    //* Stage D — full S·M·S·E weight, post outer halo + outer smooth + invVOL.
-    //* This is the term that gets added to (I + (cθΔt)²·curl²)·E. Divergence
-    //* vs C indicates the outer halo/smoothing step differs between codes.
+    //* Stage D — S·M·S·E, post outer halo + smooth + invVOL. Added to
+    //* (I + (cθΔt)²·curl²)·E in the next loop.
     if (mi_dump) dump_maxwell_stage("D_SMS_invVOL", temp2X, temp2Y, temp2Z);
 
     for (int i = n_ghost_; i < nxn - n_ghost_; i++)
@@ -3330,12 +3297,11 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //* Stage E — full A·E assembled.
     if (mi_dump) dump_maxwell_stage("E_full_Ae", imageX, imageY, imageZ);
 
-    //? Move from physical space to Krylov space (zeros HI duplicate slot, averaging
-    //? the two duplicates into the LO slot first — replaces the legacy
-    //? SymmetrizeMaxwellImage post-matvec unify_periodic_duplicates patch).
+    //? Move from physical space to Krylov space (averages LO+HI duplicate
+    //? Krylov entries into LO and zeros HI on each periodic-self axis).
     phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
-    //* Step 38: bookkeeping for per-stage dumps.
+    //* Per-stage-dump bookkeeping.
     if (col->getDumpMaxwellImageStages()
         && col->getCurrentCycle() == mi_dump_target_cycle_)
         mi_matvec_count_++;
@@ -3444,8 +3410,8 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
     //  the only one that's correct for n_ghost > 1.
     communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
 
-    //* Phase 10m: kernel_override lets the post-solve Helmholtz hook reuse this method
-    //* without requiring callers to mutate the global Collective state.
+    //* kernel_override lets the post-solve Helmholtz hook reuse this method
+    //* without mutating Collective state.
     const int kernel = (kernel_override >= 0) ? kernel_override : col->getSmoothKernelInt();   // 0 = binomial, 1 = binomial5, 2 = helmholtz, 3 = binomial5_refresh
 
     //* binomial5 reaches ±2 cells in each direction, so at least 2 ghost layers must exist.
@@ -3455,11 +3421,10 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
 
-    //* Phase 10k: Helmholtz low-pass branch — early return since it has its own iteration structure.
-    //*   Solve (I - α ∇²) S_new = S_old via short CG. The operator is SPD and self-adjoint, so
-    //*   applying it identically to E and J preserves the energy-conservation argument. Default
-    //*   α = (max(Lx,Ly,Lz)/(2π))² puts the half-power point at the domain fundamental k = 2π/L_max,
-    //*   which is exactly the unstable mode identified in Phase 10j (Finding 27).
+    //* Helmholtz low-pass: solve (I - α ∇²) S_new = S_old via short CG. Operator
+    //* is SPD and self-adjoint, so applying it identically to E and J preserves
+    //* the energy-conservation argument. Default α = (max(Lx,Ly,Lz)/(2π))²
+    //* puts the half-power point at the domain fundamental k = 2π/L_max.
     if (kernel == 2)
     {
         double alpha = col->getHelmholtzAlpha();
@@ -3592,8 +3557,8 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
         }
         else if (kernel == 1) // binomial5
         {
-            //* Phase 10i: 5-point binomial (1,4,6,4,1)/16 per direction → 125-point tensor product / 4096
-            //* Half-width = 2 cells (vs 1 for the 3-point kernel), i.e. doubled smoothing radius per pass.
+            //* 5-point binomial (1,4,6,4,1)/16 per direction → 125-point / 4096.
+            //* Half-width 2 cells (vs 1 for the 3-point kernel).
             static const double c5[5] = {1.0, 4.0, 6.0, 4.0, 1.0};
             const double inv4096 = 1.0 / 4096.0;
             for (int i = n_ghost_; i < nx - n_ghost_; i++)
@@ -3613,11 +3578,10 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
         }
         else // kernel == 3: binomial5_refresh
         {
-            //* Phase 10l: decompose each pass into two narrow (1,2,1)/4 sweeps with a halo
-            //* refresh in between. By the convolution identity (1,2,1)*(1,2,1) = (1,4,6,4,1)
-            //* this should equal binomial sm=2N bit-for-bit on an infinite grid; the only place
-            //* it can differ from plain binomial5 is the inter-pass halo refresh, which is
-            //* exactly Finding 26's hypothesised culprit.
+            //* Decompose each pass into two narrow (1,2,1)/4 sweeps with a halo
+            //* refresh in between. (1,2,1)*(1,2,1) = (1,4,6,4,1), so this equals
+            //* binomial sm=2N bit-for-bit on an infinite grid; the only place it
+            //* can differ from plain binomial5 is the inter-pass halo refresh.
 
             //* First narrow pass: data → temp
             for (int i = n_ghost_; i < nx - n_ghost_; i++)
@@ -3656,7 +3620,6 @@ void EMfields3D::energy_conserve_smooth_direction(double*** data, int nx, int ny
                 for (int k = n_ghost_; k < nz - n_ghost_; k++)
                     data[i][j][k] = temp[i][j][k];
 
-        //* Phase D: switched to modern n_ghost-aware halo (see comment above).
         communicateNodeBC(nx, ny, nz, data, bc[0], bc[1], bc[2], bc[3], bc[4], bc[5], vct, this);
     }
 
@@ -3678,19 +3641,17 @@ void EMfields3D::energy_conserve_smooth(arr3_double data_X, arr3_double data_Y, 
 
 void EMfields3D::post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field, arr3_double Ez_field, int nx, int ny, int nz)
 {
-    //* Phase 10m: post-`calculateE` Helmholtz low-pass. Reuses `energy_conserve_smooth_direction`
-    //* with kernel_override=2 (helmholtz) so the binomial smoother stays in its structural slot
-    //* inside MaxwellImage and the Helmholtz acts only as a once-per-cycle dissipation step on E.
-    //* α and inner CG iter count come from `HelmholtzAlpha` / `HelmholtzNiter`.
+    //* Post-`calculateE` Helmholtz low-pass via `energy_conserve_smooth_direction`
+    //* with kernel_override=2 — once-per-cycle dissipation on E without disturbing
+    //* the inside-MaxwellImage smoother slot. α and CG iter from input flags.
     energy_conserve_smooth_direction(Ex_field, nx, ny, nz, 0, /*kernel_override=*/2);
     energy_conserve_smooth_direction(Ey_field, nx, ny, nz, 1, /*kernel_override=*/2);
     energy_conserve_smooth_direction(Ez_field, nx, ny, nz, 2, /*kernel_override=*/2);
 }
 
-//* Step 22: Average the two periodic-image copies of each interior duplicate node.
-//* For periodic axis d with n_ghost_ ghost layers, indices `n_ghost_` and `nx_d - n_ghost_ - 1`
-//* along that axis carry the same physical position but live as independent solver DOFs.
-//* After averaging, re-running communicateNodeBC propagates the unified value back into ghosts.
+//* Average the two periodic-image copies of each interior duplicate node.
+//* On periodic axis d, indices `n_ghost_` and `nx_d - n_ghost_ - 1` carry the
+//* same physical position but live as independent solver DOFs.
 void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz)
 {
     const VirtualTopology3D *vct = &get_vct();
@@ -3755,10 +3716,8 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
     communicateNodeBC(nxn, nyn, nzn, Ezf, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
 }
 
-//* Step 27: summary stats over the stored 9-component mass matrix. Prints once at the
-//* supplied cycle and is designed as the iPIC3D endpoint for a cross-code M byte compare
-//* against ECSIM (dump its `Mxx/Myy/…` with equivalent NeNo ordering over the same
-//* unique-node interior). Cheap: one pass over each of the 9 · ne_mass_ arrays.
+//* Summary stats over the stored 9-component mass matrix — endpoint for
+//* a cross-code M byte diff against ECSIM. One pass per array.
 void EMfields3D::dump_mass_matrix_stats(int cycle)
 {
     auto walk = [&](arr4_double M, const char *name)
@@ -3809,9 +3768,9 @@ void EMfields3D::dump_mass_matrix_stats(int cycle)
     walk(Mzy, "Mzy");
 }
 
-//* Step 25: cycle-1 identity decomposition print. Uses the SAME unique-node range
-//* [n_ghost_, n{x,y,z}n - n_ghost_ - 1) as get_E_field_energy so external scripts
-//* can line the numbers up with ConservedQuantities.txt column II/III/IV.
+//* Cycle-1 identity decomposition print. Uses the same unique-node range
+//* [n_ghost_, n{x,y,z}n - n_ghost_ - 1) as get_E_field_energy so the values
+//* line up with ConservedQuantities.txt columns II/III/IV.
 void EMfields3D::dump_cycle_identity(int cycle)
 {
     double local_I_J = 0.0;
@@ -3851,7 +3810,7 @@ void EMfields3D::dump_cycle_identity(int cycle)
     }
 }
 
-//* Step 32: raw-binary dump of cycle-N fields for cross-code byte diff.
+//* Raw-binary dump of cycle-N fields for cross-code byte diff.
 //* Layout: row-major C order, k (z) fastest — matches how iPIC3D's arr3_double
 //* stores data. One double per grid point, 8 bytes, IEEE-754 little-endian.
 //* Writes per cycle N:
@@ -3902,9 +3861,9 @@ void EMfields3D::dump_cycle_fields(int cycle, const std::string& dir)
     write_arr3("Ex",   Ex);    write_arr3("Ey",   Ey);    write_arr3("Ez",   Ez);
     write_arr3("Jxh",  Jxh);   write_arr3("Jyh",  Jyh);   write_arr3("Jzh",  Jzh);
     write_arr3("Bxn",  Bxn);   write_arr3("Byn",  Byn);   write_arr3("Bzn",  Bzn);
-    //* Step 33: MaxwellSource RHS b = E_n + θ·dt·(c·∇×B − 4π·S(Jxh)).
+    //* RHS b = E_n + θ·dt·(c·∇×B − 4π·S(Jxh)).
     write_arr3("bx",   bXn);   write_arr3("by",   bYn);   write_arr3("bz",   bZn);
-    //* Step 33: A·b — MaxwellImage applied to the RHS, for direct operator diff.
+    //* A·b for direct operator diff.
     write_arr3("Abx",  AbXn);  write_arr3("Aby",  AbYn);  write_arr3("Abz",  AbZn);
 
     write_arr4("Mxx",  Mxx);   write_arr4("Myy",  Myy);   write_arr4("Mzz",  Mzz);
@@ -3929,7 +3888,7 @@ void EMfields3D::dump_cycle_fields(int cycle, const std::string& dir)
 }
 
 
-//* Step 34b: programmatic self-adjointness probe for MaxwellImage.
+//* Programmatic self-adjointness probe for MaxwellImage.
 //*
 //* Samples two deterministic pseudo-random vectors u, v in Krylov space, applies
 //* the matrix-free operator A via MaxwellImage to each, and computes the inner
@@ -5203,10 +5162,8 @@ void EMfields3D::setZeroMassMatrix()
                 }
 }
 
-//! Step 68b: zero the Kahan-gather companion arrays. Called each cycle
-//* alongside `setZeroPrimaryMoments` / `setZeroMassMatrix` when the flag is
-//* on; a no-op when off (cheap single pass over the companion arrays, which
-//* are always allocated).
+//! Zero the Kahan-gather companion arrays. Called each cycle alongside
+//* setZeroPrimaryMoments / setZeroMassMatrix when KahanGather is on.
 void EMfields3D::setZeroKahanGatherCompensation()
 {
     for (int is = 0; is < ns; is++)
@@ -5237,12 +5194,11 @@ void EMfields3D::setZeroKahanGatherCompensation()
                 }
 }
 
-//! Step 68b: fold Kahan compensation back into the primary field and zero it.
+//! Fold Kahan compensation back into the primary field and zero it.
 //* Called just before halo exchange so `communicateInterp` / `communicateNode_P`
 //* ship a single ε²-accurate value per node rather than a (sum, comp) pair.
-//* Follows the Neumaier convention: the companion scalar is the running
-//* floating-point residual of all plain adds replaced by `kahan_add`, so the
-//* final total is `sum + comp`.
+//* Neumaier convention: companion = running FP residual of plain adds replaced
+//* by `kahan_add`, so final total is `sum + comp`.
 void EMfields3D::foldKahanGatherCompensation()
 {
     for (int is = 0; is < ns; is++)
@@ -5356,7 +5312,7 @@ void EMfields3D::setZeroDensities()
     setZeroPrimaryMoments();
     setZeroTertiaryMoments();
     setZeroMassMatrix();
-    //* Step 68b: zero the Kahan companions in lock-step with their primaries.
+    //* Zero Kahan companions in lock-step with their primaries.
     if (_col.getKahanGather())
         setZeroKahanGatherCompensation();
 }
@@ -7779,10 +7735,8 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
 //*** Get energies ***//
 
 //! Electric field energy
-//* Step 68c: `use_kahan` hoisted as a runtime-constant bool; the inner-loop
-//* branch is predicted perfectly so the flag-off path is byte-identical
-//* to the legacy plain `+=`. With the flag on, per-rank sum becomes
-//* ε²-accurate regardless of node-walk order.
+//* `use_kahan` hoisted as a runtime-constant bool; the inner-loop branch is
+//* predicted perfectly so the flag-off path is byte-identical to plain `+=`.
 double EMfields3D::get_E_field_energy(void)
 {
     double localEenergy = 0.0, compEenergy = 0.0;

@@ -54,7 +54,7 @@ double dotP(const double *vect1, const double *vect2, int n,MPI_Comm* comm);
 /** method to calculate dot product */
 double dot(const double *vect1, const double *vect2, int n);
 
-//* Step 62: bit-deterministic scalar MPI_SUM allreduce.
+//* bit-deterministic scalar MPI_SUM allreduce.
 //* When g_deterministic_mpi_reductions is true, dotP/normP/norm2P and callers
 //* in fields/solvers route their MPI_Allreduce through this instead of the
 //* default tree reduction. The implementation is MPI_Gather → rank-order sum

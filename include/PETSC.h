@@ -95,7 +95,7 @@ private:
     //   D(i,j,k) = I + (cθdt)²·CC_diag + dt·θ·4π·invVOL · M[g=0](i,j,k)
     //
     // This captures the local mass + curl-curl structure but NOT the 27-point
-    // off-diagonal coupling. Tested approaches and results (see plan-preconditioners.md):
+    // off-diagonal coupling. Tested approaches and results:
     //   - S(D⁻¹(S(r))): over-smooths, stalls at residual ~0.12
     //   - D⁻¹ only:      1.6–2× more iterations than PCNONE
     //

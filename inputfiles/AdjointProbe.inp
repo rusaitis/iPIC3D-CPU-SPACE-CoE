@@ -1,4 +1,4 @@
-###! Step 34b: 2-cycle self-adjointness probe on DoubleGEM.
+###! 2-cycle self-adjointness probe on DoubleGEM.
 ###! Runs MaxwellSource at cycle 1, then MaxwellImage(u) and MaxwellImage(v) on
 ###! two deterministic pseudo-random Krylov vectors, and prints <A*u,v>-<u,A*v>.
 ###! `MaxwellOperator` is varied by the driver script.

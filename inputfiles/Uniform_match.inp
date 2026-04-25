@@ -1,6 +1,6 @@
 ###! Uniform plasma counterpart to DoubleGEM_match.inp.
 ###! Same grid, dt, cycles, MPI topology, periodic BCs — but NO Harris sheet,
-###! NO perturbation, uniform B0. If the Step 34d residual ~6e-7 is driven by
+###! NO perturbation, uniform B0. If the residual ~6e-7 is driven by
 ###! current-sheet / gradient features, this should be MUCH smaller.
 ###! If it's the same, the gap is intrinsic to the discretization.
 

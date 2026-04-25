@@ -74,12 +74,12 @@ namespace iPic3D {
     void CalculateB();
     void ComputeEMFields(int cycle);
 
-    //* Step 32: cycle 0 (post-init, pre-solve) or cycle 1 (post-solve-1) dump
+    //* cycle 0 (post-init, pre-solve) or cycle 1 (post-solve-1) dump
     //* of all node fields + stored M as raw IEEE-754 doubles for cross-code
     //* byte diff. No-op if DumpCycle1Fields flag is off.
     void DumpCycleFields(int cycle);
 
-    //* Step 34c: gather/scatter transpose duality probe. Tests condition #3 of
+    //* gather/scatter transpose duality probe. Tests condition #3 of
     //* the six ECSIM-exact energy-identity conditions: ⟨gather(f), q⟩_particle
     //* should equal ⟨f, scatter(q)⟩_grid bit-for-bit when the gather and scatter
     //* use the same weights. Opt-in via VerifyAdjoint flag (shared with 34b);

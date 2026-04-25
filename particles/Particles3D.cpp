@@ -43,11 +43,11 @@ developers: Stefano Markidis, Giovanni Lapenta
 
 #include "mic_particles.h"
 #include "debug.h"
-#include "ompdefs.h"                 // omp_get_max_threads for Step 63
+#include "ompdefs.h"                 // omp_get_max_threads
 #include <complex>
 #include <iomanip>
 #include <fstream>
-#include <sstream>                   // std::ostringstream for Step 64 α dump
+#include <sstream>                   // std::ostringstream α dump
 #include "../LeXInt_Timer.hpp"
 #include <cstdlib>
 
@@ -998,12 +998,12 @@ void Particles3D::Shock1D_DoublePiston(Field * EMf)
 //! ECSIM - energy conserving semi-implicit method !//
 void Particles3D::ECSIM_velocity(Field *EMf)
 {
-    //* Step 63: same serialisation clause as in computeMoments. Mover per-particle
+    //* same serialisation clause as in computeMoments. Mover per-particle
     //* loops have no atomics, but OMP thread scheduling still perturbs downstream
     //* state enough to lose bit-reproducibility vs OMP_NUM_THREADS=1.
     const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
 
-    //* Step 64: mover/gather α-parity audit dump. When flag is on, allocate a
+    //* mover/gather α-parity audit dump. When flag is on, allocate a
     //* per-particle buffer and fill [pidx, x, y, z, Bx, By, Bz, α00..α22]
     //* inside the loop; master writes the full buffer after the parallel region.
     const bool dump_alpha = col->getDumpAlphaBothPaths();
@@ -1118,7 +1118,7 @@ void Particles3D::ECSIM_velocity(Field *EMf)
             const pfloat omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
             const pfloat denom = 1.0 / (1.0 + omsq);
 
-            //* Step 64: record α for the parity audit. When the flag is on we
+            //* record α for the parity audit. When the flag is on we
             //* always build the explicit 3×3 form (same expressions as the
             //* gather's α) so the dump measures the canonical rotation tensor,
             //* independent of whether the velocity update itself uses the
@@ -1749,20 +1749,20 @@ void Particles3D::computeMoments(Field *EMf)
     if (vct->getCartesian_rank() == 0)
         cout << "Number of particles of species " << ns << " per MPI process: " << getNOP() << endl;
 
-    //* Step 63: when DeterministicThreadMoments=true, clamp the gather's parallel
+    //* when DeterministicThreadMoments=true, clamp the gather's parallel
     //* region to a single thread. Deposit helpers (add_Rho_node/add_Jxh_node/
     //* add_Mass) use `#pragma omp atomic update` to avoid races, but the landing
     //* order of atomic writes to the same node still varies with the OpenMP
     //* schedule, introducing ±1 ULP run-to-run noise. Serialising the loop makes
     //* the deposit order deterministic at the cost of losing OpenMP speedup on
     //* computeMoments. MPI parallelism is unaffected.
-    //* Step 68b: `KahanGather=true` uses the non-atomic `*_kahan` deposit
+    //* `KahanGather=true` uses the non-atomic `*_kahan` deposit
     //* variants, which are only safe in a single-thread region — so force
     //* num_threads=1 whenever the flag is on.
     const bool kahan_gather   = col->getKahanGather();
     const int det_num_threads = (col->getDeterministicThreadMoments() || kahan_gather) ? 1 : omp_get_max_threads();
 
-    //* Step 64: mover/gather α-parity audit dump. Allocate per-particle scratch
+    //* mover/gather α-parity audit dump. Allocate per-particle scratch
     //* when the flag is on; the per-thread loop fills each particle's 16-double
     //* slot, and master writes the file after the parallel region exits.
     const bool dump_alpha = col->getDumpAlphaBothPaths();
@@ -1972,7 +1972,7 @@ void Particles3D::computeMoments(Field *EMf)
             alpha[2][1] = (-Omx + (Omy*Omz))*denom;
             alpha[2][2] = ( 1.0 + (Omz*Omz))*denom;
 
-            //* Step 64: record the gather's α tensor for the parity audit.
+            //* record the gather's α tensor for the parity audit.
             if (dump_alpha)
             {
                 double* slot = alpha_dump_buffer + static_cast<long>(pidx) * n_alpha_doubles;

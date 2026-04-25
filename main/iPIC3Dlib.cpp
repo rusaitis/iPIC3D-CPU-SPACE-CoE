@@ -180,7 +180,7 @@ int c_Solver::Init(int argc, char **argv)
     }
 #endif
 
-    //* Step 62: propagate the deterministic-reduction flag into the Basic module
+    //* propagate the deterministic-reduction flag into the Basic module
     //* before any dotP/normP/norm2P call (first one is inside EMfields3D init).
     g_deterministic_mpi_reductions = col->getDeterministicMPIReductions();
 
@@ -328,7 +328,7 @@ int c_Solver::Init(int argc, char **argv)
             particles[i].fixPosition();
         }
 
-        //* Step 31: replace the freshly-initialised particle list with a dump from
+        //* replace the freshly-initialised particle list with a dump from
         //* a prior run (or ECSIM). Applied after the case-specific init so the
         //* allocation sizing / topology setup is already correct; we just swap
         //* the per-particle state.
@@ -338,15 +338,15 @@ int c_Solver::Init(int argc, char **argv)
                 particles[i].load_particles_init(col->getParticlesInitDir());
         }
 
-        //* Step 31: dump post-init particle state (canonical CSV) for cross-code
-        //* byte diff (Step 32 prerequisite). Runs once at startup; free when off.
+        //* Dump post-init particle state (canonical CSV) for cross-code byte diff.
+        //* Runs once at startup; free when off.
         if (col->getDumpParticlesInit())
         {
             for (int i = 0; i < ns; i++)
                 particles[i].dump_particles_init(col->getSaveDirName());
         }
 
-        //* Step 68: global-to-local particle dump/load. Mirrors the Step 31 hooks
+        //* global-to-local particle dump/load. Mirrors the per-rank dump hooks
         //* but uses a single aggregated file per species, filtered by local
         //* subdomain on load, so a reference state generated at one (np, MPI
         //* layout) can seed a different one. Load runs before dump so a round
@@ -544,7 +544,7 @@ void c_Solver::CalculateMoments()
     time_com.start();
     #endif
 
-    //* Step 68b: fold the Kahan-gather compensation into the primaries once
+    //* fold the Kahan-gather compensation into the primaries once
     //* all species have finished depositing and before any halo exchange
     //* runs, so `communicateInterp` / `communicateNode_P` ship a single
     //* ε²-accurate value per node rather than a (sum, comp) pair.
@@ -557,7 +557,7 @@ void c_Solver::CalculateMoments()
 
     EMf->communicateGhostP2G_mass_matrix();
 
-    //* Step 68c: second fold — the Kahan-halo sum-on-receive lands residuals
+    //* second fold — the Kahan-halo sum-on-receive lands residuals
     //* in the companion arrays. Merge them back into the primaries now so the
     //* field solve reads a single ε²-accurate value per node. No-op when
     //* `KahanGather` is off (companions always zero in that case).
@@ -605,7 +605,7 @@ void c_Solver::ComputeEMFields(int cycle)
 {
     col->setCurrentCycle(cycle);
 
-    //* Step 38: arm per-stage MaxwellImage dumps on cycle 1's first matvec.
+    //* arm per-stage MaxwellImage dumps on cycle 1's first matvec.
     //* Cheap no-op when DumpMaxwellImageStages flag is off.
     if (cycle == 1 && col->getDumpMaxwellImageStages())
         EMf->set_mi_dump_target(1);
@@ -678,7 +678,7 @@ void c_Solver::ComputeEMFields(int cycle)
     #endif
 }
 
-//* Step 32: cycle-N field dump hook. Called from the main loop and just after
+//* cycle-N field dump hook. Called from the main loop and just after
 //* Init(). At cycle 0 captures pure init state (pre-solve); at cycle 1 captures
 //* Jxh/M from the first gather + Eth from the first solve. Opt-in via
 //* DumpCycle1Fields flag (kept name for backward compat).
@@ -689,7 +689,7 @@ void c_Solver::DumpCycleFields(int cycle)
     EMf->dump_cycle_fields(cycle, col->getSaveDirName());
 }
 
-//* Step 34c: programmatic gather/scatter transpose-duality probe.
+//* programmatic gather/scatter transpose-duality probe.
 //*
 //* Tests condition #3 of the six ECSIM-exact energy-identity conditions:
 //*   <gather(f), q>_particle = <f, scatter(q)>_grid
@@ -864,7 +864,7 @@ bool c_Solver::ParticlesMover()
     #endif
 
     //* Iterate over each species to update velocities.
-    //* If SubcycleMover is on (Step 3 — ECSIM combined mover), the velocity+position
+    //* If SubcycleMover is on (ECSIM combined mover), the velocity+position
     //* update is done in one pass via mover_PC_sub; the separate ECSIM_position call
     //* below is skipped.
     const bool subcycle_mover = col->getSubcycleMover() && !col->getRelativistic();

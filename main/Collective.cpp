@@ -110,7 +110,7 @@ void Collective::ReadInput(string inputfile)
         SmoothCycle     = config.read<int>       ("SmoothCycle", 1);
         config.readInto(num_smoothings, "num_smoothings", 0);
 
-        //* Phase 10i/10k/10l: smoother kernel selection (see Collective.h for semantics)
+        //* smoother kernel selection (see Collective.h for semantics)
         SmoothKernel    = config.read<string>    ("SmoothKernel", "binomial");
         if (SmoothKernel == "binomial")
             smoothKernelInt = 0;
@@ -126,19 +126,19 @@ void Collective::ReadInput(string inputfile)
             MPI_Abort(MPI_COMM_WORLD, -1);
         }
 
-        //* Phase 10k Helmholtz smoother knobs. Default α = 0 means auto-pick:
+        //* Helmholtz smoother knobs. Default α = 0 means auto-pick:
         //* α = (max(Lx,Ly,Lz)/(2π))², which sets the Helmholtz half-power point at
         //* the domain fundamental k = 2π/L_max — exactly the unstable mode in Finding 27.
         HelmholtzAlpha  = config.read<double>    ("HelmholtzAlpha", 0.0);
         HelmholtzNiter  = config.read<int>       ("HelmholtzNiter", 12);
 
-        //* Phase 10m: post-`calculateE` Helmholtz hook (default off — opt-in).
+        //* post-`calculateE` Helmholtz hook (default off — opt-in).
         PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
-        //* Step 25: cycle-1 identity decomposition print (DoubleGEM residual audit).
+        //* cycle-1 identity decomposition print (DoubleGEM residual audit).
         DumpCycleIdentity = config.read<bool>("DumpCycleIdentity", false);
 
-        //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
+        //* programmatic self-adjointness probe for MaxwellImage.
         VerifyAdjoint = config.read<bool>("VerifyAdjoint", false);
 
         //* Lapenta-2023 S-symmetry probe. Verifies that the smoothing matrix is
@@ -150,28 +150,28 @@ void Collective::ReadInput(string inputfile)
         //* output to ULP), or whether it drifts the duplicates by FP-ε per matvec.
         VerifySubspacePreservation = config.read<bool>("VerifySubspacePreservation", false);
 
-        //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
+        //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 
         SaveDirName     = config.read<string>    ("SaveDirName", "data");
         RestartDirName  = config.read<string>    ("RestartDirName", "data");
 
-        //* Step 31: particle-state dump/load for cross-code byte diff (prerequisite for Step 32).
+        //* Particle-state dump/load for cross-code byte diff.
         //* Reads must come after SaveDirName since ParticlesInitDir defaults to it.
         DumpParticlesInit = config.read<bool>  ("DumpParticlesInit", false);
         LoadParticlesInit = config.read<bool>  ("LoadParticlesInit", false);
         ParticlesInitDir  = config.read<string>("ParticlesInitDir", SaveDirName);
 
-        //* Step 32: cycle-1 field dump for cross-code byte diff.
+        //* cycle-1 field dump for cross-code byte diff.
         DumpCycle1Fields  = config.read<bool>  ("DumpCycle1Fields", false);
-        //* Step 38: per-stage MaxwellImage dump for cross-code operator-interior diff.
+        //* per-stage MaxwellImage dump for cross-code operator-interior diff.
         DumpMaxwellImageStages = config.read<bool>("DumpMaxwellImageStages", false);
 
-        //* Step 67 (2026-04-24): `EpsilonReproducibility` is a composite convenience
+        //* Composite flag — `EpsilonReproducibility` is a composite convenience
         //* flag that lifts the *defaults* of the seven determinism + Kahan knobs to
         //* `true`. Individual flags can still be overridden in the input file (their
         //* explicit setting wins over the composite default). Enable it to get the
-        //* Step 68c ε-reproducibility envelope — np=1 and np=4 matching to ~2 ULPs
+        //* Composite ε-reproducibility envelope — np=1 and np=4 matching to ~2 ULPs
         //* on conserved quantities — without listing seven flags every time. NOT
         //* strict byte reproducibility: cross-np residuals ~1–2 ULPs remain due to
         //* MPI_Allreduce tree ordering. Intended use: a dedicated CI reproducibility
@@ -179,32 +179,32 @@ void Collective::ReadInput(string inputfile)
         //* legacy performance).
         const bool eps_repro = config.read<bool>("EpsilonReproducibility", false);
 
-        //* Step 62 / 63: bit-determinism knobs (default off — legacy preserved —
+        //* Bit-determinism knobs (default off — legacy preserved —
         //* unless EpsilonReproducibility flips the defaults).
         DeterministicMPIReductions = config.read<bool>("DeterministicMPIReductions", eps_repro);
         DeterministicThreadMoments = config.read<bool>("DeterministicThreadMoments", eps_repro);
-        //* Step 64: mover/gather α-parity audit dump (default off regardless of
+        //* mover/gather α-parity audit dump (default off regardless of
         //* EpsilonReproducibility — this is a diagnostic, not a correctness knob).
         //* Every enabled cycle writes ~16 doubles × NOP per species per rank for
         //* each of the two paths — keep FinalCycle small when running the audit.
         DumpAlphaBothPaths = config.read<bool>("DumpAlphaBothPaths", false);
-        //* Step 66: drain incoming particle blocks per-direction in fixed order
+        //* drain incoming particle blocks per-direction in fixed order
         //* instead of OS-scheduled `MPI_Waitany` completion.
         DeterministicParticleComm  = config.read<bool>("DeterministicParticleComm", eps_repro);
-        //* Step 68: cross-np bit-identity — global particle dump/load (opt-in,
+        //* cross-np bit-identity — global particle dump/load (opt-in,
         //* NOT under EpsilonReproducibility because they add disk/comm cost and
         //* are only useful when comparing across decompositions). KahanParticleSums
         //* IS under eps_repro.
         DumpParticlesGlobal = config.read<bool>("DumpParticlesGlobal", false);
         LoadParticlesGlobal = config.read<bool>("LoadParticlesGlobal", false);
         KahanParticleSums   = config.read<bool>("KahanParticleSums",   eps_repro);
-        //* Step 68b: Kahan-compensated gather deposit. Requires single-thread
+        //* Kahan-compensated gather deposit. Requires single-thread
         //* gather (flag forces num_threads=1 in computeMoments); supersedes
         //* the atomic-update path while on. Memory cost: one companion per
         //* deposited field.
         KahanGather         = config.read<bool>("KahanGather",         eps_repro);
-        //* Step 68c: Kahan on grid field-energy reductions + halo sum-on-receive.
-        //* Together they close the last cross-np FP-drift sources after Step 68b.
+        //* Kahan on grid field-energy reductions + halo sum-on-receive.
+        //* Together they close the last cross-np FP-drift sources.
         KahanFieldEnergy    = config.read<bool>("KahanFieldEnergy",    eps_repro);
         KahanHalo           = config.read<bool>("KahanHalo",           eps_repro);
         ns              = config.read<int>       ("ns");
@@ -259,9 +259,9 @@ void Collective::ReadInput(string inputfile)
         //*   "curl_curl"  — legacy iPIC3D path: curlC2N(curlN2C(E)).
         //*   "lap_graddiv" — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E) via composed
         //*                   node-centered operators.
-        //* Step 67 (promoted 2026-04-24): default = "lap_graddiv". Structural match
+        //* Composite flag — default = "lap_graddiv". Structural match
         //* to ECSIM's self-adjoint operator; null-effect on drift at np=1 but
-        //* required for the np=1 ≡ np=4 ε-reproducibility result (Step 68c).
+        //* required for the np=1 ≡ np=4 ε-reproducibility result.
         MaxwellOperator             = config.read<string>   ("MaxwellOperator", "lap_graddiv");
         // Backward compat: PrecMatrix=true implies PrecType=Matrix if not explicitly set
         if (PrecMatrix && PrecType == "None")

@@ -883,7 +883,7 @@ int Particles3Dcomm::handle_received_particles(int pclCommMode)
   // while there are still incoming particles
   // put them in the appropriate buffer
   //
-  //* Step 66: opt-in deterministic reception. Drains each direction fully in
+  //* opt-in deterministic reception. Drains each direction fully in
   //* a fixed [XDN, XUP, YDN, YUP, ZDN, ZUP] order via `MPI_Wait` on the
   //* streaming block communicator, eliminating the OS-scheduled reordering
   //* introduced by `MPI_Waitany`. Particles appended to `_pcls` therefore
@@ -1447,7 +1447,7 @@ double Particles3Dcomm::get_total_charge()
     double localQ = 0.0;
     double totalQ = 0.0;
 
-    //* Step 68: opt-in Kahan accumulation — same rationale as get_kinetic_energy.
+    //* opt-in Kahan accumulation — same rationale as get_kinetic_energy.
     const bool use_kahan = col->getKahanParticleSums();
     double q_c = 0.0;
 
@@ -1487,7 +1487,7 @@ double Particles3Dcomm::get_kinetic_energy()
     double totalKe = 0.0;
     double lorentz_factor = 0.0;
 
-    //* Step 68: opt-in Kahan-compensated accumulation. The plain `+=` is
+    //* opt-in Kahan-compensated accumulation. The plain `+=` is
     //* FP-non-associative, so the same particle set summed as one list
     //* (np=1) vs as rank-partial sums (np>1) drifts by ~1 ULP per cycle.
     //* Kahan drops the per-add error to O(ε²) which is below IEEE 754's
@@ -1686,10 +1686,10 @@ void Particles3Dcomm::PrintNp()  const
     cout << endl;
 }
 
-//* Step 31: dump particle state to a canonical text file for cross-code byte diff.
+//* dump particle state to a canonical text file for cross-code byte diff.
 //* Format — one line per particle, 17-digit scientific: `x y z u v w q`. Ordering
 //* matches insertion order (the natural loop order of the case's initializer),
-//* sufficient for iPIC3D→iPIC3D round-trip. Cross-code (Step 32) will impose a
+//* sufficient for iPIC3D→iPIC3D round-trip. Cross-code will impose a
 //* canonical sort if needed.
 void Particles3Dcomm::dump_particles_init(const std::string& dir) const
 {
@@ -1715,7 +1715,7 @@ void Particles3Dcomm::dump_particles_init(const std::string& dir) const
         cout << "[DumpParticles] wrote species " << ns << " → " << path.str() << endl;
 }
 
-//* Step 31: clear current _pcls and repopulate from a file written by
+//* clear current _pcls and repopulate from a file written by
 //* `dump_particles_init`. Each line is `x y z u v w q`; ID is regenerated.
 void Particles3Dcomm::load_particles_init(const std::string& dir)
 {
@@ -1741,13 +1741,13 @@ void Particles3Dcomm::load_particles_init(const std::string& dir)
              << " pcls) ← " << path.str() << endl;
 }
 
-//* Step 68: global-to-local particle dump. Aggregates every rank's particles
+//* global-to-local particle dump. Aggregates every rank's particles
 //* to rank 0 via MPI_Gatherv and writes a single species file
 //* `{dir}/particles_init_s{ns}_global.txt`. Canonical per-particle format
 //* matches `dump_particles_init`: one line with 17-digit `x y z u v w q`,
 //* ordered by rank then by local insertion order. Together with
 //* `load_particles_global` this round-trips across any change in np at
-//* fixed global particle count, which is the prerequisite for the Step 68
+//* fixed global particle count, which is the prerequisite for the cross-np
 //* np=1 ≡ np=4 bit-identity test.
 void Particles3Dcomm::dump_particles_global(const std::string& dir) const
 {
@@ -1811,7 +1811,7 @@ void Particles3Dcomm::dump_particles_global(const std::string& dir) const
     }
 }
 
-//* Step 68: global-to-local particle load. Rank 0 reads the full file and
+//* global-to-local particle load. Rank 0 reads the full file and
 //* broadcasts the raw buffer to all ranks; each rank filters by its local
 //* subdomain (`xstart <= x < xend` etc.) and keeps only its own share.
 //* Boundary tie-break: the last rank along each axis inclusively accepts
