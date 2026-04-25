@@ -164,6 +164,21 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
     //* communicateInterp) is still excluded: ECSIM's `makeCenterFace`
     //* (ComParser3D.cpp:91-116) reads from interior[1] / interior[nx-2]
     //* (legacy convention), so iPIC3D's legacy self-swap already matches there.
+    //*
+    //* Non-periodic BC safety (audit 2026-04-25). The offset-by-one source
+    //* indices below are computed unconditionally but only *read* when the
+    //* self-swap blocks fire (lines ~176/185/194), and those gate on
+    //* `right_neighborX == myrank == left_neighborX`. For non-periodic axes,
+    //* `MPI_Cart_create` with `periods[X]=false` returns `MPI_PROC_NULL` for
+    //* off-end neighbours, so the test fails and the offset-by-one is dead
+    //* code on that axis. `PERIODICX_P` defaults to `PERIODICX`
+    //* (main/Collective.cpp:434), so the particle communicator agrees with
+    //* the field one. The only reachable concern is asymmetric
+    //* `PERIODICX=0 + PERIODICX_P=1` with `XLEN=1` — no committed input file
+    //* uses this. If introduced, switch to per-axis gating with
+    //* `vct->getPERIODICX*_P()` / `getPERIODICX()` matched on `isParticle`.
+    //* Verified empirically: AuditAllOpen (PERIODICX=Y=Z=0) byte-identical
+    //* with flag on/off; Double_Harris 10cyc still at 3.70e-14; 6/6 regression.
     const bool node_halo_fix = (EMf != nullptr) && EMf->get_col().getFixNodePeriodicHalo()
                                && !isCenterFlag && !needInterp;
     const int xlo_src = node_halo_fix ? (nx-3) : (nx-2);

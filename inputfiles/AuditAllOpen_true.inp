@@ -1,0 +1,77 @@
+###! Phase A audit: Double_Harris with PERIODICY=0 forced. X+Z periodic with LEN=1
+###! → X+Z self-swap fires offset-by-one. Y has MPI_PROC_NULL → self-swap skipped.
+###! Pair with _false to verify Y boundary not silently corrupted by the offset-by-one.
+
+Case                           = Double_Harris
+SimulationName                 = AuditAllOpen
+SaveDirName                    = output/audit_allopen_true
+RestartDirName                 = output/audit_allopen_true
+
+WriteMethod                    = shdf5
+output_data_precision          = DOUBLE
+restart_status                 = 0
+
+DiagnosticsOutputCycle         = 1
+RestartOutputCycle             = 0
+FieldOutputCycle               = 0
+ParticlesOutputCycle           = 0
+ParticlesDownsampleOutputCycle = 0
+
+MaxwellOperator                = lap_graddiv
+EnergyConservingSmoothing      = true
+FixNodePeriodicHalo            = true
+UnifyPeriodicDuplicates        = true
+SymmetrizeMaxwellImage         = true
+SolverType                     = PETSc
+
+nparam                         = 2
+custom_parameters              = 0.1        0.5
+
+B0x                            = 0.0097
+B0y                            = 0.0
+B0z                            = 0.0
+
+dt                             = 0.1
+ncycles                        = 10
+th                             = 0.5
+c                              = 1.0
+GMREStol                       = 1E-15
+
+Smooth                         = 0
+num_smoothings                 = 0
+SmoothCycle                    = 1
+
+Lx                             = 12.5
+Ly                             = 25.0
+Lz                             = 1.0
+
+nxc                            = 64
+nyc                            = 32
+nzc                            = 1
+
+XLEN                           = 1
+YLEN                           = 1
+ZLEN                           = 1
+
+ns                             = 4
+rhoINIT                        = 1.0    1.0    1.0    1.0
+rhoINJECT                      = 0.0    0.0    0.0    0.0
+
+npcelx                         = 2      2      2      2
+npcely                         = 2      2      2      2
+npcelz                         = 2      2      2      2
+NpMaxNpRatio                   = 3.0
+
+qom                            = -256.0 1.0   -256.0  1.0
+
+uth                            = 0.045  0.0063 0.045  0.0063
+vth                            = 0.045  0.0063 0.045  0.0063
+wth                            = 0.045  0.0063 0.045  0.0063
+
+u0                             = 0.0    0.0    0.0    0.0
+v0                             = 0.0    0.0    0.0    0.0
+w0                             = 0.0    0.0    0.01  -0.01
+
+PERIODICX                      = 0
+PERIODICY                      = 0
+PERIODICZ                      = 0
