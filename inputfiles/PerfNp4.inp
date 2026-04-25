@@ -1,12 +1,12 @@
-###! Lapenta-2023 S-symmetry probe on DoubleGEM (2-cycle, same grid as AdjointProbe.inp).
-###! Applies the smoothing operator S to two deterministic pseudo-random Krylov vectors
-###! and prints <S*u, v> - <u, S*v>. The 2023 paper requires S to be a symmetric matrix
-###! for exact energy conservation when EnergyConservingSmoothing is on.
+###! Wall-clock comparison vs ECSIM's PerfNp4.inp.
+###! Matched grid + physics + topology + cycles. Default production flags
+###! (no EpsilonReproducibility, no Kahan, no probes) to time the typical
+###! "out-of-the-box" path on each code.
 
 Case                           = Double_Harris
-SimulationName                 = SmoothProbe
-SaveDirName                    = output/smooth_probe_nounify
-RestartDirName                 = output/smooth_probe_nounify
+SimulationName                 = PerfNp4
+SaveDirName                    = output/perf_np4
+RestartDirName                 = output/perf_np4
 
 WriteMethod                    = shdf5
 output_data_precision          = DOUBLE
@@ -17,18 +17,7 @@ RestartOutputCycle             = 0
 FieldOutputCycle               = 0
 ParticlesOutputCycle           = 0
 ParticlesDownsampleOutputCycle = 0
-ParticlesDownsampleFactor      = 1
 
-FieldOutputTag                 = B + E + rho + J
-ParticlesOutputTag             = position + velocity + q
-ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
-
-MaxwellOperator                = lap_graddiv
-EnergyConservingSmoothing      = true
-FixNodePeriodicHalo            = true
-UnifyPeriodicDuplicates        = false
-VerifyAdjoint                  = false
-VerifySmoothSymmetry           = true
 SolverType                     = PETSc
 
 nparam                         = 2
@@ -39,14 +28,11 @@ B0y                            = 0.0
 B0z                            = 0.0
 
 dt                             = 0.1
-ncycles                        = 2
+ncycles                        = 30
 th                             = 0.5
 c                              = 1.0
 GMREStol                       = 1E-15
 
-# Smoothing gate: the probe calls energy_conserve_smooth_direction directly
-# (bypassing the SmoothCycle/Smooth gate), so these values don't affect the
-# probe but keep the binomial kernel selection as the default.
 Smooth                         = 0
 num_smoothings                 = 0
 SmoothCycle                    = 1
@@ -59,7 +45,7 @@ nxc                            = 256
 nyc                            = 128
 nzc                            = 1
 
-XLEN                           = 1
+XLEN                           = 4
 YLEN                           = 1
 ZLEN                           = 1
 

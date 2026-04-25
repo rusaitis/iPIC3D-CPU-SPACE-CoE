@@ -106,19 +106,17 @@ SmoothCycle                    = 1	                                           # 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                             ENERGY CONSERVATION                            %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# The five flags below are the canonical set that closes iPIC3D's historical
-# 12-OoM energy-conservation gap vs ECSIM on DoubleGEM (now ε_mach at np=1
-# and np=4). ALL FIVE NOW DEFAULT TRUE (Step 67, 2026-04-24) — the explicit
-# lines are kept to document the set and make them visible to grep/diff for
-# experiments. FixNodePeriodicHalo + UnifyPeriodicDuplicates are no-ops when
-# the axis is non-periodic or MPI-split (XLEN>1). SymmetrizeMaxwellImage adds
-# ~15% to the field-solve cost and is only observable on self-periodic axes.
+# The canonical set that closes iPIC3D's historical 12-OoM energy-conservation
+# gap vs ECSIM on DoubleGEM (now ε_mach at np=1 and np=4) is now hard-coded:
+#   - offset-by-one self-periodic NODE halo convention
+#   - post-solve average of periodic-image duplicate DOFs
+#   - lap_graddiv self-adjoint Maxwell operator
+# `SymmetrizeMaxwellImage` (per-matvec unify on input and output) remains
+# togglable as a flag (default ON) — adds ~15% to field-solve at np=1, ~2%
+# at np=4; no-op on MPI-split or non-periodic axes.
 
-FixNodePeriodicHalo            = 1                                             # Offset-by-one convention for self-periodic NODE halo
-UnifyPeriodicDuplicates        = 1                                             # Post-solve average of periodic-image duplicate DOFs
 SymmetrizeMaxwellImage         = 1                                             # Per-matvec unify on both input and output of MaxwellImage
-EnergyConservingSmoothing      = 1                                             # Extra halo refresh around Jxh and M*E (ECSIM-style)
-MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); default curl_curl is not self-adjoint
+MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); curl_curl is not self-adjoint
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                       EPSILON REPRODUCIBILITY (CI)                         %

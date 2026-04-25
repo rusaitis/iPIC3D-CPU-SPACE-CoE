@@ -2774,10 +2774,11 @@ void EMfields3D::calculateE()
     time_com.stop();
     #endif
 
-    //* Step 22: average periodic-duplicate interior nodes so the two solver DOFs representing
+    //* Average periodic-duplicate interior nodes so the two solver DOFs representing
     //* the same physical node carry a single, self-consistent value before downstream use.
-    if (col->getUnifyPeriodicDuplicates())
-        unify_periodic_duplicates(Exth, Eyth, Ezth, nxn, nyn, nzn);
+    //* Idempotent projector onto the consistent-periodic subspace; no-op on axes that
+    //* are non-periodic or MPI-split (XLEN>1).
+    unify_periodic_duplicates(Exth, Eyth, Ezth, nxn, nyn, nzn);
 
     //* Phase 10m: post-`calculateE` Helmholtz low-pass on the time-centered field Eth.
     //* Applied BEFORE Ex/Ey/Ez are derived from Eth, so the time-advanced E inherits the
@@ -2871,20 +2872,9 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 
     //? --------------------------------------------------------- ?//
 
-    //* Step 26: ECSIM-style unconditional halo refresh on Jxh before it enters the
-    //* solver source. Matches ecsim/fields/EMfields3D.cpp:878-880, which runs even
-    //* when Nvolte=0 (the "halo-only" energy-conserving smoother slot). iPIC3D's
-    //* moment-gather `communicateInterp`+`communicateNode_P` already refresh Jxh at
-    //* cycle start, but the explicit NodeBC here enforces the periodic-duplicate
-    //* convention on the solver-input Jxh after any intervening state changes.
-    if (col->getEnergyConservingSmoothing())
-    {
-        communicateNodeBC(nxn, nyn, nzn, Jxh, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
-        communicateNodeBC(nxn, nyn, nzn, Jyh, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
-        communicateNodeBC(nxn, nyn, nzn, Jzh, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
-    }
-
-    //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
+    //* Energy-conserving smoothing of Jxh. `energy_conserve_smooth_direction`
+    //* refreshes the halo on entry, so no extra `communicateNodeBC` is needed
+    //* here — when `Smooth=0` this is a no-op anyway.
     energy_conserve_smooth(Jxh, Jyh, Jzh, nxn, nyn, nzn);
 
     for (int i = 0; i < nxn; i++)
@@ -3152,32 +3142,9 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //* the matvec kernel itself (Kahan vs plain, bounds-check, iteration order).
     if (mi_dump) dump_maxwell_stage("C_raw_ME", temp2X, temp2Y, temp2Z);
 
-    //* Step 26: ECSIM-style halo refresh on M·E before the invVOL scaling. Matches
-    //* ecsim/fields/EMfields3D.cpp:1199-1201, which runs unconditionally inside
-    //* applySmoothing even when Nvolte=0. Completes the S·M·S sandwich (the S before
-    //* M·E is already supplied by the NodeBC on tempX at the top of MaxwellImage).
-    if (col->getEnergyConservingSmoothing())
-    {
-        communicateNodeBC(nxn, nyn, nzn, temp2X, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
-        communicateNodeBC(nxn, nyn, nzn, temp2Y, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
-        communicateNodeBC(nxn, nyn, nzn, temp2Z, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
-
-        //* Step 65: deep-symm unify on the S·M·S sandwich's intermediate halo.
-        //* The NodeBC above introduces the same copy-from-one-side asymmetry
-        //* as the input halo refresh; the outer-level Symm unify alone cannot
-        //* undo it because invVOL × temp2 is added to imageX before the final
-        //* projection. Unifying here restricts the M·E result to the consistent
-        //* subspace before it multiplies invVOL.
-        if (col->getDeepSymmetrizeMaxwellImage()) {
-            const bool perX = col->getPERIODICX() && vct->getXLEN() == 1;
-            const bool perY = col->getPERIODICY() && vct->getYLEN() == 1;
-            const bool perZ = col->getPERIODICZ() && vct->getZLEN() == 1;
-            if (perX || perY || perZ)
-                unify_periodic_duplicates(temp2X, temp2Y, temp2Z, nxn, nyn, nzn);
-        }
-    }
-
-    //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
+    //* Energy-conserving smoothing of M·E before the invVOL scaling. The directional
+    //* smoother refreshes the halo on entry, so no extra `communicateNodeBC` is
+    //* needed here — when `Smooth=0` this is a no-op.
     energy_conserve_smooth(temp2X, temp2Y, temp2Z, nxn, nyn, nzn);
 
     for (int i = n_ghost_; i < nxn - n_ghost_; i++)
@@ -4278,7 +4245,7 @@ void EMfields3D::probe_smooth_symmetry(int cycle)
     //* Apply S to a Krylov vector in place via phys-space scratch. Lift to
     //* (tempX, tempY, tempZ), run `energy_conserve_smooth_direction` per
     //* component along its own axis (same call sequence MaxwellImage uses
-    //* when EnergyConservingSmoothing is on), then lower back.
+    //* inside `energy_conserve_smooth`), then lower back.
     auto apply_S = [&](const std::vector<double>& in, std::vector<double>& out) {
         solver2phys(tempX, tempY, tempZ, const_cast<double*>(in.data()), nxn, nyn, nzn, n_ghost_);
         //* Three calls mirror energy_conserve_smooth(arr3, arr3, arr3, ...)

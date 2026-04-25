@@ -23,9 +23,6 @@ ParticlesOutputTag             = position + velocity + q
 ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
 
 MaxwellOperator                = lap_graddiv
-EnergyConservingSmoothing      = true
-FixNodePeriodicHalo            = true
-UnifyPeriodicDuplicates        = true
 SolverType                     = PETSc
 
 nparam                         = 2

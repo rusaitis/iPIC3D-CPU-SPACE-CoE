@@ -1,8 +1,7 @@
 ###! Step 34b: 2-cycle self-adjointness probe on DoubleGEM.
 ###! Runs MaxwellSource at cycle 1, then MaxwellImage(u) and MaxwellImage(v) on
 ###! two deterministic pseudo-random Krylov vectors, and prints <A*u,v>-<u,A*v>.
-###! Flag toggles (FixNodePeriodicHalo, UnifyPeriodicDuplicates, MaxwellOperator,
-###! EnergyConservingSmoothing) are varied by the driver script.
+###! `SymmetrizeMaxwellImage` and `MaxwellOperator` are varied by the driver script.
 
 Case                           = Double_Harris
 SimulationName                 = AdjointProbe
@@ -25,9 +24,6 @@ ParticlesOutputTag             = position + velocity + q
 ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
 
 MaxwellOperator                = lap_graddiv
-EnergyConservingSmoothing      = true
-FixNodePeriodicHalo            = true
-UnifyPeriodicDuplicates        = true
 VerifyAdjoint                  = true
 SolverType                     = PETSc
 

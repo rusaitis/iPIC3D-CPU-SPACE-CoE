@@ -1,7 +1,7 @@
 ###! Lapenta-2023 S-symmetry probe on DoubleGEM (2-cycle, same grid as AdjointProbe.inp).
 ###! Applies the smoothing operator S to two deterministic pseudo-random Krylov vectors
 ###! and prints <S*u, v> - <u, S*v>. The 2023 paper requires S to be a symmetric matrix
-###! for exact energy conservation when EnergyConservingSmoothing is on.
+###! for exact energy conservation when smoothing fires (Smooth>0).
 
 Case                           = Double_Harris
 SimulationName                 = SmoothProbe
@@ -24,9 +24,6 @@ ParticlesOutputTag             = position + velocity + q
 ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
 
 MaxwellOperator                = lap_graddiv
-EnergyConservingSmoothing      = true
-FixNodePeriodicHalo            = true
-UnifyPeriodicDuplicates        = true
 VerifyAdjoint                  = false
 VerifySmoothSymmetry           = true
 SolverType                     = PETSc

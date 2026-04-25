@@ -135,50 +135,24 @@ void Collective::ReadInput(string inputfile)
         //* Phase 10m: post-`calculateE` Helmholtz hook (default off — opt-in).
         PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
-        //* Step 22: average the two periodic-image copies of interior duplicate nodes
-        //* of the solved Exth/Eyth/Ezth after `calculateE`. Default ON (promoted
-        //* 2026-04-23 after Steps 22/23/34d/38 closed the 12-OoM gap at np=1 and np=4).
-        //* No-op on axes that are either non-periodic or MPI-split (XLEN>1).
-        UnifyPeriodicDuplicates = config.read<bool>("UnifyPeriodicDuplicates", true);
-
-        //* Step 23: offset-by-one halo for NODE-centred fields on self-neighbor periodic
-        //* axes. Legacy convention `ghost(0) = interior(nxn-2)` maps the left ghost to
-        //* the HIGH-side duplicate instead of the proper periodic neighbor one step inside.
-        //* New convention `ghost(0) = interior(nxn-3)` matches the MPI-send convention
-        //* for XLEN>1 subdomains. Default ON (promoted 2026-04-23). No-op on axes that
-        //* are either non-periodic or MPI-split.
-        FixNodePeriodicHalo = config.read<bool>("FixNodePeriodicHalo", true);
-
         //* Step 25: cycle-1 identity decomposition print (DoubleGEM residual audit).
         DumpCycleIdentity = config.read<bool>("DumpCycleIdentity", false);
 
         //* Step 34b: programmatic self-adjointness probe for MaxwellImage.
         VerifyAdjoint = config.read<bool>("VerifyAdjoint", false);
 
-        //* Lapenta-2023 S-symmetry probe. Verifies that the smoothing
-        //* matrix is symmetric — required for exact energy conservation
-        //* when EnergyConservingSmoothing is on.
+        //* Lapenta-2023 S-symmetry probe. Verifies that the smoothing matrix is
+        //* symmetric — required for exact energy conservation when smoothing fires.
         VerifySmoothSymmetry = config.read<bool>("VerifySmoothSymmetry", false);
 
         //* Step 34d: per-matvec symmetrization of MaxwellImage (calls
-        //* `unify_periodic_duplicates` on MaxwellImage input and output). Required for
-        //* cross-cycle Exth consistency when UnifyPeriodicDuplicates is on; turning this
-        //* off while leaving the unify hook off can abort mid-run (see project notes).
-        //* Default ON (promoted 2026-04-23). Adds ~15% wall-clock to the field solve;
-        //* irrelevant on non-self-periodic decompositions where the unify pass is a no-op.
+        //* `unify_periodic_duplicates` on MaxwellImage input and output). Forces A
+        //* to act on the consistent-periodic subspace and return a consistent
+        //* result. Default ON. Adds ~15% wall-clock to the field solve at np=1;
+        //* ~2% at np>1 (no-op on MPI-split axes). Kept as a flag pending a deeper
+        //* H = inject^T refactor that would make the operator intrinsically subspace-
+        //* respecting (path (a) in the Step 65 write-up).
         SymmetrizeMaxwellImage = config.read<bool>("SymmetrizeMaxwellImage", true);
-
-        //* Step 26: ECSIM-style energy-conserving smoothing slot (halo-only when Smooth=0).
-        //* Step 67 (promoted 2026-04-24): default ON. Structural match to ECSIM; null-effect
-        //* on drift in our canonical tests, but required for convention parity when
-        //* `Smooth > 0` activates the smoothing path.
-        EnergyConservingSmoothing = config.read<bool>("EnergyConservingSmoothing", true);
-
-        //* Step 27: match ECSIM's FP evaluation order for α-matrix scalars.
-        EcsimAlphaOrdering = config.read<bool>("EcsimAlphaOrdering", false);
-
-        //* Step 30: mover α applied via explicit 3×3 matrix matching the gather's FP path.
-        MoverExplicitAlpha = config.read<bool>("MoverExplicitAlpha", false);
 
         //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
@@ -218,11 +192,6 @@ void Collective::ReadInput(string inputfile)
         //* Every enabled cycle writes ~16 doubles × NOP per species per rank for
         //* each of the two paths — keep FinalCycle small when running the audit.
         DumpAlphaBothPaths = config.read<bool>("DumpAlphaBothPaths", false);
-        //* Step 65: deep-symmetrize variant extends `SymmetrizeMaxwellImage`'s
-        //* periodic-duplicate unification from input/output only to every
-        //* internal halo refresh inside the matvec. Opt-in (default false)
-        //* because the probe reduction is cheap but not a no-op on wall time.
-        DeepSymmetrizeMaxwellImage = config.read<bool>("DeepSymmetrizeMaxwellImage", false);
         //* Step 66: drain incoming particle blocks per-direction in fixed order
         //* instead of OS-scheduled `MPI_Waitany` completion.
         DeterministicParticleComm  = config.read<bool>("DeterministicParticleComm", eps_repro);

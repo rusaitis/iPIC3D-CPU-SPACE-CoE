@@ -40,14 +40,13 @@ run_variant () {
         || { echo "# ${tag} FAILED (see ${run_log})" >> "$LOG"; return 1; }
 }
 
-# All-fixes-on baseline
+# All-fixes-on baseline (offset-by-one halo + unify + lap_graddiv now hard-coded)
 run_variant A_all_fixes_on
-# Toggle one flag at a time
-run_variant B_fixhalo_off    FixNodePeriodicHalo=false
-run_variant C_unify_off      UnifyPeriodicDuplicates=false
-run_variant D_curl_curl      MaxwellOperator=curl_curl
-run_variant E_ecs_off        EnergyConservingSmoothing=false
-# All fixes off (legacy)
-run_variant F_all_off        FixNodePeriodicHalo=false UnifyPeriodicDuplicates=false MaxwellOperator=curl_curl EnergyConservingSmoothing=false
+# Toggle the remaining togglable correctness flag
+run_variant B_no_symm        SymmetrizeMaxwellImage=false
+# Operator choice
+run_variant C_curl_curl      MaxwellOperator=curl_curl
+# Both correctness toggles off
+run_variant D_curl_no_symm   MaxwellOperator=curl_curl SymmetrizeMaxwellImage=false
 
 cat "$LOG"

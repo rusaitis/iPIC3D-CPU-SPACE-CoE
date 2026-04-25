@@ -30,12 +30,9 @@ DumpParticlesInit              = true
 
 #* Match ECSIM's operator: self-adjoint curl(curl) = -Δ + grad div.
 MaxwellOperator                = lap_graddiv
-EnergyConservingSmoothing      = true
 
 #* Step 22+23: fix XLEN=1 self-periodic halo off-by-one and average the two
 #* periodic-duplicate interior DOFs after the field solve.
-FixNodePeriodicHalo            = true
-UnifyPeriodicDuplicates        = true
 
 #* Step 33 probe: use PETSc solver (same Krylov as ECSIM) to rule out the
 #* iPIC3D-GMRES vs ECSIM-PETSc path as a confounder for the E_θ divergence.

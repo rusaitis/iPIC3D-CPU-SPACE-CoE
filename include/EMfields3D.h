@@ -223,8 +223,8 @@ public:
     void probe_adjointness(int cycle);
 
     //* Lapenta-2023 (Physics, 5, 72) adds one condition to the 2017 proof:
-    //* when `EnergyConservingSmoothing` is on, the smoothing matrix S must
-    //* be symmetric (S_{gg'} = S_{g'g}) for exact energy conservation. The
+    //* when smoothing fires (Smooth>0), the smoothing matrix S must be
+    //* symmetric (S_{gg'} = S_{g'g}) for exact energy conservation. The
     //* probe applies S component-wise via `energy_conserve_smooth_direction`
     //* to two deterministic pseudo-random Krylov vectors u, v and reports
     //* <S·u, v> − <u, S·v> in raw, unify, and unique-DOF variants. The raw

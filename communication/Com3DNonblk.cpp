@@ -142,45 +142,30 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
     assert_eq(recvcnt,sendcnt-recvcnt);
 
     //Buffer swap if any (done before waiting for receiving msg done to delay sync)
-    //* Step 23: NODE-centered periodic arrays have a duplicate at indices {n_ghost, nx-n_ghost-1}
-    //* (the two images of the same physical boundary node). The legacy self-swap
-    //*   ghost(0) = interior(nx-2),  ghost(nx-1) = interior(1)
-    //* maps the ghost to the other-side duplicate of the CENTER node instead of its
-    //* geometric offset-by-one neighbour, biasing stencils at the periodic boundary.
-    //* When `FixNodePeriodicHalo` is set, swap in the offset-by-one convention for
-    //* plain node-copy arrays (E halo, B halo, moment-copy halo). Matches the MPI-send
-    //* convention for XLEN>1 subdomains (lines 112-114: sends interior(1+offset)/nx-2-offset).
-    //* Also matches ECSIM's `makeNodeFace` (ComParser3D.cpp:34-60), which reads from
-    //* interior[2] / interior[nx-3] for the communicateNode_P path.
+    //* NODE-centered periodic arrays have a duplicate at indices {n_ghost, nx-n_ghost-1}
+    //* (the two images of the same physical boundary node). The offset-by-one self-swap
+    //*   ghost(0) = interior(nx-3),  ghost(nx-1) = interior(2)
+    //* maps the ghost to the proper periodic neighbour one step inside, matching the
+    //* MPI-send convention for XLEN>1 subdomains (sends interior(1+offset)/nx-2-offset
+    //* a few lines above) and ECSIM's `makeNodeFace` (ComParser3D.cpp:34-60). The
+    //* legacy `nx-2 / 1` mapped to the HIGH-side duplicate of the CENTER node — a
+    //* useless aliasing that biased stencils at the periodic boundary and produced
+    //* ~4e-5 l2_rel divergence in the cross-code MaxwellImage Stage C (raw M·E)
+    //* byte diff and 12 OoM of energy drift.
     //*
-    //* Step 38 follow-up (2026-04-23): drop the `!isParticle` exclusion so the
-    //* particle-moment ghost copy path (communicateNode_P on Mij, ρ, J with
-    //* isParticle=true) also picks up the offset-by-one convention. Previously
-    //* the E halo used nx-3/2 while the mass-matrix ghost-copy halo stayed on
-    //* legacy nx-2/1, producing ~4e-5 l2_rel divergence in the cross-code
-    //* MaxwellImage Stage C (raw M·E) byte diff.
+    //* The `communicateInterp` sum-on-receive addFace/Edge/Corner path (`needInterp`)
+    //* and the cell-centred halos (`isCenterFlag`) keep the legacy `nx-2 / 1`:
+    //* ECSIM's `makeCenterFace` (ComParser3D.cpp:91-116) reads from interior[1] /
+    //* interior[nx-2], so iPIC3D matches there.
     //*
-    //* `needInterp` (the sum-on-receive addFace/Edge/Corner path used by
-    //* communicateInterp) is still excluded: ECSIM's `makeCenterFace`
-    //* (ComParser3D.cpp:91-116) reads from interior[1] / interior[nx-2]
-    //* (legacy convention), so iPIC3D's legacy self-swap already matches there.
-    //*
-    //* Non-periodic BC safety (audit 2026-04-25). The offset-by-one source
-    //* indices below are computed unconditionally but only *read* when the
-    //* self-swap blocks fire (lines ~176/185/194), and those gate on
-    //* `right_neighborX == myrank == left_neighborX`. For non-periodic axes,
-    //* `MPI_Cart_create` with `periods[X]=false` returns `MPI_PROC_NULL` for
-    //* off-end neighbours, so the test fails and the offset-by-one is dead
-    //* code on that axis. `PERIODICX_P` defaults to `PERIODICX`
-    //* (main/Collective.cpp:434), so the particle communicator agrees with
-    //* the field one. The only reachable concern is asymmetric
-    //* `PERIODICX=0 + PERIODICX_P=1` with `XLEN=1` — no committed input file
-    //* uses this. If introduced, switch to per-axis gating with
-    //* `vct->getPERIODICX*_P()` / `getPERIODICX()` matched on `isParticle`.
-    //* Verified empirically: AuditAllOpen (PERIODICX=Y=Z=0) byte-identical
-    //* with flag on/off; Double_Harris 10cyc still at 3.70e-14; 6/6 regression.
-    const bool node_halo_fix = (EMf != nullptr) && EMf->get_col().getFixNodePeriodicHalo()
-                               && !isCenterFlag && !needInterp;
+    //* Non-periodic BC safety. The offset-by-one source indices are computed
+    //* unconditionally but only *read* when the self-swap blocks below fire, and
+    //* those gate on `right_neighborX == myrank == left_neighborX`. For non-periodic
+    //* axes, `MPI_Cart_create` with `periods[X]=false` returns `MPI_PROC_NULL` for
+    //* off-end neighbours, so the gate is false and the offset-by-one is dead code
+    //* on that axis. `PERIODICX_P` defaults to `PERIODICX` in main/Collective.cpp,
+    //* so the particle communicator agrees with the field one.
+    const bool node_halo_fix = !isCenterFlag && !needInterp;
     const int xlo_src = node_halo_fix ? (nx-3) : (nx-2);
     const int xhi_src = node_halo_fix ? 2      : 1;
     const int ylo_src = node_halo_fix ? (ny-3) : (ny-2);

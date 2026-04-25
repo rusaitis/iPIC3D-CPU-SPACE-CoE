@@ -26,10 +26,7 @@ ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
 
 #* Match DoubleGEM operator conventions (self-adjoint lap+graddiv, one-sided S on E).
 MaxwellOperator                = lap_graddiv
-EnergyConservingSmoothing      = true
 
-FixNodePeriodicHalo            = true
-UnifyPeriodicDuplicates        = true
 
 #* Weak uniform B, no perturbation
 B0x                            = 0.0097

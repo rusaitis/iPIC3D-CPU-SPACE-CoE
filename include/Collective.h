@@ -215,15 +215,10 @@ class Collective
     double getHelmholtzAlpha()          const { return HelmholtzAlpha; }
     int    getHelmholtzNiter()          const { return HelmholtzNiter; }
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
-    bool   getUnifyPeriodicDuplicates() const { return UnifyPeriodicDuplicates; }
-    bool   getFixNodePeriodicHalo()     const { return FixNodePeriodicHalo; }
     bool   getVerifyAdjoint()           const { return VerifyAdjoint; }
     bool   getVerifySmoothSymmetry()    const { return VerifySmoothSymmetry; }
     bool   getSymmetrizeMaxwellImage()  const { return SymmetrizeMaxwellImage; }
     bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
-    bool   getEnergyConservingSmoothing() const { return EnergyConservingSmoothing; }
-    bool   getEcsimAlphaOrdering()      const { return EcsimAlphaOrdering; }
-    bool   getMoverExplicitAlpha()      const { return MoverExplicitAlpha; }
     bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
     bool   getLoadParticlesInit()       const { return LoadParticlesInit; }
     const string& getParticlesInitDir() const { return ParticlesInitDir; }
@@ -233,7 +228,6 @@ class Collective
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
     bool   getDumpAlphaBothPaths()           const { return DumpAlphaBothPaths; }
-    bool   getDeepSymmetrizeMaxwellImage()   const { return DeepSymmetrizeMaxwellImage; }
     bool   getDeterministicParticleComm()    const { return DeterministicParticleComm; }
     bool   getDumpParticlesGlobal()          const { return DumpParticlesGlobal; }
     bool   getLoadParticlesGlobal()          const { return LoadParticlesGlobal; }
@@ -302,8 +296,6 @@ class Collective
     //* Decoupled from `MaxwellImage`'s S·M·S, so the implicit operator structure
     //* (which Phase 10k showed is fragile to long-range filters) is unchanged.
     bool   PostSolveHelmholtz;
-    bool   UnifyPeriodicDuplicates;
-    bool   FixNodePeriodicHalo;
 
     //* Step 34b: programmatic self-adjointness probe for MaxwellImage. When true,
     //* at cycle 1 (after MaxwellSource, before the Krylov solve) computes
@@ -315,8 +307,8 @@ class Collective
     //* (component-wise `energy_conserve_smooth_direction`) to two deterministic
     //* pseudo-random Krylov vectors u, v and prints <S·u, v> − <u, S·v>.
     //* Verifies Lapenta-2023 condition that the smoothing matrix is symmetric,
-    //* which is required for exact energy conservation when
-    //* EnergyConservingSmoothing is on. Off by default.
+    //* which is required for exact energy conservation when smoothing fires.
+    //* Off by default.
     bool   VerifySmoothSymmetry;
 
     //* Step 34d: per-matvec symmetrization of MaxwellImage. When true, applies
@@ -332,33 +324,6 @@ class Collective
     //* post-processing can compute R_part = ΔKE − (I_J + I_M) and R_field =
     //* ΔUE + ΔUB + (I_J + I_M). Cheap (~two extra matvec passes) but gated off.
     bool   DumpCycleIdentity;
-
-    //* Step 26: ECSIM-style energy-conserving smoothing slot. Even with Smooth=0 /
-    //* Nvolte=0, ECSIM forces extra communicateNodeBC passes around the M·E matvec
-    //* and around Jxh (see ecsim/fields/EMfields3D.cpp:878-881,1177-1203). These
-    //* halo refreshes are structurally unconditional in ECSIM and may shift the
-    //* M-side composition even though iPIC3D's Smooth=false skips them. Flag gates
-    //* the ported halo-only passes.
-    bool   EnergyConservingSmoothing;
-
-    //* Step 27: match ECSIM's FP evaluation order for the α-matrix scalars. iPIC3D
-    //* hoists `q_dt_2mc = 0.5*dt*qom/c` and uses `Om = q_dt_2mc*B/γ`; ECSIM uses
-    //* `beta = 0.5*qom*dt` and `omc = beta*B/γ/c` — mathematically identical but
-    //* FP order differs. Flag re-orders iPIC3D's computeMoments + ECSIM_velocity to
-    //* match ECSIM.
-    bool   EcsimAlphaOrdering;
-
-    //* Step 30: in `ECSIM_velocity`, replace the compact inline α application
-    //*   (u + (v·Omz − w·Omy + udotOm·Omx))·denom
-    //* with the explicit 3×3 matrix form used by `computeMoments` (the gather):
-    //*   qau = α[0][0]·u + α[0][1]·v + α[0][2]·w   (row-by-row, with α pre-computed).
-    //* Algebraically identical; FP order differs. For the ECSIM identity
-    //*   ΔKE = dt·<E_th, Jxh + M·E_th>
-    //* to hold at machine precision the α used to update particle velocities
-    //* must be byte-identical to the α used to build Jxh and M. Step 27 confirmed
-    //* α-parity in computeMoments alone is not enough (EcsimAlphaOrdering null);
-    //* this flag tightens parity across mover and gather.
-    bool   MoverExplicitAlpha;
 
     //* Step 3: enable ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)), `NiterMover` inner midpoint iterations,
@@ -410,25 +375,9 @@ class Collective
     //* (gather) and `ECSIM_velocity` (mover) emit per-particle α tensors to
     //* binary files `{SaveDirName}/alpha_{gather|mover}_cyc{N}_s{s}_r{r}.bin`.
     //* Layout per particle: 16 doubles — [pidx_as_double, x, y, z, Bx, By, Bz,
-    //* α00..α22 (row-major)]. The mover always builds an explicit 3×3 α for
-    //* the dump, independent of `MoverExplicitAlpha`, so the audit measures
-    //* the canonical rotation tensor regardless of the compact-form path.
-    //* Post-process with `scripts/diff_alpha_paths.py` to confirm ECSIM
-    //* condition #4 (mover-α ≡ gather-α for the same particle state).
+    //* α00..α22 (row-major)]. Post-process with `scripts/diff_alpha_paths.py`
+    //* to confirm ECSIM condition #4 (mover-α ≡ gather-α).
     bool   DumpAlphaBothPaths;
-
-    //* Step 65 probe (null result): extends `SymmetrizeMaxwellImage`'s periodic
-    //* duplicate unification from input/output only to the S·M·S sandwich's
-    //* intermediate NodeBC on temp2 (`fields/EMfields3D.cpp` after M·E). Kept
-    //* as a negative-control knob: measuring `VerifyAdjoint` with this on
-    //* reproduces the baseline `unique` gap_rel of 0.171 *exactly*, proving
-    //* the residual A_kry asymmetry is NOT carried by intermediate halo
-    //* refreshes but is structural inside the stencil arithmetic (curl²,
-    //* M·E) — the consistent periodic subspace is not an A-invariant subspace.
-    //* A true symmetrization requires building a second `MaxwellImage_transpose`
-    //* that reverses the halo-broadcast pattern (path (a) in the Step 65
-    //* write-up). Deferred; left as probe-only.
-    bool   DeepSymmetrizeMaxwellImage;
 
     //* Step 66: process incoming particle blocks in fixed direction order
     //* [XDN, XUP, YDN, YUP, ZDN, ZUP] instead of the OS-scheduled completion
