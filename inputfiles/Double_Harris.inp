@@ -109,13 +109,11 @@ SmoothCycle                    = 1	                                           # 
 # The canonical set that closes iPIC3D's historical 12-OoM energy-conservation
 # gap vs ECSIM on DoubleGEM (now ε_mach at np=1 and np=4) is now hard-coded:
 #   - offset-by-one self-periodic NODE halo convention
-#   - post-solve average of periodic-image duplicate DOFs
+#   - subspace-projecting solver2phys/phys2solver pair (collapses duplicate
+#     periodic-DOFs out of the Krylov representation; replaces the old
+#     `SymmetrizeMaxwellImage` and `UnifyPeriodicDuplicates` patches)
 #   - lap_graddiv self-adjoint Maxwell operator
-# `SymmetrizeMaxwellImage` (per-matvec unify on input and output) remains
-# togglable as a flag (default ON) — adds ~15% to field-solve at np=1, ~2%
-# at np=4; no-op on MPI-split or non-periodic axes.
 
-SymmetrizeMaxwellImage         = 1                                             # Per-matvec unify on both input and output of MaxwellImage
 MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); curl_curl is not self-adjoint
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

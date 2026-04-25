@@ -217,7 +217,7 @@ class Collective
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
     bool   getVerifyAdjoint()           const { return VerifyAdjoint; }
     bool   getVerifySmoothSymmetry()    const { return VerifySmoothSymmetry; }
-    bool   getSymmetrizeMaxwellImage()  const { return SymmetrizeMaxwellImage; }
+    bool   getVerifySubspacePreservation() const { return VerifySubspacePreservation; }
     bool   getDumpCycleIdentity()       const { return DumpCycleIdentity; }
     bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
     bool   getLoadParticlesInit()       const { return LoadParticlesInit; }
@@ -311,13 +311,15 @@ class Collective
     //* Off by default.
     bool   VerifySmoothSymmetry;
 
-    //* Step 34d: per-matvec symmetrization of MaxwellImage. When true, applies
-    //* unify_periodic_duplicates on both INPUT (after solver2phys+halo refresh,
-    //* before L applies) and OUTPUT (after L, before phys2solver) of every
-    //* matvec. Forces A to act on the consistent-periodic subspace and returns
-    //* a consistent result. First-pass cheap fix for the 34b operator
-    //* asymmetry; if it moves the drift a deeper H^T refactor is warranted.
-    bool   SymmetrizeMaxwellImage;
+    //* Subspace-preservation probe. When true, at cycle 1 applies MaxwellImage
+    //* to a deterministic input that has been pre-projected onto the
+    //* consistent-periodic subspace (duplicate node pairs equal by construction)
+    //* and reports the max |output[duplicate1] - output[duplicate2]| across all
+    //* periodic-self axes. Distinguishes "matvec drifts off subspace at FP-ε"
+    //* from "matvec is bit-exact on subspace, GMRES iterates drift instead".
+    //* Off by default.
+    bool   VerifySubspacePreservation;
+
 
     //* Step 25: cycle-1 identity decomposition print. When true, calculateE prints
     //* I_J = dt · <Eth, Jxh>_unique and I_M = dt · <Eth, M·Eth>_unique so external

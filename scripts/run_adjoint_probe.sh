@@ -40,13 +40,10 @@ run_variant () {
         || { echo "# ${tag} FAILED (see ${run_log})" >> "$LOG"; return 1; }
 }
 
-# All-fixes-on baseline (offset-by-one halo + unify + lap_graddiv now hard-coded)
+# All-fixes-on baseline (offset-by-one halo + subspace-projecting solver2phys
+# pair + lap_graddiv now hard-coded; no per-axis toggles remain)
 run_variant A_all_fixes_on
-# Toggle the remaining togglable correctness flag
-run_variant B_no_symm        SymmetrizeMaxwellImage=false
 # Operator choice
-run_variant C_curl_curl      MaxwellOperator=curl_curl
-# Both correctness toggles off
-run_variant D_curl_no_symm   MaxwellOperator=curl_curl SymmetrizeMaxwellImage=false
+run_variant B_curl_curl      MaxwellOperator=curl_curl
 
 cat "$LOG"

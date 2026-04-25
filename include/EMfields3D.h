@@ -232,6 +232,14 @@ public:
     //* measures the matrix symmetry the 2023 paper calls out.
     void probe_smooth_symmetry(int cycle);
 
+    //* Subspace-preservation probe. Generates a deterministic pseudo-random
+    //* Krylov vector u, projects it onto the consistent-periodic subspace
+    //* (so phys-space duplicates are equal by construction), applies
+    //* MaxwellImage, and reports the maximum |output[duplicate1] - output[duplicate2]|
+    //* across all periodic-self axes. A bit-preserving matvec gives ~ε; large
+    //* drift implicates the FP execution order in the operator itself.
+    void probe_subspace_preservation(int cycle);
+
     //* Step 38: per-stage dump inside MaxwellImage. `set_mi_dump_target(cycle)` is
     //* called from the main loop so MaxwellImage knows when to dump. Dumps happen
     //* only on the *first* matvec call of the target cycle (so cost is one

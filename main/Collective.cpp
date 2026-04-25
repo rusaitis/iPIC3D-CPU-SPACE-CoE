@@ -145,14 +145,10 @@ void Collective::ReadInput(string inputfile)
         //* symmetric — required for exact energy conservation when smoothing fires.
         VerifySmoothSymmetry = config.read<bool>("VerifySmoothSymmetry", false);
 
-        //* Step 34d: per-matvec symmetrization of MaxwellImage (calls
-        //* `unify_periodic_duplicates` on MaxwellImage input and output). Forces A
-        //* to act on the consistent-periodic subspace and return a consistent
-        //* result. Default ON. Adds ~15% wall-clock to the field solve at np=1;
-        //* ~2% at np>1 (no-op on MPI-split axes). Kept as a flag pending a deeper
-        //* H = inject^T refactor that would make the operator intrinsically subspace-
-        //* respecting (path (a) in the Step 65 write-up).
-        SymmetrizeMaxwellImage = config.read<bool>("SymmetrizeMaxwellImage", true);
+        //* Subspace-preservation probe. Tests whether MaxwellImage is bit-exact
+        //* on the consistent-periodic subspace (i.e., consistent input → consistent
+        //* output to ULP), or whether it drifts the duplicates by FP-ε per matvec.
+        VerifySubspacePreservation = config.read<bool>("VerifySubspacePreservation", false);
 
         //* Step 3: ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);

@@ -2670,6 +2670,153 @@ void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_dou
             }
 }
 
+//* Subspace-projecting variants. On a periodic-self axis (PERIODIC && {X,Y,Z}LEN==1),
+//* the phys-space nodes at indices `n_ghost` and `nxn-n_ghost-1` represent the same
+//* physical point. Treating them as two independent Krylov DOFs (legacy behaviour
+//* above) puts the GMRES iterate on the wrong side of the consistent-periodic
+//* subspace and double-weights duplicate nodes in the inner product, requiring
+//* an external projector (`unify_periodic_duplicates`, `SymmetrizeMaxwellImage`)
+//* to keep the solve stable.
+//*
+//* These overloads make the pack/unpack pair the canonical projector:
+//*   `phys2solver` zeroes the Krylov entry corresponding to the HI duplicate slot
+//*     (so duplicate DOFs contribute single weight in `dotP`).
+//*   `solver2phys` reads the LO Krylov entry and writes BOTH the LO and HI
+//*     phys positions equal (so the lifted phys-space vector is in the subspace
+//*     by construction).
+//* After this, every Krylov vector seen by GMRES carries exactly one DOF per
+//* unique physical node, and the matvec output is automatically restricted to
+//* the consistent subspace at FP-ULP without any explicit unify step.
+//* Average LO and HI duplicate slots into both, sequentially per axis. Same
+//* arithmetic as `EMfields3D::unify_periodic_duplicates` in phys space, applied
+//* directly to the packed Krylov layout. Sequential X→Y→Z averaging produces a
+//* full 4-way (or 8-way) corner average when multiple axes are periodic-self.
+static inline void unify_krylov_duplicates(double *base, int kx, int ky, int kz,
+                                           bool ps_x, bool ps_y, bool ps_z)
+{
+    auto idx = [&](int i, int j, int k) -> std::size_t {
+        return (((static_cast<std::size_t>(i) * ky) + j) * kz + k) * 3u;
+    };
+    if (ps_x) {
+        for (int j = 0; j < ky; ++j)
+            for (int k = 0; k < kz; ++k) {
+                const std::size_t lo = idx(0, j, k);
+                const std::size_t hi = idx(kx-1, j, k);
+                for (int c = 0; c < 3; ++c) {
+                    const double a = 0.5 * (base[lo + c] + base[hi + c]);
+                    base[lo + c] = a;
+                    base[hi + c] = a;
+                }
+            }
+    }
+    if (ps_y) {
+        for (int i = 0; i < kx; ++i)
+            for (int k = 0; k < kz; ++k) {
+                const std::size_t lo = idx(i, 0, k);
+                const std::size_t hi = idx(i, ky-1, k);
+                for (int c = 0; c < 3; ++c) {
+                    const double a = 0.5 * (base[lo + c] + base[hi + c]);
+                    base[lo + c] = a;
+                    base[hi + c] = a;
+                }
+            }
+    }
+    if (ps_z) {
+        for (int i = 0; i < kx; ++i)
+            for (int j = 0; j < ky; ++j) {
+                const std::size_t lo = idx(i, j, 0);
+                const std::size_t hi = idx(i, j, kz-1);
+                for (int c = 0; c < 3; ++c) {
+                    const double a = 0.5 * (base[lo + c] + base[hi + c]);
+                    base[lo + c] = a;
+                    base[hi + c] = a;
+                }
+            }
+    }
+}
+
+static inline void zero_hi_duplicate_slot(double *base, int kx, int ky, int kz,
+                                          bool ps_x, bool ps_y, bool ps_z)
+{
+    auto zero_at = [&](int i, int j, int k) {
+        const std::size_t idx = (((static_cast<std::size_t>(i) * ky) + j) * kz + k) * 3u;
+        base[idx]     = 0.0;
+        base[idx + 1] = 0.0;
+        base[idx + 2] = 0.0;
+    };
+    if (ps_x) for (int j = 0; j < ky; ++j) for (int k = 0; k < kz; ++k) zero_at(kx-1, j, k);
+    if (ps_y) for (int i = 0; i < kx; ++i) for (int k = 0; k < kz; ++k) zero_at(i, ky-1, k);
+    if (ps_z) for (int i = 0; i < kx; ++i) for (int j = 0; j < ky; ++j) zero_at(i, j, kz-1);
+}
+
+void solver2phys(arr3_double v1, arr3_double v2, arr3_double v3, double *vectSolver,
+                 int nx, int ny, int nz, int n_ghost,
+                 bool ps_x, bool ps_y, bool ps_z)
+{
+    //* First pass: standard unpack — every interior position gets its Krylov entry.
+    //* If the input came through the new `phys2solver` below, the redundant slots
+    //* are 0 and the corresponding HI-duplicate phys positions get zeroed here;
+    //* the second pass overwrites them with the LO-duplicate value.
+    solver2phys(v1, v2, v3, vectSolver, nx, ny, nz, n_ghost);
+
+    //* Second pass: copy LO duplicate to HI duplicate on every periodic-self axis.
+    if (ps_x) {
+        const int lo = n_ghost;
+        const int hi = nx - n_ghost - 1;
+        for (int j = n_ghost; j < ny - n_ghost; ++j)
+            for (int k = n_ghost; k < nz - n_ghost; ++k) {
+                v1[hi][j][k] = v1[lo][j][k];
+                v2[hi][j][k] = v2[lo][j][k];
+                v3[hi][j][k] = v3[lo][j][k];
+            }
+    }
+    if (ps_y) {
+        const int lo = n_ghost;
+        const int hi = ny - n_ghost - 1;
+        for (int i = n_ghost; i < nx - n_ghost; ++i)
+            for (int k = n_ghost; k < nz - n_ghost; ++k) {
+                v1[i][hi][k] = v1[i][lo][k];
+                v2[i][hi][k] = v2[i][lo][k];
+                v3[i][hi][k] = v3[i][lo][k];
+            }
+    }
+    if (ps_z) {
+        const int lo = n_ghost;
+        const int hi = nz - n_ghost - 1;
+        for (int i = n_ghost; i < nx - n_ghost; ++i)
+            for (int j = n_ghost; j < ny - n_ghost; ++j) {
+                v1[i][j][hi] = v1[i][j][lo];
+                v2[i][j][hi] = v2[i][j][lo];
+                v3[i][j][hi] = v3[i][j][lo];
+            }
+    }
+}
+
+void phys2solver(double *vectSolver,
+                 const arr3_double v1, const arr3_double v2, const arr3_double v3,
+                 int nx, int ny, int nz, int n_ghost,
+                 bool ps_x, bool ps_y, bool ps_z)
+{
+    //* Standard pack — read every interior phys position into the Krylov vector.
+    //* This implicitly includes the HI duplicate values; we collapse them next.
+    phys2solver(vectSolver, v1, v2, v3, nx, ny, nz, n_ghost);
+
+    //* Subspace projection in two steps:
+    //*   1. Average LO and HI duplicate Krylov entries (matches the in-MaxwellImage
+    //*      unify_periodic_duplicates that `SymmetrizeMaxwellImage` does — averaging
+    //*      here makes the flag a mathematical no-op).
+    //*   2. Zero the HI Krylov entry. The averaged value lives in LO; HI carries no
+    //*      weight in `dotP` and any FP-ε drift in the matvec output at HI is
+    //*      discarded.
+    //* GMRES iterates therefore stay strictly in the consistent-periodic subspace
+    //* with single-weight inner products at every unique physical node.
+    const int kx = nx - 2*n_ghost;
+    const int ky = ny - 2*n_ghost;
+    const int kz = nz - 2*n_ghost;
+    unify_krylov_duplicates(vectSolver, kx, ky, kz, ps_x, ps_y, ps_z);
+    zero_hi_duplicate_slot(vectSolver, kx, ky, kz, ps_x, ps_y, ps_z);
+}
+
 //? Calculate electric field using GMRes
 void EMfields3D::calculateE()
 {
@@ -2727,8 +2874,24 @@ void EMfields3D::calculateE()
         probe_smooth_symmetry(col->getCurrentCycle());
     }
 
+    //* Subspace-preservation probe at cycle 1. Tests whether MaxwellImage maps
+    //* the consistent-periodic subspace into itself at FP-ULP, or whether it
+    //* drifts the duplicates and so feeds the SymmetrizeMaxwellImage band-aid.
+    if (col->getVerifySubspacePreservation() && col->getCurrentCycle() == 1) {
+        probe_subspace_preservation(col->getCurrentCycle());
+    }
+
+    //* Periodic-self axes use the subspace-projecting pack/unpack (Krylov vector
+    //* zeros the HI duplicate slot, lifts to phys with both duplicates equal).
+    //* Production GMRES then iterates strictly inside the consistent-periodic
+    //* subspace, making `unify_periodic_duplicates` and `SymmetrizeMaxwellImage`
+    //* mathematically redundant.
+    const bool ps_x = col->getPERIODICX() && vct->getXLEN() == 1;
+    const bool ps_y = col->getPERIODICY() && vct->getYLEN() == 1;
+    const bool ps_z = col->getPERIODICZ() && vct->getZLEN() == 1;
+
     //* Move to Krylov space from physical space
-    phys2solver(xkrylov, Ex, Ey, Ez, nxn, nyn, nzn, n_ghost_);
+    phys2solver(xkrylov, Ex, Ey, Ez, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
     #ifdef __PROFILE_FIELDS__
     time_gmres.start();
@@ -2758,8 +2921,8 @@ void EMfields3D::calculateE()
     time_gmres.stop();
     #endif
 
-    //* Move from Krylov space to physical space
-    solver2phys(Exth, Eyth, Ezth, xkrylov, nxn, nyn, nzn, n_ghost_);
+    //* Move from Krylov space to physical space (subspace-projecting overload).
+    solver2phys(Exth, Eyth, Ezth, xkrylov, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
     #ifdef __PROFILE_FIELDS__
     time_com.start();
@@ -2773,12 +2936,6 @@ void EMfields3D::calculateE()
     #ifdef __PROFILE_FIELDS__
     time_com.stop();
     #endif
-
-    //* Average periodic-duplicate interior nodes so the two solver DOFs representing
-    //* the same physical node carry a single, self-consistent value before downstream use.
-    //* Idempotent projector onto the consistent-periodic subspace; no-op on axes that
-    //* are non-periodic or MPI-split (XLEN>1).
-    unify_periodic_duplicates(Exth, Eyth, Ezth, nxn, nyn, nzn);
 
     //* Phase 10m: post-`calculateE` Helmholtz low-pass on the time-centered field Eth.
     //* Applied BEFORE Ex/Ey/Ez are derived from Eth, so the time-advanced E inherits the
@@ -2912,8 +3069,13 @@ void EMfields3D::MaxwellSource(double *bkrylov)
     //     addscale(c*th*dt*c*th*dt, tempZ, temp2Z, nxn, nyn, nzn);
     // }
 
+    //* Periodic-self subspace projection (matches calculateE/MaxwellImage).
+    const bool ps_x = col->getPERIODICX() && vct->getXLEN() == 1;
+    const bool ps_y = col->getPERIODICY() && vct->getYLEN() == 1;
+    const bool ps_z = col->getPERIODICZ() && vct->getZLEN() == 1;
+
     //* Physical space --> Krylov space
-    phys2solver(bkrylov, tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
+    phys2solver(bkrylov, tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
     //* Step 33: snapshot the RHS in node space for cross-code byte diff. Runs
     //* at the tail of MaxwellSource so both PETSc and built-in GMRES paths
@@ -2921,7 +3083,7 @@ void EMfields3D::MaxwellSource(double *bkrylov)
     eqValue(0.0, bXn, nxn, nyn, nzn);
     eqValue(0.0, bYn, nxn, nyn, nzn);
     eqValue(0.0, bZn, nxn, nyn, nzn);
-    solver2phys(bXn, bYn, bZn, bkrylov, nxn, nyn, nzn, n_ghost_);
+    solver2phys(bXn, bYn, bZn, bkrylov, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
     //* Step 33 diagnostic: also compute A·b by calling MaxwellImage once on
     //* bkrylov and stash the node-space result. Isolates the operator from the
@@ -2933,7 +3095,7 @@ void EMfields3D::MaxwellSource(double *bkrylov)
     eqValue(0.0, AbXn, nxn, nyn, nzn);
     eqValue(0.0, AbYn, nxn, nyn, nzn);
     eqValue(0.0, AbZn, nxn, nyn, nzn);
-    solver2phys(AbXn, AbYn, AbZn, Ab_krylov.data(), nxn, nyn, nzn, n_ghost_);
+    solver2phys(AbXn, AbYn, AbZn, Ab_krylov.data(), nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 }
 
 //? RHS of the Maxwell solver
@@ -3025,8 +3187,16 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
 
     eqValue(0.0, im, 3 * (nxn - 2*n_ghost_) * (nyn - 2*n_ghost_) * (nzn - 2*n_ghost_));
 
+    //* Periodic-self subspace flags. The matching solver2phys/phys2solver overloads
+    //* below maintain `tempX[lo]==tempX[hi]` on entry and zero the HI Krylov slot
+    //* on exit, so the matvec runs on consistent data and GMRES iterates inside
+    //* the consistent-periodic subspace. Replaces the SymmetrizeMaxwellImage patch.
+    const bool ps_x = col->getPERIODICX() && vct->getXLEN() == 1;
+    const bool ps_y = col->getPERIODICY() && vct->getYLEN() == 1;
+    const bool ps_z = col->getPERIODICZ() && vct->getZLEN() == 1;
+
     //? Move from Krylov space to physical space
-    solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn, n_ghost_);
+    solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
     //* Phase B: switched to the modern n_ghost-aware NBDerivedHaloComm path
     //  (was communicateNodeBC_old which uses ComParser3D helpers hardcoded to
@@ -3041,19 +3211,6 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //* "halo refresh = smoothing at Smooth=0" reading. Cross-diff pins down
     //* halo convention differences (corner averaging, ghost fill pattern).
     if (mi_dump) dump_maxwell_stage("A_post_halo_in", tempX, tempY, tempZ);
-
-    //* Step 34d: per-matvec symmetrization — unify duplicate periodic DOFs
-    //* on the INPUT side so the operator acts on the consistent subspace only.
-    //* The halo refresh above filled ghosts via H; unifying now equalises the
-    //* interior periodic-duplicate pair and re-refreshes halos so the stencil
-    //* below sees a fully-consistent vector. Cheap (3 grid sweeps) per matvec.
-    if (col->getSymmetrizeMaxwellImage()) {
-        const bool perX = col->getPERIODICX() && vct->getXLEN() == 1;
-        const bool perY = col->getPERIODICY() && vct->getYLEN() == 1;
-        const bool perZ = col->getPERIODICZ() && vct->getZLEN() == 1;
-        if (perX || perY || perZ)
-            unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
-    }
 
     //? curl(curl(E)) assembly. Two paths selected by MaxwellOperator:
     //*   "curl_curl"   (default) — legacy composition curlC2N(curlN2C(E)).
@@ -3170,23 +3327,13 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageZ[i][j][k] = temp2Z[i][j][k] + imageZ[i][j][k];
             }
 
-    //* Stage E — full A·E assembled (before optional Symm-out).
+    //* Stage E — full A·E assembled.
     if (mi_dump) dump_maxwell_stage("E_full_Ae", imageX, imageY, imageZ);
 
-    //* Step 34d: per-matvec symmetrization — unify duplicate periodic DOFs on
-    //* the OUTPUT too so the result lives in the consistent-periodic subspace.
-    //* Paired with the input-side unify above, this restricts A to the
-    //* consistent subspace (A_symm = unify · A · unify).
-    if (col->getSymmetrizeMaxwellImage()) {
-        const bool perX = col->getPERIODICX() && vct->getXLEN() == 1;
-        const bool perY = col->getPERIODICY() && vct->getYLEN() == 1;
-        const bool perZ = col->getPERIODICZ() && vct->getZLEN() == 1;
-        if (perX || perY || perZ)
-            unify_periodic_duplicates(imageX, imageY, imageZ, nxn, nyn, nzn);
-    }
-
-    //? Move from physical space to Krylov space
-    phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_);
+    //? Move from physical space to Krylov space (zeros HI duplicate slot, averaging
+    //? the two duplicates into the LO slot first — replaces the legacy
+    //? SymmetrizeMaxwellImage post-matvec unify_periodic_duplicates patch).
+    phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
     //* Step 38: bookkeeping for per-stage dumps.
     if (col->getDumpMaxwellImageStages()
@@ -4329,6 +4476,147 @@ void EMfields3D::probe_smooth_symmetry(int cycle)
     report("raw",    raw_Su_v, raw_u_Sv);
     report("unify",  uni_Su_v, uni_u_Sv);
     report("unique", uniq_Su_v, uniq_u_Sv);
+}
+
+
+//* Subspace-preservation probe. Builds a deterministic Krylov vector u,
+//* projects it onto the consistent-periodic subspace (so phys-space duplicates
+//* `tempX[n_ghost] == tempX[nxn-n_ghost-1]` etc by construction), applies
+//* MaxwellImage, and reports max |output[duplicate1] - output[duplicate2]|
+//* on every periodic-self axis. After the subspace-projecting solver2phys/
+//* phys2solver pair landed, this probe is a confirmation test rather than a
+//* diagnostic — it should always report drift = 0 (the lift back to phys via
+//* the matching 11-arg solver2phys overload copies LO duplicates to HI by
+//* construction). Pre-fix, it distinguished "matvec drifts the duplicates at
+//* FP-ε per call" from "matvec is bit-exact on the subspace, GMRES iterates
+//* drift instead"; the answer was the latter, which motivated the Krylov-
+//* representation fix.
+void EMfields3D::probe_subspace_preservation(int cycle)
+{
+    const VirtualTopology3D *vct = &get_vct();
+    const Collective *col = &get_col();
+    const int rank    = vct->getCartesian_rank();
+    MPI_Comm fieldcomm = vct->getFieldComm();
+
+    const int kx = nxn - 2*n_ghost_;
+    const int ky = nyn - 2*n_ghost_;
+    const int kz = nzn - 2*n_ghost_;
+    const int krylov_size = 3 * kx * ky * kz;
+
+    std::vector<double> u_uni(krylov_size, 0.0);
+    std::vector<double> Au(krylov_size, 0.0);
+
+    //* Same deterministic LCG as probe_adjointness so Au is comparable.
+    const int coord_x = vct->getCoordinates(0);
+    const int coord_y = vct->getCoordinates(1);
+    const int coord_z = vct->getCoordinates(2);
+    const int gy = ky * vct->getYLEN();
+    const int gz = kz * vct->getZLEN();
+    auto hash_to_unit = [](uint64_t h) -> double {
+        h = h * 6364136223846793005ULL + 1442695040888963407ULL;
+        return (static_cast<double>((h >> 11) & ((1ULL<<53)-1)) / static_cast<double>(1ULL<<53)) * 2.0 - 1.0;
+    };
+    auto global_u = [&](int gi, int gj, int gk, int c) -> double {
+        uint64_t idx = ((static_cast<uint64_t>(gi) * gy + gj) * gz + gk) * 3u + c;
+        return hash_to_unit(idx * 2654435761u + 0xDEADBEEFu);
+    };
+    int p = 0;
+    for (int i = 0; i < kx; i++) {
+        const int gi = coord_x * kx + i;
+        for (int j = 0; j < ky; j++) {
+            const int gj = coord_y * ky + j;
+            for (int k = 0; k < kz; k++) {
+                const int gk = coord_z * kz + k;
+                u_uni[p++] = global_u(gi, gj, gk, 0);
+                u_uni[p++] = global_u(gi, gj, gk, 1);
+                u_uni[p++] = global_u(gi, gj, gk, 2);
+            }
+        }
+    }
+
+    //* Project u onto the consistent-periodic subspace (input by construction
+    //* satisfies tempX[n_ghost] == tempX[nxn-n_ghost-1] etc on periodic-self axes).
+    const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
+    const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
+    const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
+    solver2phys(tempX, tempY, tempZ, u_uni.data(), nxn, nyn, nzn, n_ghost_);
+    if (periodicX_global || periodicY_global || periodicZ_global)
+        unify_periodic_duplicates(tempX, tempY, tempZ, nxn, nyn, nzn);
+    phys2solver(u_uni.data(), tempX, tempY, tempZ, nxn, nyn, nzn, n_ghost_);
+
+    //* Sanity check: re-lift u_uni and confirm input duplicates ARE equal at ULP.
+    solver2phys(tempX, tempY, tempZ, u_uni.data(), nxn, nyn, nzn, n_ghost_);
+    auto axis_drift = [&](arr3_double f, int axis) -> double {
+        const int lo = n_ghost_;
+        double d = 0.0;
+        if (axis == 0 && periodicX_global) {
+            const int hi = nxn - n_ghost_ - 1;
+            for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
+                for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
+                    d = std::max(d, std::fabs(f[lo][j][k] - f[hi][j][k]));
+        } else if (axis == 1 && periodicY_global) {
+            const int hi = nyn - n_ghost_ - 1;
+            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
+                for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
+                    d = std::max(d, std::fabs(f[i][lo][k] - f[i][hi][k]));
+        } else if (axis == 2 && periodicZ_global) {
+            const int hi = nzn - n_ghost_ - 1;
+            for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
+                for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
+                    d = std::max(d, std::fabs(f[i][j][lo] - f[i][j][hi]));
+        }
+        return d;
+    };
+    auto reduce_max = [&](double local) {
+        double global = 0.0;
+        MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MAX, fieldcomm);
+        return global;
+    };
+    const double in_drift_x = reduce_max(std::max({axis_drift(tempX, 0), axis_drift(tempY, 0), axis_drift(tempZ, 0)}));
+    const double in_drift_y = reduce_max(std::max({axis_drift(tempX, 1), axis_drift(tempY, 1), axis_drift(tempZ, 1)}));
+    const double in_drift_z = reduce_max(std::max({axis_drift(tempX, 2), axis_drift(tempY, 2), axis_drift(tempZ, 2)}));
+
+    //* Apply the operator. After the structural fix (subspace-projecting
+    //* solver2phys/phys2solver), Au has 0 at the HI duplicate slot and lifting
+    //* via the legacy 8-arg solver2phys would write 0 at the HI duplicate phys
+    //* position — turning the probe into a measurement of the new pack/unpack
+    //* convention rather than the operator. So we use the matching 11-arg
+    //* overload (copies LO duplicate to HI in phys), which reports the actual
+    //* operator output. Drift = 0 confirms the structural fix is enforced.
+    MaxwellImage(Au.data(), u_uni.data());
+    solver2phys(imageX, imageY, imageZ, Au.data(), nxn, nyn, nzn, n_ghost_,
+                periodicX_global, periodicY_global, periodicZ_global);
+
+    const double out_drift_x = reduce_max(std::max({axis_drift(imageX, 0), axis_drift(imageY, 0), axis_drift(imageZ, 0)}));
+    const double out_drift_y = reduce_max(std::max({axis_drift(imageX, 1), axis_drift(imageY, 1), axis_drift(imageZ, 1)}));
+    const double out_drift_z = reduce_max(std::max({axis_drift(imageX, 2), axis_drift(imageY, 2), axis_drift(imageZ, 2)}));
+
+    //* Reference scale: max |Au| (so reader can see drift relative to output magnitude).
+    double local_max_au = 0.0;
+    for (int i = n_ghost_; i < nxn - n_ghost_; ++i)
+        for (int j = n_ghost_; j < nyn - n_ghost_; ++j)
+            for (int k = n_ghost_; k < nzn - n_ghost_; ++k)
+                local_max_au = std::max({local_max_au,
+                                         std::fabs(imageX[i][j][k]),
+                                         std::fabs(imageY[i][j][k]),
+                                         std::fabs(imageZ[i][j][k])});
+    const double max_au = reduce_max(local_max_au);
+
+    if (rank == 0) {
+        std::cout.setf(std::ios::scientific);
+        std::cout.precision(3);
+        std::cout << "subspace-probe cycle=" << cycle
+                  << " periodic_self=(" << (periodicX_global?'X':'.')
+                  << (periodicY_global?'Y':'.')
+                  << (periodicZ_global?'Z':'.') << ")"
+                  << std::endl;
+        std::cout << "  input   max|dup1-dup2|: x=" << in_drift_x  << " y=" << in_drift_y  << " z=" << in_drift_z << std::endl;
+        std::cout << "  output  max|dup1-dup2|: x=" << out_drift_x << " y=" << out_drift_y << " z=" << out_drift_z
+                  << "  (ref max|Au|=" << max_au << ")" << std::endl;
+        const double max_out = std::max({out_drift_x, out_drift_y, out_drift_z});
+        std::cout << "  output  rel-drift = " << (max_au > 0.0 ? max_out / max_au : 0.0) << std::endl;
+        std::cout.unsetf(std::ios::scientific);
+    }
 }
 
 
