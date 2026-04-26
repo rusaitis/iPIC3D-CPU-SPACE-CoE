@@ -2529,6 +2529,73 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         communicateNode_P(nxn, nyn, nzn, moment_Mzz, vct, this);
     }
 
+    //* Average-unify M's periodic-duplicate LO and HI nodes on each periodic-self
+    //* axis. At Linear LO == HI bit-exact already, so the average is a no-op.
+    //* At TSC the gather scatters partial sums to LO and HI separately; averaging
+    //* makes them consistent so M·E at LO and HI produce equal output. Followed
+    //* by a fresh copy halo so ghosts pick up the unified LO=HI values (otherwise
+    //* mass_matrix_times_vector reads stale ghost values when stencils touch
+    //* ghost layers).
+    if (_col.getUnifyMassMatrixPeriodicDup())
+    {
+        const VirtualTopology3D *vctp = vct;
+        const bool ps_x = _col.getPERIODICX() && vctp->getXLEN() == 1;
+        const bool ps_y = _col.getPERIODICY() && vctp->getYLEN() == 1;
+        const bool ps_z = _col.getPERIODICZ() && vctp->getZLEN() == 1;
+
+        array4_double *Mall[9] = { &Mxx, &Mxy, &Mxz, &Myx, &Myy, &Myz, &Mzx, &Mzy, &Mzz };
+
+        for (int g = 0; g < ne_mass_; g++)
+        for (int idx = 0; idx < 9; idx++)
+        {
+            array4_double &Marr = *Mall[idx];
+            if (ps_x) {
+                const int ilo = n_ghost_;
+                const int ihi = nxn - n_ghost_ - 1;
+                if (ihi > ilo)
+                    for (int j = 0; j < nyn; ++j)
+                        for (int k = 0; k < nzn; ++k) {
+                            const double avg = 0.5 * (Marr[g][ilo][j][k] + Marr[g][ihi][j][k]);
+                            Marr[g][ilo][j][k] = avg;
+                            Marr[g][ihi][j][k] = avg;
+                        }
+            }
+            if (ps_y) {
+                const int jlo = n_ghost_;
+                const int jhi = nyn - n_ghost_ - 1;
+                if (jhi > jlo)
+                    for (int i = 0; i < nxn; ++i)
+                        for (int k = 0; k < nzn; ++k) {
+                            const double avg = 0.5 * (Marr[g][i][jlo][k] + Marr[g][i][jhi][k]);
+                            Marr[g][i][jlo][k] = avg;
+                            Marr[g][i][jhi][k] = avg;
+                        }
+            }
+            if (ps_z) {
+                const int klo = n_ghost_;
+                const int khi = nzn - n_ghost_ - 1;
+                if (khi > klo)
+                    for (int i = 0; i < nxn; ++i)
+                        for (int j = 0; j < nyn; ++j) {
+                            const double avg = 0.5 * (Marr[g][i][j][klo] + Marr[g][i][j][khi]);
+                            Marr[g][i][j][klo] = avg;
+                            Marr[g][i][j][khi] = avg;
+                        }
+            }
+        }
+
+        //* Re-run the copy halo after unify so ghost cells pick up the new
+        //* unified LO=HI values (otherwise mass_matrix_times_vector reads
+        //* stale pre-unify ghost values when stencils touch ghost layers).
+        for (int g = 0; g < ne_mass_; g++)
+        for (int idx = 0; idx < 9; idx++)
+        {
+            array4_double &Marr = *Mall[idx];
+            double ***slab = convert_to_arr3(Marr[g]);
+            communicateNode_P(nxn, nyn, nzn, slab, vct, this);
+        }
+    }
+
     //* Diagnostic — dump M's diagonal slabs (g=0 stencil group, the "self"
     //* mass-matrix entry at each node) post-halo, once per cycle 1. If LO and
     //* HI duplicates differ here, the gather/halo isn't unifying periodic

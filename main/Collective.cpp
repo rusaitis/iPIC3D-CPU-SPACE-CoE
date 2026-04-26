@@ -146,6 +146,12 @@ void Collective::ReadInput(string inputfile)
         //* Mass-matrix diagonal dump (default off).
         DumpMassMatrixDiag          = config.read<bool>("DumpMassMatrixDiag", false);
 
+        //* Average-unify M's LO/HI duplicates after gather + halo (default off).
+        UnifyMassMatrixPeriodicDup  = config.read<bool>("UnifyMassMatrixPeriodicDup", false);
+
+        //* Periodic-self ghost-source index correction (default off; no-op at n_ghost=1).
+        FixPeriodicSelfGhostOrder   = config.read<bool>("FixPeriodicSelfGhostOrder", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

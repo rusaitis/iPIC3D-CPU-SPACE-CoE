@@ -219,6 +219,8 @@ class Collective
     int    getDumpMaxwellImageStagesCycle() const { return DumpMaxwellImageStagesCycle; }
     bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
     bool   getDumpMassMatrixDiag()      const { return DumpMassMatrixDiag; }
+    bool   getFixPeriodicSelfGhostOrder() const { return FixPeriodicSelfGhostOrder; }
+    bool   getUnifyMassMatrixPeriodicDup() const { return UnifyMassMatrixPeriodicDup; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -298,6 +300,22 @@ class Collective
     //* slabs at the target cycle, for testing periodic-duplicate consistency
     //* of M at LO vs HI nodes. Default off.
     bool   DumpMassMatrixDiag;
+
+    //* NBDerivedHaloCommN periodic-self ghost-source index correction. The
+    //* loop iterates g=0..n_ghost-1 with sL/sR walking in the wrong direction;
+    //* g=0 is the outermost ghost and should hold the value furthest from the
+    //* active interior. Substitutes g → (n_ghost - 1 - g) in source formulas.
+    //* No-op at n_ghost=1 (Linear); swaps the two ghost layers at n_ghost=2.
+    bool   FixPeriodicSelfGhostOrder;
+
+    //* Average-unify M's periodic-duplicate LO and HI nodes after the
+    //* mass-matrix gather + halo refresh, then re-run the copy halo so ghost
+    //* cells pick up the unified values. Linear has LO == HI bit-exact by
+    //* construction (CIC corner deposit doesn't reach ghosts), so average is
+    //* a no-op. TSC has LO != HI by 3-5% because the 27-node deposit hits
+    //* ghost cells and those contributions are then overwritten by the copy
+    //* halo, asymmetrically losing deposits to LO vs HI.
+    bool   UnifyMassMatrixPeriodicDup;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy
