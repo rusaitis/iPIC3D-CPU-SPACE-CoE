@@ -328,6 +328,14 @@ int c_Solver::Init(int argc, char **argv)
             particles[i].fixPosition();
         }
 
+        //* Cross-code particle init dump. Per-rank text file into SaveDirName so
+        //* ECSIM's LoadParticlesInit consumes the same state. No-op when off.
+        if (col->getDumpParticlesInit())
+        {
+            for (int i = 0; i < ns; i++)
+                particles[i].dump_particles_init(col->getSaveDirName());
+        }
+
     }
 
     //* Allocate test particles (if any)

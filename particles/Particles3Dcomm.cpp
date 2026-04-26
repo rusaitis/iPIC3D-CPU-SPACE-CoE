@@ -62,13 +62,40 @@ using std::cout;
 using std::endl;
 
 /**
- * 
+ *
  * Class for particles of the same species, in a 2D space and 3component velocity
  * @date Fri Jun 4 2007
  * @author Stefano Markidis, Giovanni Lapenta
  * @version 2.0
  *
  */
+
+//* Cross-code particle init dump. Plain text, 17-digit precision, one particle
+//* per line: x y z u v w q. Per-rank file. ECSIM's LoadParticlesInit parses the
+//* same format so both codes start from byte-identical state.
+void Particles3Dcomm::dump_particles_init(const std::string& dir) const
+{
+    const int rank = vct->getCartesian_rank();
+    std::ostringstream path;
+    path << dir << "/particles_init_s" << ns << "_r" << rank << ".txt";
+    std::ofstream f(path.str());
+    if (!f) eprintf("dump_particles_init: cannot open %s", path.str().c_str());
+
+    f << "# iPIC3D particles species=" << ns << " rank=" << rank
+      << " nop=" << _pcls.size() << "\n";
+    f << "# fields: x y z u v w q\n";
+    f << std::scientific << std::setprecision(17);
+    const int nop = (int)_pcls.size();
+    for (int i = 0; i < nop; i++)
+    {
+        const SpeciesParticle& p = _pcls[i];
+        f << p.get_x() << ' ' << p.get_y() << ' ' << p.get_z() << ' '
+          << p.get_u() << ' ' << p.get_v() << ' ' << p.get_w() << ' '
+          << p.get_q() << '\n';
+    }
+    if (rank == 0)
+        cout << "[DumpParticles] wrote species " << ns << " → " << path.str() << endl;
+}
 
 static bool print_pcl_comm_counts = false;
 

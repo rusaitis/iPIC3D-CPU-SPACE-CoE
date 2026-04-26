@@ -134,6 +134,18 @@ void Collective::ReadInput(string inputfile)
         //* post-`calculateE` Helmholtz hook (default off — opt-in).
         PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
+        //* Per-stage MaxwellImage dump (default off). When on, the first
+        //* matvec of cycle `DumpMaxwellImageStagesCycle` (default 1) writes
+        //* per-stage binary fields into SaveDirName for cross-code byte diff.
+        DumpMaxwellImageStages      = config.read<bool>("DumpMaxwellImageStages", false);
+        DumpMaxwellImageStagesCycle = config.read<int> ("DumpMaxwellImageStagesCycle", 1);
+
+        //* Cross-code particle init dump (default off).
+        DumpParticlesInit           = config.read<bool>("DumpParticlesInit", false);
+
+        //* Mass-matrix diagonal dump (default off).
+        DumpMassMatrixDiag          = config.read<bool>("DumpMassMatrixDiag", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

@@ -215,6 +215,10 @@ class Collective
     double getHelmholtzAlpha()          const { return HelmholtzAlpha; }
     int    getHelmholtzNiter()          const { return HelmholtzNiter; }
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
+    bool   getDumpMaxwellImageStages()  const { return DumpMaxwellImageStages; }
+    int    getDumpMaxwellImageStagesCycle() const { return DumpMaxwellImageStagesCycle; }
+    bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
+    bool   getDumpMassMatrixDiag()      const { return DumpMassMatrixDiag; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -276,6 +280,24 @@ class Collective
     //* and BEFORE calculateB() / particle push. Decoupled from MaxwellImage
     //* S·M·S so the implicit operator structure stays untouched.
     bool   PostSolveHelmholtz;
+
+    //* Per-stage dump inside MaxwellImage for cross-code (iPIC3D ↔ ECSIM)
+    //* byte-diff. When enabled, the first matvec of the target cycle writes
+    //* `{SaveDirName}/maxwell_stage_c{cycle}_m0_{stage}_{x|y|z}_r{rank}.bin`
+    //* for stages A_post_halo_in / B_post_curl2 / B2_pre_ME_temp / C_raw_ME /
+    //* D_SMS_invVOL / E_full_Ae. Default off — production byte-identical when off.
+    bool   DumpMaxwellImageStages;
+    int    DumpMaxwellImageStagesCycle;
+
+    //* Cross-code particle init dump. When true, after maxwellian init each
+    //* species writes `particles_init_s{ns}_r{rank}.txt` into SaveDirName.
+    //* ECSIM's LoadParticlesInit consumes the same plain-text format.
+    bool   DumpParticlesInit;
+
+    //* Mass-matrix diagonal dump after gather + halo: Mxx[0]/Myy[0]/Mzz[0]
+    //* slabs at the target cycle, for testing periodic-duplicate consistency
+    //* of M at LO vs HI nodes. Default off.
+    bool   DumpMassMatrixDiag;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy
