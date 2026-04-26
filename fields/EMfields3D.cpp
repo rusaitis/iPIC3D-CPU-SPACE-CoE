@@ -3224,8 +3224,16 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //*   "curl_curl"   — legacy composition curlC2N(curlN2C(E)).
     //*   "lap_graddiv" — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E) via
     //*                   composed lapN2N and divN2C→gradC2N (default).
+    //* Diagnostic flag DisableCurl2InImage zeros the curl² contribution.
+    const bool disable_curl2 = col->getDisableCurl2InImage();
     const std::string maxwell_op = col->getMaxwellOperator();
-    if (maxwell_op == "lap_graddiv")
+    if (disable_curl2)
+    {
+        eqValue(0.0, imageX, nxn, nyn, nzn);
+        eqValue(0.0, imageY, nxn, nyn, nzn);
+        eqValue(0.0, imageZ, nxn, nyn, nzn);
+    }
+    else if (maxwell_op == "lap_graddiv")
     {
         grid->lapN2N(imageX, tempX, this);
         grid->lapN2N(imageY, tempY, this);
@@ -3278,19 +3286,31 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //* mass_matrix_times_vector handles bounds internally for the wider TSC stencil
     //* (mass-matrix product cube reaches +/- stencil_order_ nodes), so we keep the
     //* full interior [n_ghost_, nxn-n_ghost_) for both Linear and Quadratic.
-    #pragma omp parallel for collapse(3) schedule(static)
-    for (int i = n_ghost_; i < nxn - n_ghost_; i++)
-        for (int j = n_ghost_; j < nyn - n_ghost_; j++)
-            for (int k = n_ghost_; k < nzn - n_ghost_; k++)
-            {
-                double MEx, MEy, MEz;
+    //* Diagnostic flag DisableMassMatrixInImage zeros the M·E contribution so
+    //* A becomes (I + curl²·factor) only.
+    const bool disable_M = col->getDisableMassMatrixInImage();
+    if (disable_M)
+    {
+        eqValue(0.0, temp2X, nxn, nyn, nzn);
+        eqValue(0.0, temp2Y, nxn, nyn, nzn);
+        eqValue(0.0, temp2Z, nxn, nyn, nzn);
+    }
+    else
+    {
+        #pragma omp parallel for collapse(3) schedule(static)
+        for (int i = n_ghost_; i < nxn - n_ghost_; i++)
+            for (int j = n_ghost_; j < nyn - n_ghost_; j++)
+                for (int k = n_ghost_; k < nzn - n_ghost_; k++)
+                {
+                    double MEx, MEy, MEz;
 
-                mass_matrix_times_vector(&MEx, &MEy, &MEz, tempX, tempY, tempZ, i, j, k);
+                    mass_matrix_times_vector(&MEx, &MEy, &MEz, tempX, tempY, tempZ, i, j, k);
 
-                temp2X[i][j][k] = dt*th*FourPI*MEx;
-                temp2Y[i][j][k] = dt*th*FourPI*MEy;
-                temp2Z[i][j][k] = dt*th*FourPI*MEz;
-            }
+                    temp2X[i][j][k] = dt*th*FourPI*MEx;
+                    temp2Y[i][j][k] = dt*th*FourPI*MEy;
+                    temp2Z[i][j][k] = dt*th*FourPI*MEz;
+                }
+    }
 
     //* Stage C — raw M·E output × (dt·θ·4π), pre outer halo and smoothing.
     if (mi_dump) dump_maxwell_stage("C_raw_ME", temp2X, temp2Y, temp2Z);

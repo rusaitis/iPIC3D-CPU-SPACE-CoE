@@ -221,6 +221,8 @@ class Collective
     bool   getDumpMassMatrixDiag()      const { return DumpMassMatrixDiag; }
     bool   getFixPeriodicSelfGhostOrder() const { return FixPeriodicSelfGhostOrder; }
     bool   getUnifyMassMatrixPeriodicDup() const { return UnifyMassMatrixPeriodicDup; }
+    bool   getDisableMassMatrixInImage() const { return DisableMassMatrixInImage; }
+    bool   getDisableCurl2InImage()      const { return DisableCurl2InImage; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -316,6 +318,14 @@ class Collective
     //* ghost cells and those contributions are then overwritten by the copy
     //* halo, asymmetrically losing deposits to LO vs HI.
     bool   UnifyMassMatrixPeriodicDup;
+
+    //* Diagnostic-only: zero the M·E (S·M·S) contribution to MaxwellImage so
+    //* A becomes (I + curl²·factor) only. Bisects whether the TSC uniform
+    //* explosion lives in the M-side or the curl²-side. Default false.
+    bool   DisableMassMatrixInImage;
+    //* Diagnostic-only: zero the curl² contribution to MaxwellImage so A
+    //* becomes (I + S·M·S·factor) only. Default false.
+    bool   DisableCurl2InImage;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

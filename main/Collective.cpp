@@ -152,6 +152,10 @@ void Collective::ReadInput(string inputfile)
         //* Periodic-self ghost-source index correction (default off; no-op at n_ghost=1).
         FixPeriodicSelfGhostOrder   = config.read<bool>("FixPeriodicSelfGhostOrder", false);
 
+        //* Diagnostic: zero M·E or curl² contribution to MaxwellImage. Default off.
+        DisableMassMatrixInImage    = config.read<bool>("DisableMassMatrixInImage", false);
+        DisableCurl2InImage         = config.read<bool>("DisableCurl2InImage", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 
