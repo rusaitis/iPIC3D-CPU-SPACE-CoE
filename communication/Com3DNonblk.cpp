@@ -682,19 +682,29 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             MPI_Irecv(&vector[1][1][nz-1-g],  1, xyFacetype, right_neighborZ, tag_ZL, comm, &reqList[recvcnt++]);
     }
     sendcnt = recvcnt;
+    //* Send-side ghost-layer pairing. Receiver puts incoming layer g into
+    //  ghost slot g where g=0 is OUTERMOST. The outermost ghost physically
+    //  corresponds to the value FURTHEST from the active interior, so the
+    //  matching send must come from depth (n_ghost-1) into the sender's
+    //  interior — i.e., the same g_src(g) = (n_ghost-1-g) substitution
+    //  Phase B applied to the periodic-self self-copy below. At n_ghost=1
+    //  the substitution is a no-op (only one layer); at n_ghost=2 it swaps
+    //  the two outgoing layers so receivers get the right depth in the right
+    //  ghost slot.
     for (int g = 0; g < n_ghost_; g++) {
+        const int s = g_src(g);
         if (communicationCnt[0])
-            MPI_Isend(&vector[n_ghost_+offset+g][1][1],       1, yzFacetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+            MPI_Isend(&vector[n_ghost_+offset+s][1][1],       1, yzFacetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
         if (communicationCnt[1])
-            MPI_Isend(&vector[nx-1-n_ghost_-offset-g][1][1],  1, yzFacetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+            MPI_Isend(&vector[nx-1-n_ghost_-offset-s][1][1],  1, yzFacetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
         if (communicationCnt[2])
-            MPI_Isend(&vector[1][n_ghost_+offset+g][1],       1, xzFacetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
+            MPI_Isend(&vector[1][n_ghost_+offset+s][1],       1, xzFacetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
         if (communicationCnt[3])
-            MPI_Isend(&vector[1][ny-1-n_ghost_-offset-g][1],  1, xzFacetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
+            MPI_Isend(&vector[1][ny-1-n_ghost_-offset-s][1],  1, xzFacetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
         if (communicationCnt[4])
-            MPI_Isend(&vector[1][1][n_ghost_+offset+g],       1, xyFacetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
+            MPI_Isend(&vector[1][1][n_ghost_+offset+s],       1, xyFacetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
         if (communicationCnt[5])
-            MPI_Isend(&vector[1][1][nz-1-n_ghost_-offset-g],  1, xyFacetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+            MPI_Isend(&vector[1][1][nz-1-n_ghost_-offset-s],  1, xyFacetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
     }
     assert_eq(recvcnt, sendcnt - recvcnt);
     assert_le(sendcnt, MAX_REQS);
@@ -811,17 +821,20 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
 
         sendcnt = recvcnt;
 
-        //? yEdge sends (mirror of recvs; source at interior depth n_ghost + offset + g)
+        //? yEdge sends (mirror of recvs; source at interior depth n_ghost + offset + g_src(g))
+        //  Same g→(n_ghost-1-g) substitution as the FACE sends above so each
+        //  receiver ghost slot gets the matching depth from the sender.
         for (int gx = 0; gx < n_ghost_; gx++)
         for (int gz = 0; gz < n_ghost_; gz++)
         {
+            const int sx = g_src(gx), sz = g_src(gz);
             if (communicationCnt[0]) {
-                if (communicationCnt[4]) MPI_Isend(&vector[n_ghost_+offset+gx][1][n_ghost_+offset+gz],        1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-                if (communicationCnt[5]) MPI_Isend(&vector[n_ghost_+offset+gx][1][nz-1-n_ghost_-offset-gz],   1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[4]) MPI_Isend(&vector[n_ghost_+offset+sx][1][n_ghost_+offset+sz],        1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[5]) MPI_Isend(&vector[n_ghost_+offset+sx][1][nz-1-n_ghost_-offset-sz],   1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
             }
             if (communicationCnt[1]) {
-                if (communicationCnt[4]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][1][n_ghost_+offset+gz],       1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-                if (communicationCnt[5]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][1][nz-1-n_ghost_-offset-gz],  1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[4]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][1][n_ghost_+offset+sz],       1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[5]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][1][nz-1-n_ghost_-offset-sz],  1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
             }
         }
 
@@ -829,13 +842,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         for (int gx = 0; gx < n_ghost_; gx++)
         for (int gy = 0; gy < n_ghost_; gy++)
         {
+            const int sx = g_src(gx), sy = g_src(gy);
             if (communicationCnt[2]) {
-                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+gx][n_ghost_+offset+gy][1],         1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
-                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][n_ghost_+offset+gy][1],    1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+sx][n_ghost_+offset+sy][1],         1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][n_ghost_+offset+sy][1],    1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
             }
             if (communicationCnt[3]) {
-                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+gx][ny-1-n_ghost_-offset-gy][1],        1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
-                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-gx][ny-1-n_ghost_-offset-gy][1],   1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+sx][ny-1-n_ghost_-offset-sy][1],        1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][ny-1-n_ghost_-offset-sy][1],   1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
             }
         }
 
@@ -843,13 +857,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         for (int gy = 0; gy < n_ghost_; gy++)
         for (int gz = 0; gz < n_ghost_; gz++)
         {
+            const int sy = g_src(gy), sz = g_src(gz);
             if (communicationCnt[4]) {
-                if (communicationCnt[2]) MPI_Isend(&vector[1][n_ghost_+offset+gy][n_ghost_+offset+gz],         1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
-                if (communicationCnt[3]) MPI_Isend(&vector[1][ny-1-n_ghost_-offset-gy][n_ghost_+offset+gz],    1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[2]) MPI_Isend(&vector[1][n_ghost_+offset+sy][n_ghost_+offset+sz],         1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
+                if (communicationCnt[3]) MPI_Isend(&vector[1][ny-1-n_ghost_-offset-sy][n_ghost_+offset+sz],    1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
             }
             if (communicationCnt[5]) {
-                if (communicationCnt[2]) MPI_Isend(&vector[1][n_ghost_+offset+gy][nz-1-n_ghost_-offset-gz],        1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
-                if (communicationCnt[3]) MPI_Isend(&vector[1][ny-1-n_ghost_-offset-gy][nz-1-n_ghost_-offset-gz],   1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[2]) MPI_Isend(&vector[1][n_ghost_+offset+sy][nz-1-n_ghost_-offset-sz],        1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+                if (communicationCnt[3]) MPI_Isend(&vector[1][ny-1-n_ghost_-offset-sy][nz-1-n_ghost_-offset-sz],   1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
             }
         }
 
@@ -999,12 +1014,16 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             for (int gy = 0; gy < n_ghost_; gy++)
             for (int gz = 0; gz < n_ghost_; gz++)
             {
-                const int xs_l = n_ghost_ + offset + gx;            //* X source index for left send
-                const int xs_r = nx - 1 - n_ghost_ - offset - gx;   //* X source index for right send
-                const int ys_l = n_ghost_ + offset + gy;
-                const int ys_r = ny - 1 - n_ghost_ - offset - gy;
-                const int zs_l = n_ghost_ + offset + gz;
-                const int zs_r = nz - 1 - n_ghost_ - offset - gz;
+                //* g→(n_ghost-1-g) substitution applied to send sources so the
+                //  outermost-ghost RECV slot lines up with the deepest-interior
+                //  source — matches the FACE/EDGE phases above. No-op at n_ghost=1.
+                const int sx = g_src(gx), sy = g_src(gy), sz = g_src(gz);
+                const int xs_l = n_ghost_ + offset + sx;            //* X source index for left send
+                const int xs_r = nx - 1 - n_ghost_ - offset - sx;   //* X source index for right send
+                const int ys_l = n_ghost_ + offset + sy;
+                const int ys_r = ny - 1 - n_ghost_ - offset - sy;
+                const int zs_l = n_ghost_ + offset + sz;
+                const int zs_r = nz - 1 - n_ghost_ - offset - sz;
 
                 if (communicationCnt[0]) {
                     MPI_Isend(&vector[xs_l][ys_l][zs_l],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
