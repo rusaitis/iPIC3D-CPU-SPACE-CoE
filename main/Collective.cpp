@@ -197,6 +197,9 @@ void Collective::ReadInput(string inputfile)
         //* TSC moment-halo edge + corner fold (see Collective.h for details).
         CompletePeriodicSelfFold    = config.read<bool>("CompletePeriodicSelfFold", false);
 
+        //* TSC cross-rank moment SOR (see Collective.h for details).
+        CrossRankMomentSOR          = config.read<bool>("CrossRankMomentSOR", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

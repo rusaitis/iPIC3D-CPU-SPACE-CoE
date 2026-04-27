@@ -671,6 +671,183 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     auto g_src = [&](int g) { return fix_self_ghost ? (n_ghost_ - 1 - g) : g; };
 
     //! ============================================================
+    //* CROSS-RANK MOMENT SOR PRE-PASS
+    //
+    //  At n_ghost > 1 (TSC) for the moments path, particles whose stencil
+    //  reaches past the rank boundary deposit partials into the local
+    //  GHOST cells. Those partials must fold into the *neighbour's*
+    //  strict-interior native at the matching periodic-image phys node.
+    //
+    //  The standard MPI face exchange below sends interior values for the
+    //  COPY semantic (filling ghosts for stencil reads); IRecv would
+    //  overwrite the local ghost partials before they could be sent. So
+    //  this pre-pass runs FIRST, packing each rank's ghost cells, MPI-
+    //  exchanging them, and SORing the received slabs into the receiver's
+    //  strict-interior using the same `g + nx - 2*ng - offset` /
+    //  `(2*ng - 1 + offset) - g` formulas as the periodic-self fold.
+    //
+    //  Default off (`CrossRankMomentSOR=false`); strict no-op at n_ghost=1
+    //  and at periodic-self axes (covered by the periodic-self fold below).
+    //! ============================================================
+    if (needInterp && EMf->get_col().getCrossRankMomentSOR() && n_ghost_ > 1) {
+        //* Pack ng+1 layers per side: ng ghost layers + the LO/HI duplicate
+        //* (at i=ng / i=nx-1-ng). Sender's LO {dup, inner ghost, outer ghost}
+        //* (h=0..ng) cover the receiver's HI strict interior at receiver's
+        //* phys (nxc_R - h) for h in [0, ng]. Sending the dup folds the
+        //* cross-rank LO/HI duplicate-native unification into the same
+        //* exchange — the legacy addFace at line 1199+ (which would have
+        //* done dup unify with WRONG offsets at TSC cross-rank) is
+        //* correspondingly skipped below.
+        const int nlayers = n_ghost_ + 1;
+        const int x_cross = (left_neighborX != myrank && left_neighborX != MPI_PROC_NULL)
+                              || (right_neighborX != myrank && right_neighborX != MPI_PROC_NULL);
+        const int y_cross = (left_neighborY != myrank && left_neighborY != MPI_PROC_NULL)
+                              || (right_neighborY != myrank && right_neighborY != MPI_PROC_NULL);
+        const int z_cross = (left_neighborZ != myrank && left_neighborZ != MPI_PROC_NULL)
+                              || (right_neighborZ != myrank && right_neighborZ != MPI_PROC_NULL);
+
+        //* Tag space distinct from the standard exchange (1..6) so messages
+        //* don't alias even though they share the same comm.
+        const int tag_sor_XL = 101, tag_sor_XR = 104;
+        const int tag_sor_YL = 102, tag_sor_YR = 105;
+        const int tag_sor_ZL = 103, tag_sor_ZR = 106;
+
+        //* X-axis cross-rank face SOR.
+        if (x_cross) {
+            const int slab = nlayers * ny * nz;
+            std::vector<double> send_lo(slab, 0.0), send_hi(slab, 0.0);
+            std::vector<double> recv_lo(slab, 0.0), recv_hi(slab, 0.0);
+            for (int h = 0; h < nlayers; ++h)
+                for (int iy = 0; iy < ny; ++iy)
+                    for (int iz = 0; iz < nz; ++iz) {
+                        //* h=0..ng-1: ghost layers; h=ng: LO/HI duplicate.
+                        const int src_lo = (h < n_ghost_) ? h : n_ghost_;
+                        const int src_hi = (h < n_ghost_) ? (nx - 1 - h) : (nx - 1 - n_ghost_);
+                        send_lo[(h * ny + iy) * nz + iz] = vector[src_lo][iy][iz];
+                        send_hi[(h * ny + iy) * nz + iz] = vector[src_hi][iy][iz];
+                    }
+            MPI_Request rq[4]; int nrq = 0;
+            if (left_neighborX  != MPI_PROC_NULL && left_neighborX  != myrank) {
+                MPI_Irecv(recv_lo.data(), slab, MPI_DOUBLE, left_neighborX,  tag_sor_XR, comm, &rq[nrq++]);
+                MPI_Isend(send_lo.data(), slab, MPI_DOUBLE, left_neighborX,  tag_sor_XL, comm, &rq[nrq++]);
+            }
+            if (right_neighborX != MPI_PROC_NULL && right_neighborX != myrank) {
+                MPI_Irecv(recv_hi.data(), slab, MPI_DOUBLE, right_neighborX, tag_sor_XL, comm, &rq[nrq++]);
+                MPI_Isend(send_hi.data(), slab, MPI_DOUBLE, right_neighborX, tag_sor_XR, comm, &rq[nrq++]);
+            }
+            if (nrq) MPI_Waitall(nrq, rq, MPI_STATUSES_IGNORE);
+            //* SOR received LO slab (sender = LEFT neighbour) into our HI side.
+            //* h=0..ng-1: outer..inner ghost folds to our HI strict interior;
+            //* h=ng: sender's LO dup folds to our HI dup.
+            if (left_neighborX != MPI_PROC_NULL && left_neighborX != myrank) {
+                for (int h = 0; h < nlayers; ++h) {
+                    const int dst = (h < n_ghost_) ? (h + nx - 2 * n_ghost_ - offset)
+                                                    : (nx - 1 - n_ghost_);
+                    for (int iy = 0; iy < ny; ++iy)
+                        for (int iz = 0; iz < nz; ++iz)
+                            vector[dst][iy][iz] += recv_lo[(h * ny + iy) * nz + iz];
+                }
+            }
+            //* SOR received HI slab (sender = RIGHT neighbour) into our LO side.
+            if (right_neighborX != MPI_PROC_NULL && right_neighborX != myrank) {
+                for (int h = 0; h < nlayers; ++h) {
+                    const int dst = (h < n_ghost_) ? ((2 * n_ghost_ - 1 + offset) - h)
+                                                    : n_ghost_;
+                    for (int iy = 0; iy < ny; ++iy)
+                        for (int iz = 0; iz < nz; ++iz)
+                            vector[dst][iy][iz] += recv_hi[(h * ny + iy) * nz + iz];
+                }
+            }
+        }
+
+        //* Y-axis cross-rank face SOR.
+        if (y_cross) {
+            const int slab = nlayers * nx * nz;
+            std::vector<double> send_lo(slab, 0.0), send_hi(slab, 0.0);
+            std::vector<double> recv_lo(slab, 0.0), recv_hi(slab, 0.0);
+            for (int h = 0; h < nlayers; ++h)
+                for (int ix = 0; ix < nx; ++ix)
+                    for (int iz = 0; iz < nz; ++iz) {
+                        const int src_lo = (h < n_ghost_) ? h : n_ghost_;
+                        const int src_hi = (h < n_ghost_) ? (ny - 1 - h) : (ny - 1 - n_ghost_);
+                        send_lo[(h * nx + ix) * nz + iz] = vector[ix][src_lo][iz];
+                        send_hi[(h * nx + ix) * nz + iz] = vector[ix][src_hi][iz];
+                    }
+            MPI_Request rq[4]; int nrq = 0;
+            if (left_neighborY  != MPI_PROC_NULL && left_neighborY  != myrank) {
+                MPI_Irecv(recv_lo.data(), slab, MPI_DOUBLE, left_neighborY,  tag_sor_YR, comm, &rq[nrq++]);
+                MPI_Isend(send_lo.data(), slab, MPI_DOUBLE, left_neighborY,  tag_sor_YL, comm, &rq[nrq++]);
+            }
+            if (right_neighborY != MPI_PROC_NULL && right_neighborY != myrank) {
+                MPI_Irecv(recv_hi.data(), slab, MPI_DOUBLE, right_neighborY, tag_sor_YL, comm, &rq[nrq++]);
+                MPI_Isend(send_hi.data(), slab, MPI_DOUBLE, right_neighborY, tag_sor_YR, comm, &rq[nrq++]);
+            }
+            if (nrq) MPI_Waitall(nrq, rq, MPI_STATUSES_IGNORE);
+            if (left_neighborY != MPI_PROC_NULL && left_neighborY != myrank) {
+                for (int h = 0; h < nlayers; ++h) {
+                    const int dst = (h < n_ghost_) ? (h + ny - 2 * n_ghost_ - offset)
+                                                    : (ny - 1 - n_ghost_);
+                    for (int ix = 0; ix < nx; ++ix)
+                        for (int iz = 0; iz < nz; ++iz)
+                            vector[ix][dst][iz] += recv_lo[(h * nx + ix) * nz + iz];
+                }
+            }
+            if (right_neighborY != MPI_PROC_NULL && right_neighborY != myrank) {
+                for (int h = 0; h < nlayers; ++h) {
+                    const int dst = (h < n_ghost_) ? ((2 * n_ghost_ - 1 + offset) - h)
+                                                    : n_ghost_;
+                    for (int ix = 0; ix < nx; ++ix)
+                        for (int iz = 0; iz < nz; ++iz)
+                            vector[ix][dst][iz] += recv_hi[(h * nx + ix) * nz + iz];
+                }
+            }
+        }
+
+        //* Z-axis cross-rank face SOR.
+        if (z_cross) {
+            const int slab = nlayers * nx * ny;
+            std::vector<double> send_lo(slab, 0.0), send_hi(slab, 0.0);
+            std::vector<double> recv_lo(slab, 0.0), recv_hi(slab, 0.0);
+            for (int h = 0; h < nlayers; ++h)
+                for (int ix = 0; ix < nx; ++ix)
+                    for (int iy = 0; iy < ny; ++iy) {
+                        const int src_lo = (h < n_ghost_) ? h : n_ghost_;
+                        const int src_hi = (h < n_ghost_) ? (nz - 1 - h) : (nz - 1 - n_ghost_);
+                        send_lo[(h * nx + ix) * ny + iy] = vector[ix][iy][src_lo];
+                        send_hi[(h * nx + ix) * ny + iy] = vector[ix][iy][src_hi];
+                    }
+            MPI_Request rq[4]; int nrq = 0;
+            if (left_neighborZ  != MPI_PROC_NULL && left_neighborZ  != myrank) {
+                MPI_Irecv(recv_lo.data(), slab, MPI_DOUBLE, left_neighborZ,  tag_sor_ZR, comm, &rq[nrq++]);
+                MPI_Isend(send_lo.data(), slab, MPI_DOUBLE, left_neighborZ,  tag_sor_ZL, comm, &rq[nrq++]);
+            }
+            if (right_neighborZ != MPI_PROC_NULL && right_neighborZ != myrank) {
+                MPI_Irecv(recv_hi.data(), slab, MPI_DOUBLE, right_neighborZ, tag_sor_ZL, comm, &rq[nrq++]);
+                MPI_Isend(send_hi.data(), slab, MPI_DOUBLE, right_neighborZ, tag_sor_ZR, comm, &rq[nrq++]);
+            }
+            if (nrq) MPI_Waitall(nrq, rq, MPI_STATUSES_IGNORE);
+            if (left_neighborZ != MPI_PROC_NULL && left_neighborZ != myrank) {
+                for (int h = 0; h < nlayers; ++h) {
+                    const int dst = (h < n_ghost_) ? (h + nz - 2 * n_ghost_ - offset)
+                                                    : (nz - 1 - n_ghost_);
+                    for (int ix = 0; ix < nx; ++ix)
+                        for (int iy = 0; iy < ny; ++iy)
+                            vector[ix][iy][dst] += recv_lo[(h * nx + ix) * ny + iy];
+                }
+            }
+            if (right_neighborZ != MPI_PROC_NULL && right_neighborZ != myrank) {
+                for (int h = 0; h < nlayers; ++h) {
+                    const int dst = (h < n_ghost_) ? ((2 * n_ghost_ - 1 + offset) - h)
+                                                    : n_ghost_;
+                    for (int ix = 0; ix < nx; ++ix)
+                        for (int iy = 0; iy < ny; ++iy)
+                            vector[ix][iy][dst] += recv_hi[(h * nx + ix) * ny + iy];
+                }
+            }
+        }
+    }
+
+    //! ============================================================
     //  FACE PHASE
     //  Each of the 6 face directions exchanges n_ghost slab layers.
     //! ============================================================
@@ -1296,6 +1473,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //* Pass `skip_self_periodic` to addFace*/addCorner so they skip
         //* periodic-self axes per-axis. Cross-rank axes still flow through.
         const bool skip_self = EMf->get_col().getSkipPeriodicSelfAddFace();
+        //* When CrossRankMomentSOR pre-pass ran, it ALREADY summed ghost
+        //* partials AND LO/HI dup natives into the proper strict-interior
+        //* destinations for cross-rank axes — so the trailing addFace block
+        //* (whose `vector[ng+g] += vector[g]` formula targets the wrong
+        //* phys-node at TSC cross-rank) must also be skipped on those axes.
+        //* Skip the entire trailing block when both fixes are on at ng > 1.
+        const bool skip_all_for_xrank_sor = needInterp && n_ghost_ > 1
+            && EMf->get_col().getCrossRankMomentSOR();
 
         //* Kahan-aware sum-on-receive, n_ghost > 1 variant.
         if (vector_c != nullptr) {
@@ -1304,7 +1489,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             addEdgeY_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeX_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addCorner_kahan(nx, ny, nz, vector, vector_c, vct, n_ghost_);
-        } else {
+        } else if (!skip_all_for_xrank_sor) {
             addFace  (nx, ny, nz, vector, vct, n_ghost_, skip_self);
             addEdgeZ (nx, ny, nz, vector, vct, n_ghost_, skip_self);
             addEdgeY (nx, ny, nz, vector, vct, n_ghost_, skip_self);

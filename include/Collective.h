@@ -231,6 +231,7 @@ class Collective
     bool   getSkipPeriodicSelfAddFace()  const { return SkipPeriodicSelfAddFace; }
     bool   getFixNodeInterpOffset()      const { return FixNodeInterpOffset; }
     bool   getCompletePeriodicSelfFold() const { return CompletePeriodicSelfFold; }
+    bool   getCrossRankMomentSOR()       const { return CrossRankMomentSOR; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -386,6 +387,19 @@ class Collective
     //* periodic-image native. Default off; no-op at Linear (n_ghost=1
     //* ghosts carry no deposit) and at any non-periodic-self decomposition.
     bool   CompletePeriodicSelfFold;
+
+    //* TSC cross-rank moment SOR. The standard MPI face exchange in
+    //* NBDerivedHaloCommN sends sender's near-LO interior to receiver's LO
+    //* ghost (COPY semantic for stencil reads). At n_ghost=2 (TSC) this
+    //* OVERWRITES the receiver's locally-deposited partials in its ghost
+    //* layers — particles whose stencil reached past the rank boundary
+    //* never get their partial deposit folded into the neighbour's strict
+    //* interior. With this flag on AND n_ghost > 1 AND needInterp=true,
+    //* a pre-pass MPI exchange sends each rank's ghost cells (= partial
+    //* deposits at neighbour's domain) to the neighbour, which SORs them
+    //* into its strict interior using the same dst-formulas as the
+    //* periodic-self fold. Default off; no-op at n_ghost=1.
+    bool   CrossRankMomentSOR;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy
