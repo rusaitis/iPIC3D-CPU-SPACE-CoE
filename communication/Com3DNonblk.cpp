@@ -671,177 +671,157 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     auto g_src = [&](int g) { return fix_self_ghost ? (n_ghost_ - 1 - g) : g; };
 
     //! ============================================================
-    //* CROSS-RANK MOMENT SOR PRE-PASS
+    //* CROSS-RANK MOMENT SOR PRE-PASS (faces + edges + corners)
     //
     //  At n_ghost > 1 (TSC) for the moments path, particles whose stencil
     //  reaches past the rank boundary deposit partials into the local
     //  GHOST cells. Those partials must fold into the *neighbour's*
     //  strict-interior native at the matching periodic-image phys node.
     //
-    //  The standard MPI face exchange below sends interior values for the
-    //  COPY semantic (filling ghosts for stencil reads); IRecv would
-    //  overwrite the local ghost partials before they could be sent. So
-    //  this pre-pass runs FIRST, packing each rank's ghost cells, MPI-
-    //  exchanging them, and SORing the received slabs into the receiver's
-    //  strict-interior using the same `g + nx - 2*ng - offset` /
-    //  `(2*ng - 1 + offset) - g` formulas as the periodic-self fold.
+    //  Without explicit edge/corner exchanges, ghost cells in the corners
+    //  of two or three axes (e.g. (X-LO ghost ∩ Y-LO ghost)) only reach
+    //  one face neighbour and never the diagonal neighbour they physically
+    //  belong to. The unified loop below partitions each rank's ghost
+    //  region into 26 disjoint slabs indexed by (sx,sy,sz) ∈ {-1,0,+1}³,
+    //  one per Cartesian neighbour; each is sent exactly once to its
+    //  destination, where the matching SOR formula folds it into the
+    //  receiver's strict-interior + LO/HI duplicate.
+    //
+    //  - sx = ±1: source range covers ng ghost layers + 1 dup (h ∈ [0..ng]).
+    //  - sx =  0: source range covers strict interior excluding dups
+    //             (i ∈ [ng+1..nx-2-ng]); destination = same coordinate on
+    //             the receiver (no shift along non-involved axis).
+    //
+    //  The standard MPI face exchange below uses COPY semantics and would
+    //  overwrite our ghost cells before they could be sent, so this
+    //  pre-pass runs first.
     //
     //  Default off (`CrossRankMomentSOR=false`); strict no-op at n_ghost=1
-    //  and at periodic-self axes (covered by the periodic-self fold below).
+    //  and at periodic-self axes (Cartesian neighbour wraps to self).
     //! ============================================================
     if (needInterp && EMf->get_col().getCrossRankMomentSOR() && n_ghost_ > 1) {
-        //* Pack ng+1 layers per side: ng ghost layers + the LO/HI duplicate
-        //* (at i=ng / i=nx-1-ng). Sender's LO {dup, inner ghost, outer ghost}
-        //* (h=0..ng) cover the receiver's HI strict interior at receiver's
-        //* phys (nxc_R - h) for h in [0, ng]. Sending the dup folds the
-        //* cross-rank LO/HI duplicate-native unification into the same
-        //* exchange — the legacy addFace at line 1199+ (which would have
-        //* done dup unify with WRONG offsets at TSC cross-rank) is
-        //* correspondingly skipped below.
-        const int nlayers = n_ghost_ + 1;
-        const int x_cross = (left_neighborX != myrank && left_neighborX != MPI_PROC_NULL)
-                              || (right_neighborX != myrank && right_neighborX != MPI_PROC_NULL);
-        const int y_cross = (left_neighborY != myrank && left_neighborY != MPI_PROC_NULL)
-                              || (right_neighborY != myrank && right_neighborY != MPI_PROC_NULL);
-        const int z_cross = (left_neighborZ != myrank && left_neighborZ != MPI_PROC_NULL)
-                              || (right_neighborZ != myrank && right_neighborZ != MPI_PROC_NULL);
+        //* Resolve Cartesian topology + neighbour-at(s) helper. periods[]
+        //* and dims[] make the wrap explicit so periodic-self axes reduce
+        //* to "neighbour == myrank" and get filtered out cleanly.
+        int my_coords[3], dims[3], periods[3];
+        MPI_Cart_get(comm, 3, dims, periods, my_coords);
 
-        //* Tag space distinct from the standard exchange (1..6) so messages
-        //* don't alias even though they share the same comm.
-        const int tag_sor_XL = 101, tag_sor_XR = 104;
-        const int tag_sor_YL = 102, tag_sor_YR = 105;
-        const int tag_sor_ZL = 103, tag_sor_ZR = 106;
-
-        //* X-axis cross-rank face SOR.
-        if (x_cross) {
-            const int slab = nlayers * ny * nz;
-            std::vector<double> send_lo(slab, 0.0), send_hi(slab, 0.0);
-            std::vector<double> recv_lo(slab, 0.0), recv_hi(slab, 0.0);
-            for (int h = 0; h < nlayers; ++h)
-                for (int iy = 0; iy < ny; ++iy)
-                    for (int iz = 0; iz < nz; ++iz) {
-                        //* h=0..ng-1: ghost layers; h=ng: LO/HI duplicate.
-                        const int src_lo = (h < n_ghost_) ? h : n_ghost_;
-                        const int src_hi = (h < n_ghost_) ? (nx - 1 - h) : (nx - 1 - n_ghost_);
-                        send_lo[(h * ny + iy) * nz + iz] = vector[src_lo][iy][iz];
-                        send_hi[(h * ny + iy) * nz + iz] = vector[src_hi][iy][iz];
-                    }
-            MPI_Request rq[4]; int nrq = 0;
-            if (left_neighborX  != MPI_PROC_NULL && left_neighborX  != myrank) {
-                MPI_Irecv(recv_lo.data(), slab, MPI_DOUBLE, left_neighborX,  tag_sor_XR, comm, &rq[nrq++]);
-                MPI_Isend(send_lo.data(), slab, MPI_DOUBLE, left_neighborX,  tag_sor_XL, comm, &rq[nrq++]);
-            }
-            if (right_neighborX != MPI_PROC_NULL && right_neighborX != myrank) {
-                MPI_Irecv(recv_hi.data(), slab, MPI_DOUBLE, right_neighborX, tag_sor_XL, comm, &rq[nrq++]);
-                MPI_Isend(send_hi.data(), slab, MPI_DOUBLE, right_neighborX, tag_sor_XR, comm, &rq[nrq++]);
-            }
-            if (nrq) MPI_Waitall(nrq, rq, MPI_STATUSES_IGNORE);
-            //* SOR received LO slab (sender = LEFT neighbour) into our HI side.
-            //* h=0..ng-1: outer..inner ghost folds to our HI strict interior;
-            //* h=ng: sender's LO dup folds to our HI dup.
-            if (left_neighborX != MPI_PROC_NULL && left_neighborX != myrank) {
-                for (int h = 0; h < nlayers; ++h) {
-                    const int dst = (h < n_ghost_) ? (h + nx - 2 * n_ghost_ - offset)
-                                                    : (nx - 1 - n_ghost_);
-                    for (int iy = 0; iy < ny; ++iy)
-                        for (int iz = 0; iz < nz; ++iz)
-                            vector[dst][iy][iz] += recv_lo[(h * ny + iy) * nz + iz];
+        auto neighbour_at = [&](int sx, int sy, int sz) -> int {
+            int nbr[3] = {my_coords[0] + sx, my_coords[1] + sy, my_coords[2] + sz};
+            for (int d = 0; d < 3; ++d) {
+                if (nbr[d] < 0 || nbr[d] >= dims[d]) {
+                    if (!periods[d]) return MPI_PROC_NULL;
+                    nbr[d] = (nbr[d] % dims[d] + dims[d]) % dims[d];
                 }
             }
-            //* SOR received HI slab (sender = RIGHT neighbour) into our LO side.
-            if (right_neighborX != MPI_PROC_NULL && right_neighborX != myrank) {
-                for (int h = 0; h < nlayers; ++h) {
-                    const int dst = (h < n_ghost_) ? ((2 * n_ghost_ - 1 + offset) - h)
-                                                    : n_ghost_;
-                    for (int iy = 0; iy < ny; ++iy)
-                        for (int iz = 0; iz < nz; ++iz)
-                            vector[dst][iy][iz] += recv_hi[(h * ny + iy) * nz + iz];
+            int r;
+            MPI_Cart_rank(comm, nbr, &r);
+            return r;
+        };
+
+        //* Per-axis (n, s) → source index, and (n, s) → destination index.
+        //* h is the layer counter:
+        //*   sd = -1: h ∈ [0..ng]  (h=0..ng-1 ghost outer→inner; h=ng LO dup at i=ng)
+        //*   sd = +1: h ∈ [0..ng]  (h=0..ng-1 ghost outer→inner; h=ng HI dup)
+        //*   sd =  0: h ∈ [0..len-1] over strict interior [ng+1..n-2-ng]
+        auto src_idx = [&](int sd, int n, int h) -> int {
+            if (sd == -1) return h;
+            if (sd == +1) return n - 1 - h;
+            return n_ghost_ + 1 + h;
+        };
+        auto dst_idx = [&](int sd, int n, int h) -> int {
+            if (sd == -1) {
+                return (h < n_ghost_) ? (h + n - 2 * n_ghost_ - offset) : (n - 1 - n_ghost_);
+            }
+            if (sd == +1) {
+                return (h < n_ghost_) ? ((2 * n_ghost_ - 1 + offset) - h) : n_ghost_;
+            }
+            return n_ghost_ + 1 + h;
+        };
+
+        const int strict_x = nx - 2 * n_ghost_ - 2;
+        const int strict_y = ny - 2 * n_ghost_ - 2;
+        const int strict_z = nz - 2 * n_ghost_ - 2;
+        const int dup_n    = n_ghost_ + 1;
+
+        //* Tags: encode (sx,sy,sz) as a base-3 number in [0..26]; offset 200
+        //* keeps it disjoint from the standard exchange tags 1..6 below.
+        auto encode_tag = [](int sx, int sy, int sz) {
+            return 200 + (sx + 1) * 9 + (sy + 1) * 3 + (sz + 1);
+        };
+
+        //* Reuse buffers: we exchange one direction at a time. Worst-case
+        //* slab is dup_n^3 (corner) up to (strict_x+strict_y+strict_z) faces.
+        //* Posting all 26 in flight at once is ~3-4 MB for typical TSC grids
+        //* and avoids 26 sequential round trips; pre-allocate vectors and
+        //* batch with one Waitall.
+        struct ExchSlot {
+            int sx, sy, sz;
+            int nbr;
+            int lx, ly, lz;
+            std::vector<double> send;
+            std::vector<double> recv;
+        };
+        std::vector<ExchSlot> slots;
+        slots.reserve(26);
+
+        for (int sx = -1; sx <= 1; ++sx)
+        for (int sy = -1; sy <= 1; ++sy)
+        for (int sz = -1; sz <= 1; ++sz) {
+            if (sx == 0 && sy == 0 && sz == 0) continue;
+            const int nbr = neighbour_at(sx, sy, sz);
+            if (nbr == MPI_PROC_NULL || nbr == myrank) continue;
+
+            const int lx = (sx != 0) ? dup_n : strict_x;
+            const int ly = (sy != 0) ? dup_n : strict_y;
+            const int lz = (sz != 0) ? dup_n : strict_z;
+            if (lx <= 0 || ly <= 0 || lz <= 0) continue;
+
+            slots.push_back({sx, sy, sz, nbr, lx, ly, lz, {}, {}});
+            ExchSlot &s = slots.back();
+            const int slab = lx * ly * lz;
+            s.send.resize(slab);
+            s.recv.resize(slab);
+            for (int hx = 0; hx < lx; ++hx) {
+                const int ix = src_idx(sx, nx, hx);
+                for (int hy = 0; hy < ly; ++hy) {
+                    const int iy = src_idx(sy, ny, hy);
+                    for (int hz = 0; hz < lz; ++hz) {
+                        const int iz = src_idx(sz, nz, hz);
+                        s.send[(hx * ly + hy) * lz + hz] = vector[ix][iy][iz];
+                    }
                 }
             }
         }
 
-        //* Y-axis cross-rank face SOR.
-        if (y_cross) {
-            const int slab = nlayers * nx * nz;
-            std::vector<double> send_lo(slab, 0.0), send_hi(slab, 0.0);
-            std::vector<double> recv_lo(slab, 0.0), recv_hi(slab, 0.0);
-            for (int h = 0; h < nlayers; ++h)
-                for (int ix = 0; ix < nx; ++ix)
-                    for (int iz = 0; iz < nz; ++iz) {
-                        const int src_lo = (h < n_ghost_) ? h : n_ghost_;
-                        const int src_hi = (h < n_ghost_) ? (ny - 1 - h) : (ny - 1 - n_ghost_);
-                        send_lo[(h * nx + ix) * nz + iz] = vector[ix][src_lo][iz];
-                        send_hi[(h * nx + ix) * nz + iz] = vector[ix][src_hi][iz];
-                    }
-            MPI_Request rq[4]; int nrq = 0;
-            if (left_neighborY  != MPI_PROC_NULL && left_neighborY  != myrank) {
-                MPI_Irecv(recv_lo.data(), slab, MPI_DOUBLE, left_neighborY,  tag_sor_YR, comm, &rq[nrq++]);
-                MPI_Isend(send_lo.data(), slab, MPI_DOUBLE, left_neighborY,  tag_sor_YL, comm, &rq[nrq++]);
-            }
-            if (right_neighborY != MPI_PROC_NULL && right_neighborY != myrank) {
-                MPI_Irecv(recv_hi.data(), slab, MPI_DOUBLE, right_neighborY, tag_sor_YL, comm, &rq[nrq++]);
-                MPI_Isend(send_hi.data(), slab, MPI_DOUBLE, right_neighborY, tag_sor_YR, comm, &rq[nrq++]);
-            }
-            if (nrq) MPI_Waitall(nrq, rq, MPI_STATUSES_IGNORE);
-            if (left_neighborY != MPI_PROC_NULL && left_neighborY != myrank) {
-                for (int h = 0; h < nlayers; ++h) {
-                    const int dst = (h < n_ghost_) ? (h + ny - 2 * n_ghost_ - offset)
-                                                    : (ny - 1 - n_ghost_);
-                    for (int ix = 0; ix < nx; ++ix)
-                        for (int iz = 0; iz < nz; ++iz)
-                            vector[ix][dst][iz] += recv_lo[(h * nx + ix) * nz + iz];
-                }
-            }
-            if (right_neighborY != MPI_PROC_NULL && right_neighborY != myrank) {
-                for (int h = 0; h < nlayers; ++h) {
-                    const int dst = (h < n_ghost_) ? ((2 * n_ghost_ - 1 + offset) - h)
-                                                    : n_ghost_;
-                    for (int ix = 0; ix < nx; ++ix)
-                        for (int iz = 0; iz < nz; ++iz)
-                            vector[ix][dst][iz] += recv_hi[(h * nx + ix) * nz + iz];
-                }
-            }
+        std::vector<MPI_Request> rqs;
+        rqs.reserve(2 * slots.size());
+        for (ExchSlot &s : slots) {
+            const int slab = s.lx * s.ly * s.lz;
+            const int tag_send = encode_tag( s.sx,  s.sy,  s.sz);
+            const int tag_recv = encode_tag(-s.sx, -s.sy, -s.sz);
+            rqs.emplace_back();
+            MPI_Irecv(s.recv.data(), slab, MPI_DOUBLE, s.nbr, tag_recv, comm, &rqs.back());
+            rqs.emplace_back();
+            MPI_Isend(s.send.data(), slab, MPI_DOUBLE, s.nbr, tag_send, comm, &rqs.back());
         }
+        if (!rqs.empty()) MPI_Waitall(rqs.size(), rqs.data(), MPI_STATUSES_IGNORE);
 
-        //* Z-axis cross-rank face SOR.
-        if (z_cross) {
-            const int slab = nlayers * nx * ny;
-            std::vector<double> send_lo(slab, 0.0), send_hi(slab, 0.0);
-            std::vector<double> recv_lo(slab, 0.0), recv_hi(slab, 0.0);
-            for (int h = 0; h < nlayers; ++h)
-                for (int ix = 0; ix < nx; ++ix)
-                    for (int iy = 0; iy < ny; ++iy) {
-                        const int src_lo = (h < n_ghost_) ? h : n_ghost_;
-                        const int src_hi = (h < n_ghost_) ? (nz - 1 - h) : (nz - 1 - n_ghost_);
-                        send_lo[(h * nx + ix) * ny + iy] = vector[ix][iy][src_lo];
-                        send_hi[(h * nx + ix) * ny + iy] = vector[ix][iy][src_hi];
+        //* SOR received slabs into the matching destination region.
+        //* Each (sx,sy,sz) slot's recv buffer holds the neighbour's
+        //* (-sx,-sy,-sz) ghost slab — physically the periodic-image of
+        //* OUR (-sx,-sy,-sz) destination strict + dup. dst_idx with
+        //* (-s.sx,-s.sy,-s.sz) returns: LO strict + LO dup for sd=-1,
+        //* HI strict + HI dup for sd=+1, strict perpendicular for sd=0.
+        for (const ExchSlot &s : slots) {
+            for (int hx = 0; hx < s.lx; ++hx) {
+                const int ix = dst_idx(-s.sx, nx, hx);
+                for (int hy = 0; hy < s.ly; ++hy) {
+                    const int iy = dst_idx(-s.sy, ny, hy);
+                    for (int hz = 0; hz < s.lz; ++hz) {
+                        const int iz = dst_idx(-s.sz, nz, hz);
+                        vector[ix][iy][iz] += s.recv[(hx * s.ly + hy) * s.lz + hz];
                     }
-            MPI_Request rq[4]; int nrq = 0;
-            if (left_neighborZ  != MPI_PROC_NULL && left_neighborZ  != myrank) {
-                MPI_Irecv(recv_lo.data(), slab, MPI_DOUBLE, left_neighborZ,  tag_sor_ZR, comm, &rq[nrq++]);
-                MPI_Isend(send_lo.data(), slab, MPI_DOUBLE, left_neighborZ,  tag_sor_ZL, comm, &rq[nrq++]);
-            }
-            if (right_neighborZ != MPI_PROC_NULL && right_neighborZ != myrank) {
-                MPI_Irecv(recv_hi.data(), slab, MPI_DOUBLE, right_neighborZ, tag_sor_ZL, comm, &rq[nrq++]);
-                MPI_Isend(send_hi.data(), slab, MPI_DOUBLE, right_neighborZ, tag_sor_ZR, comm, &rq[nrq++]);
-            }
-            if (nrq) MPI_Waitall(nrq, rq, MPI_STATUSES_IGNORE);
-            if (left_neighborZ != MPI_PROC_NULL && left_neighborZ != myrank) {
-                for (int h = 0; h < nlayers; ++h) {
-                    const int dst = (h < n_ghost_) ? (h + nz - 2 * n_ghost_ - offset)
-                                                    : (nz - 1 - n_ghost_);
-                    for (int ix = 0; ix < nx; ++ix)
-                        for (int iy = 0; iy < ny; ++iy)
-                            vector[ix][iy][dst] += recv_lo[(h * nx + ix) * ny + iy];
-                }
-            }
-            if (right_neighborZ != MPI_PROC_NULL && right_neighborZ != myrank) {
-                for (int h = 0; h < nlayers; ++h) {
-                    const int dst = (h < n_ghost_) ? ((2 * n_ghost_ - 1 + offset) - h)
-                                                    : n_ghost_;
-                    for (int ix = 0; ix < nx; ++ix)
-                        for (int iy = 0; iy < ny; ++iy)
-                            vector[ix][iy][dst] += recv_hi[(h * nx + ix) * ny + iy];
                 }
             }
         }
