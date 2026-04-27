@@ -2455,6 +2455,63 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     communicateNode_P(nxn, nyn, nzn, moment_Jyhs, vct, this);
     communicateNode_P(nxn, nyn, nzn, moment_Jzhs, vct, this);
     communicateNode_P(nxn, nyn, nzn, moment_rhons, vct, this);
+
+    //* Average-unify Jh and rho periodic-duplicate LO/HI nodes — TSC's 27-node
+    //* gather deposits to ghost cells which then get overwritten by the copy
+    //* halo above, asymmetrically losing contributions to LO vs HI. At Linear
+    //* the CIC deposit doesn't reach ghosts so LO == HI bit-exact and the
+    //* average is a no-op. Followed by a fresh copy halo so ghosts pick up
+    //* the unified LO=HI values.
+    if (_col.getUnifyJhPeriodicDup())
+    {
+        const bool ps_x = _col.getPERIODICX() && vct->getXLEN() == 1;
+        const bool ps_y = _col.getPERIODICY() && vct->getYLEN() == 1;
+        const bool ps_z = _col.getPERIODICZ() && vct->getZLEN() == 1;
+
+        double ***slabs[7] = { Jxh.fetch_arr3(), Jyh.fetch_arr3(), Jzh.fetch_arr3(),
+                                moment_Jxhs, moment_Jyhs, moment_Jzhs, moment_rhons };
+
+        for (int s = 0; s < 7; ++s)
+        {
+            double ***v = slabs[s];
+            if (ps_x) {
+                const int ilo = n_ghost_;
+                const int ihi = nxn - n_ghost_ - 1;
+                if (ihi > ilo)
+                    for (int j = 0; j < nyn; ++j)
+                        for (int k = 0; k < nzn; ++k) {
+                            const double avg = 0.5 * (v[ilo][j][k] + v[ihi][j][k]);
+                            v[ilo][j][k] = avg;
+                            v[ihi][j][k] = avg;
+                        }
+            }
+            if (ps_y) {
+                const int jlo = n_ghost_;
+                const int jhi = nyn - n_ghost_ - 1;
+                if (jhi > jlo)
+                    for (int i = 0; i < nxn; ++i)
+                        for (int k = 0; k < nzn; ++k) {
+                            const double avg = 0.5 * (v[i][jlo][k] + v[i][jhi][k]);
+                            v[i][jlo][k] = avg;
+                            v[i][jhi][k] = avg;
+                        }
+            }
+            if (ps_z) {
+                const int klo = n_ghost_;
+                const int khi = nzn - n_ghost_ - 1;
+                if (khi > klo)
+                    for (int i = 0; i < nxn; ++i)
+                        for (int j = 0; j < nyn; ++j) {
+                            const double avg = 0.5 * (v[i][j][klo] + v[i][j][khi]);
+                            v[i][j][klo] = avg;
+                            v[i][j][khi] = avg;
+                        }
+            }
+            //* Re-run the copy halo so ghost cells pick up the new unified
+            //* LO=HI values (otherwise downstream stencils read stale ghosts).
+            communicateNode_P(nxn, nyn, nzn, v, vct, this);
+        }
+    }
 }
 
 void EMfields3D::communicateGhostP2G_mass_matrix()

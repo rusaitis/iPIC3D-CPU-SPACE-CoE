@@ -709,6 +709,51 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     assert_eq(recvcnt, sendcnt - recvcnt);
     assert_le(sendcnt, MAX_REQS);
 
+    //* Sum-on-receive at periodic-self for needInterp=true (moments path).
+    //  At TSC width the gather deposits to ghost cells; periodic-image sums
+    //  recover those contributions before the overwrite below clobbers them.
+    //  At Linear width the CIC stencil never reaches ghosts so this loop adds
+    //  zero — strict no-op. The destination is the periodic-image interior:
+    //    LO ghost vector[g]      → vector[g + nx - 2*n_ghost - offset]
+    //    HI ghost vector[nx-1-g] → vector[(2*n_ghost - 1 + offset) - g]
+    //  Verified for nodes (offset=1) and cells (offset=0). For n_ghost=1 this
+    //  loop also adds zero on Linear because Linear never deposits to ghosts.
+    if (needInterp) {
+        if (right_neighborX == myrank && left_neighborX == myrank) {
+            for (int g = 0; g < n_ghost_; g++) {
+                const int dst_lo = g + nx - 2 * n_ghost_ - offset;
+                const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
+                for (int iy = 1; iy < ny - 1; iy++)
+                    for (int iz = 1; iz < nz - 1; iz++) {
+                        vector[dst_lo][iy][iz] += vector[g][iy][iz];
+                        vector[dst_hi][iy][iz] += vector[nx - 1 - g][iy][iz];
+                    }
+            }
+        }
+        if (right_neighborY == myrank && left_neighborY == myrank) {
+            for (int g = 0; g < n_ghost_; g++) {
+                const int dst_lo = g + ny - 2 * n_ghost_ - offset;
+                const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
+                for (int ix = 1; ix < nx - 1; ix++)
+                    for (int iz = 1; iz < nz - 1; iz++) {
+                        vector[ix][dst_lo][iz] += vector[ix][g][iz];
+                        vector[ix][dst_hi][iz] += vector[ix][ny - 1 - g][iz];
+                    }
+            }
+        }
+        if (right_neighborZ == myrank && left_neighborZ == myrank) {
+            for (int g = 0; g < n_ghost_; g++) {
+                const int dst_lo = g + nz - 2 * n_ghost_ - offset;
+                const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
+                for (int ix = 1; ix < nx - 1; ix++)
+                    for (int iy = 1; iy < ny - 1; iy++) {
+                        vector[ix][iy][dst_lo] += vector[ix][iy][g];
+                        vector[ix][iy][dst_hi] += vector[ix][iy][nz - 1 - g];
+                    }
+            }
+        }
+    }
+
     //* Periodic single-rank self-copies (X/Y/Z). Source indices use the same
     //  (n_ghost + offset + g) depth convention as the MPI face sends, with
     //  modular wrapping for thin dimensions where the source would otherwise

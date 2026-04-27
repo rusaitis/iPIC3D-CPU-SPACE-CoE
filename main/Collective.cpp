@@ -156,6 +156,9 @@ void Collective::ReadInput(string inputfile)
         DisableMassMatrixInImage    = config.read<bool>("DisableMassMatrixInImage", false);
         DisableCurl2InImage         = config.read<bool>("DisableCurl2InImage", false);
 
+        //* Average-unify Jxh/Jyh/Jzh + per-species LO/HI duplicates (TSC fix).
+        UnifyJhPeriodicDup          = config.read<bool>("UnifyJhPeriodicDup", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

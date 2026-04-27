@@ -223,6 +223,7 @@ class Collective
     bool   getUnifyMassMatrixPeriodicDup() const { return UnifyMassMatrixPeriodicDup; }
     bool   getDisableMassMatrixInImage() const { return DisableMassMatrixInImage; }
     bool   getDisableCurl2InImage()      const { return DisableCurl2InImage; }
+    bool   getUnifyJhPeriodicDup()       const { return UnifyJhPeriodicDup; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -326,6 +327,14 @@ class Collective
     //* Diagnostic-only: zero the curl² contribution to MaxwellImage so A
     //* becomes (I + S·M·S·factor) only. Default false.
     bool   DisableCurl2InImage;
+
+    //* Average-unify Jxh/Jyh/Jzh (and per-species Jxhs/Jyhs/Jzhs and rhons)
+    //* periodic-duplicate LO and HI nodes after the gather + halo refresh,
+    //* analogous to UnifyMassMatrixPeriodicDup. Linear's CIC deposit doesn't
+    //* reach ghost cells so LO == HI bit-exact; TSC's 27-node deposit reaches
+    //* ghosts that get overwritten by the copy halo, asymmetrically losing
+    //* contributions. Default false.
+    bool   UnifyJhPeriodicDup;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy
