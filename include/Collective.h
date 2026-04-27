@@ -232,6 +232,7 @@ class Collective
     bool   getFixNodeInterpOffset()      const { return FixNodeInterpOffset; }
     bool   getCompletePeriodicSelfFold() const { return CompletePeriodicSelfFold; }
     bool   getCrossRankMomentSOR()       const { return CrossRankMomentSOR; }
+    bool   getUnifyCrossRankDuplicates() const { return UnifyCrossRankDuplicates; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -400,6 +401,15 @@ class Collective
     //* into its strict interior using the same dst-formulas as the
     //* periodic-self fold. Default off; no-op at n_ghost=1.
     bool   CrossRankMomentSOR;
+
+    //* Cross-rank duplicate unification at MaxwellImage / unify_periodic_duplicates.
+    //* On a periodic axis with multiple ranks (XLEN>1, etc.), the LO duplicate
+    //* on rank A and the HI duplicate on rank A's LEFT neighbour represent the
+    //* SAME physical node but live in independent memory and aren't unified by
+    //* `unify_periodic_duplicates` (which only handles XLEN==1). This flag
+    //* triggers an MPI_Sendrecv between matching dup pairs and averages them,
+    //* mirroring the local-averaging done at periodic-self. Default off.
+    bool   UnifyCrossRankDuplicates;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

@@ -200,6 +200,9 @@ void Collective::ReadInput(string inputfile)
         //* TSC cross-rank moment SOR (see Collective.h for details).
         CrossRankMomentSOR          = config.read<bool>("CrossRankMomentSOR", false);
 
+        //* Cross-rank dup unification (see Collective.h).
+        UnifyCrossRankDuplicates    = config.read<bool>("UnifyCrossRankDuplicates", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

@@ -3111,6 +3111,16 @@ void EMfields3D::calculateE()
     communicateNodeBC(nxn, nyn, nzn, Eyth, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
     communicateNodeBC(nxn, nyn, nzn, Ezth, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
 
+    //* Cross-rank dup unification on the post-GMRES Eth field. Without this,
+    //* the cross-rank dup pair (A's HI dup ↔ B's LO dup, same physical node
+    //* but on different ranks) drifts apart by ULPs over a cycle, feeding
+    //* the moment gather and curl² of the next matvec with inconsistent
+    //* boundary values. Runs only when UnifyCrossRankDuplicates is on; at
+    //* periodic-self the local LO==HI is already enforced via solver2phys.
+    if (col->getUnifyCrossRankDuplicates()) {
+        unify_periodic_duplicates(Exth, Eyth, Ezth, nxn, nyn, nzn);
+    }
+
     #ifdef __PROFILE_FIELDS__
     time_com.stop();
     #endif
@@ -3584,7 +3594,7 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
 }
 
 //? Update the values of magnetic field at the nodes at time n+1
-void EMfields3D::C2NB() 
+void EMfields3D::C2NB()
 {
     const Collective *col = &get_col();
     const VirtualTopology3D *vct = &get_vct();
@@ -3593,10 +3603,18 @@ void EMfields3D::C2NB()
     grid->interpC2N(Bxn, Bxc);
     grid->interpC2N(Byn, Byc);
     grid->interpC2N(Bzn, Bzc);
-    
+
     communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
     communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
     communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
+
+    //* Cross-rank dup unification on Bxn/Byn/Bzn. interpC2N + standard COPY
+    //* halo can leave A's HI dup and B's LO dup ULP-different; fold the
+    //* drift into the average so the mover's `fieldForPcls` reads
+    //* consistent B at the rank-boundary node on both sides.
+    if (col->getUnifyCrossRankDuplicates()) {
+        unify_periodic_duplicates(Bxn, Byn, Bzn, nxn, nyn, nzn);
+    }
 }
 
 //? Populate the field data used to push particles
@@ -3922,8 +3940,13 @@ void EMfields3D::post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field,
 }
 
 //* Average the two periodic-image copies of each interior duplicate node.
-//* On periodic axis d, indices `n_ghost_` and `nx_d - n_ghost_ - 1` carry the
-//* same physical position but live as independent solver DOFs.
+//* On a periodic axis d, the LO duplicate at index `n_ghost_` and the HI
+//* duplicate at `nx_d - n_ghost_ - 1` carry the same physical position. At
+//* periodic-self (XLEN==1) both live on the same rank and are averaged
+//* locally. With UnifyCrossRankDuplicates and XLEN>1, the dup pair lives on
+//* TWO ranks (our LO dup ↔ X-LO neighbour's HI dup; our HI dup ↔ X-RIGHT
+//* neighbour's LO dup); we MPI_Sendrecv with the matching neighbour and
+//* average locally so both endpoints land at the same value.
 void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz)
 {
     const VirtualTopology3D *vct = &get_vct();
@@ -3932,6 +3955,12 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
     const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
     const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
     const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
+
+    //* Cross-rank dup pairs (XLEN>1 etc.) when the flag is on.
+    const bool xrank_unify = col->getUnifyCrossRankDuplicates();
+    const bool periodicX_xrank = xrank_unify && col->getPERIODICX() && vct->getXLEN() > 1;
+    const bool periodicY_xrank = xrank_unify && col->getPERIODICY() && vct->getYLEN() > 1;
+    const bool periodicZ_xrank = xrank_unify && col->getPERIODICZ() && vct->getZLEN() > 1;
 
     arr3_double *flds[3] = { &Exf, &Eyf, &Ezf };
 
@@ -3981,6 +4010,91 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
                     }
             }
         }
+    }
+
+    //* Cross-rank dup pair averaging via MPI_Sendrecv. For each periodic axis
+    //* with multiple ranks: pack our LO dup slab + HI dup slab, exchange with
+    //* the X-LO/HI neighbours, average against the received slab (which holds
+    //* the matching periodic-image dup on the neighbour). After this, both
+    //* endpoints of every cross-rank dup pair carry the same value.
+    if (periodicX_xrank || periodicY_xrank || periodicZ_xrank) {
+        const MPI_Comm comm = vct->getFieldComm();
+        const int myrank   = vct->getCartesian_rank();
+
+        auto unify_axis = [&](int axis, int n_axis, int left_nbr, int right_nbr)
+        {
+            const int ilo = n_ghost_;
+            const int ihi = n_axis - n_ghost_ - 1;
+            //* Slab dimensions perpendicular to `axis`.
+            const int d1 = (axis == 0) ? nyn : (axis == 1) ? nxn : nxn;
+            const int d2 = (axis == 0) ? nzn : (axis == 1) ? nzn : nyn;
+            const int slab = 3 * d1 * d2;
+
+            std::vector<double> send_lo(slab), recv_lo(slab);
+            std::vector<double> send_hi(slab), recv_hi(slab);
+
+            auto pack = [&](std::vector<double> &buf, int idx) {
+                for (int f = 0; f < 3; ++f) {
+                    arr3_double &F = *flds[f];
+                    if (axis == 0) {
+                        for (int j = 0; j < d1; ++j)
+                            for (int k = 0; k < d2; ++k)
+                                buf[(f*d1 + j)*d2 + k] = F[idx][j][k];
+                    } else if (axis == 1) {
+                        for (int i = 0; i < d1; ++i)
+                            for (int k = 0; k < d2; ++k)
+                                buf[(f*d1 + i)*d2 + k] = F[i][idx][k];
+                    } else {
+                        for (int i = 0; i < d1; ++i)
+                            for (int j = 0; j < d2; ++j)
+                                buf[(f*d1 + i)*d2 + j] = F[i][j][idx];
+                    }
+                }
+            };
+            auto avg_at = [&](int idx, const std::vector<double> &recv) {
+                for (int f = 0; f < 3; ++f) {
+                    arr3_double &F = *flds[f];
+                    if (axis == 0) {
+                        for (int j = 0; j < d1; ++j)
+                            for (int k = 0; k < d2; ++k)
+                                F[idx][j][k] = 0.5 * (F[idx][j][k] + recv[(f*d1 + j)*d2 + k]);
+                    } else if (axis == 1) {
+                        for (int i = 0; i < d1; ++i)
+                            for (int k = 0; k < d2; ++k)
+                                F[i][idx][k] = 0.5 * (F[i][idx][k] + recv[(f*d1 + i)*d2 + k]);
+                    } else {
+                        for (int i = 0; i < d1; ++i)
+                            for (int j = 0; j < d2; ++j)
+                                F[i][j][idx] = 0.5 * (F[i][j][idx] + recv[(f*d1 + i)*d2 + j]);
+                    }
+                }
+            };
+
+            pack(send_lo, ilo);
+            pack(send_hi, ihi);
+
+            //* Tags 901..906 — disjoint from moment-SOR (200..226) and standard (1..6).
+            const int tag_lo = 900 + 2*axis + 1;  // OUR LO dup is the X-LO neighbour's HI dup → tag pair
+            const int tag_hi = 900 + 2*axis + 2;
+
+            MPI_Request rq[4]; int n_rq = 0;
+            if (left_nbr  != MPI_PROC_NULL && left_nbr  != myrank) {
+                MPI_Irecv(recv_lo.data(), slab, MPI_DOUBLE, left_nbr,  tag_hi, comm, &rq[n_rq++]);
+                MPI_Isend(send_lo.data(), slab, MPI_DOUBLE, left_nbr,  tag_lo, comm, &rq[n_rq++]);
+            }
+            if (right_nbr != MPI_PROC_NULL && right_nbr != myrank) {
+                MPI_Irecv(recv_hi.data(), slab, MPI_DOUBLE, right_nbr, tag_lo, comm, &rq[n_rq++]);
+                MPI_Isend(send_hi.data(), slab, MPI_DOUBLE, right_nbr, tag_hi, comm, &rq[n_rq++]);
+            }
+            if (n_rq) MPI_Waitall(n_rq, rq, MPI_STATUSES_IGNORE);
+
+            if (left_nbr  != MPI_PROC_NULL && left_nbr  != myrank) avg_at(ilo, recv_lo);
+            if (right_nbr != MPI_PROC_NULL && right_nbr != myrank) avg_at(ihi, recv_hi);
+        };
+
+        if (periodicX_xrank) unify_axis(0, nxn, vct->getXleft_neighbor(), vct->getXright_neighbor());
+        if (periodicY_xrank) unify_axis(1, nyn, vct->getYleft_neighbor(), vct->getYright_neighbor());
+        if (periodicZ_xrank) unify_axis(2, nzn, vct->getZleft_neighbor(), vct->getZright_neighbor());
     }
 
     communicateNodeBC(nxn, nyn, nzn, Exf, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
