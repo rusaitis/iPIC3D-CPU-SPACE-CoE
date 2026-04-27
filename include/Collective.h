@@ -230,6 +230,7 @@ class Collective
     bool   getDumpMassMatrixStages()     const { return DumpMassMatrixStages; }
     bool   getSkipPeriodicSelfAddFace()  const { return SkipPeriodicSelfAddFace; }
     bool   getFixNodeInterpOffset()      const { return FixNodeInterpOffset; }
+    bool   getCompletePeriodicSelfFold() const { return CompletePeriodicSelfFold; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -375,6 +376,16 @@ class Collective
     //* halos pick offset=1 and the periodic-self fold/copy land in the
     //* correct destination cells. Default off.
     bool   FixNodeInterpOffset;
+
+    //* TSC moment-halo edge + corner fold. The current periodic-self fold
+    //* (face-only, single-axis) cascades through subsequent y/z passes which
+    //* misplaces deposits in edge/corner ghost blocks. With this flag on AND
+    //* all three axes periodic-self, restrict the face fold to strict
+    //* perpendicular ranges and add explicit edge (12 cases) and corner
+    //* (8 cases) folds. Each ghost cell folds exactly once to its multi-axis
+    //* periodic-image native. Default off; no-op at Linear (n_ghost=1
+    //* ghosts carry no deposit) and at any non-periodic-self decomposition.
+    bool   CompletePeriodicSelfFold;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

@@ -194,6 +194,9 @@ void Collective::ReadInput(string inputfile)
         //* TSC moment-halo offset fix (see Collective.h for details).
         FixNodeInterpOffset         = config.read<bool>("FixNodeInterpOffset", false);
 
+        //* TSC moment-halo edge + corner fold (see Collective.h for details).
+        CompletePeriodicSelfFold    = config.read<bool>("CompletePeriodicSelfFold", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 
