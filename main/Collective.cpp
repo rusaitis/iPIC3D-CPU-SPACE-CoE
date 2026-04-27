@@ -165,6 +165,16 @@ void Collective::ReadInput(string inputfile)
         //* identical no-op on Linear. Default on.
         UnifyJhPeriodicDup          = config.read<bool>("UnifyJhPeriodicDup", true);
 
+        //* Eigenmode probe: sweep plane-wave test fields through MaxwellImage at
+        //* cycle 1, dump CSV of (mode, k, real, imag) per axis, then exit. Used
+        //* to compare Linear vs TSC operator spectra. Default off.
+        EigenmodeProbe              = config.read<bool>("EigenmodeProbe", false);
+
+        //* Diagnostic: in mass_matrix_times_vector skip groups whose offsets
+        //* lie outside the 3-cube [-1, 1]^3 (i.e., the TSC-only di=±2 etc.
+        //* couplings). Default off.
+        RestrictMassMatrix3Cube     = config.read<bool>("RestrictMassMatrix3Cube", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

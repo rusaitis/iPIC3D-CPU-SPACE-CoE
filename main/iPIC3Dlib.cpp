@@ -594,6 +594,17 @@ void c_Solver::ComputeEMFields(int cycle)
     time_e.start();
     #endif
     
+    //* Eigenmode probe (one-shot at cycle 1 if flag set; exits after dump).
+    if (col->getEigenmodeProbe() && cycle == 1)
+    {
+        EMf->eigenmode_probe();
+        if (vct->getCartesian_rank() == 0)
+            std::cout << "*** EigenmodeProbe done — exiting before calculateE ***" << std::endl;
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Finalize();
+        exit(0);
+    }
+
     //? Compute E
     EMf->calculateE();
     

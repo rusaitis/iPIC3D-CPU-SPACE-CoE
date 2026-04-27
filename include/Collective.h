@@ -224,6 +224,8 @@ class Collective
     bool   getDisableMassMatrixInImage() const { return DisableMassMatrixInImage; }
     bool   getDisableCurl2InImage()      const { return DisableCurl2InImage; }
     bool   getUnifyJhPeriodicDup()       const { return UnifyJhPeriodicDup; }
+    bool   getEigenmodeProbe()           const { return EigenmodeProbe; }
+    bool   getRestrictMassMatrix3Cube()  const { return RestrictMassMatrix3Cube; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -335,6 +337,8 @@ class Collective
     //* ghosts that get overwritten by the copy halo, asymmetrically losing
     //* contributions. Default false.
     bool   UnifyJhPeriodicDup;
+    bool   EigenmodeProbe;
+    bool   RestrictMassMatrix3Cube;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

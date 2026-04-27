@@ -2318,11 +2318,14 @@ void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz,
     kadd(resZ, cZ, vectX[i][j][k]*Mxz[0][i][j][k] + vectY[i][j][k]*Myz[0][i][j][k] + vectZ[i][j][k]*Mzz[0][i][j][k]);
 
     //* Neighbours
+    const bool restrict3cube = _col.getRestrictMassMatrix3Cube();
     for (int g = 1; g < ne_mass_; g++)
     {
         const int dxg = NeNo.getX(g);
         const int dyg = NeNo.getY(g);
         const int dzg = NeNo.getZ(g);
+        //* Diagnostic: skip 5-cube-only groups (any |offset| > 1).
+        if (restrict3cube && (std::abs(dxg) > 1 || std::abs(dyg) > 1 || std::abs(dzg) > 1)) continue;
 
         const int i1 = i + dxg;
         const int j1 = j + dyg;
@@ -3240,6 +3243,105 @@ void EMfields3D::dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3
     write_arr3("x", aX);
     write_arr3("y", aY);
     write_arr3("z", aZ);
+}
+
+//* Eigenmode probe. After moments are gathered (M filled), apply MaxwellImage
+//* to plane-wave test fields E_test = sin(k_x x) e_x sweeping mode m = 1..N/2,
+//* project the X-component of the image onto sin/cos basis, and write a CSV
+//* `eigenmode_probe_r{rank}.csv` to SaveDirName. The expected eigenvalue at
+//* low k is 1 + (cθΔt)² k² + (4πθΔt)² ω_p² (curl² + scalar mass term).
+//* Linear vs TSC deviations at high k expose stencil-specific operator bugs.
+void EMfields3D::eigenmode_probe()
+{
+    const Collective *col = &get_col();
+    const VirtualTopology3D *vct = &get_vct();
+    const Grid *grid = &get_grid();
+    const int rank = vct->getCartesian_rank();
+    const int ng = n_ghost_;
+    const int nx_int = nxn - 2*ng;
+    const int ny_int = nyn - 2*ng;
+    const int nz_int = nzn - 2*ng;
+    const int dof = 3 * nx_int * ny_int * nz_int;
+    const double Lx = col->getLx();
+
+    std::vector<double> vec_in(dof, 0.0);
+    std::vector<double> vec_out(dof, 0.0);
+    arr3_double EtX(nxn, nyn, nzn);
+    arr3_double EtY(nxn, nyn, nzn);
+    arr3_double EtZ(nxn, nyn, nzn);
+    arr3_double imX(nxn, nyn, nzn);
+    arr3_double imY(nxn, nyn, nzn);
+    arr3_double imZ(nxn, nyn, nzn);
+
+    std::ostringstream path;
+    path << col->getSaveDirName() << "/eigenmode_probe_r" << rank << ".csv";
+    FILE *fp = fopen(path.str().c_str(), "w");
+    if (!fp) { eprintf("eigenmode_probe: cannot open %s", path.str().c_str()); return; }
+    fprintf(fp, "axis,mode,k,re_xx,im_xx,re_yx,im_yx,re_zx,im_zx,norm2_im\n");
+
+    //* X-axis sweep. Modes m = 1..nxc_r/2 cover up to Nyquist on the unique-cell grid.
+    const int M_max = col->getNxc() / 2;
+    for (int m = 1; m <= M_max; m++)
+    {
+        const double k = 2.0 * M_PI * (double)m / Lx;
+
+        //* Build E_test in physical (full guarded grid) space.
+        for (int i = 0; i < nxn; i++) {
+            const double x = grid->getXN(i);
+            const double s = sin(k * x);
+            for (int j = 0; j < nyn; j++)
+                for (int kk = 0; kk < nzn; kk++) {
+                    EtX[i][j][kk] = s;
+                    EtY[i][j][kk] = 0.0;
+                    EtZ[i][j][kk] = 0.0;
+                }
+        }
+
+        //* Pack to Krylov DOFs (interior only, X/Y/Z interleaved).
+        phys2solver(vec_in.data(), EtX, EtY, EtZ, nxn, nyn, nzn, ng);
+
+        //* Apply MaxwellImage.
+        std::fill(vec_out.begin(), vec_out.end(), 0.0);
+        MaxwellImage(vec_out.data(), vec_in.data());
+
+        //* Unpack image back to physical.
+        solver2phys(imX, imY, imZ, vec_out.data(), nxn, nyn, nzn, ng);
+
+        //* Project image components onto sin(k x) / cos(k x) over interior only.
+        //  Dot products normalized by ½·N_int (so `<sin, sin> = 1` for unit-amplitude sin).
+        double re_xx = 0.0, im_xx = 0.0;
+        double re_yx = 0.0, im_yx = 0.0;
+        double re_zx = 0.0, im_zx = 0.0;
+        double norm2_im = 0.0;
+        const int N_proj = nx_int * ny_int * nz_int;
+        for (int i = ng; i < nxn - ng; i++) {
+            const double x = grid->getXN(i);
+            const double s = sin(k * x);
+            const double c = cos(k * x);
+            for (int j = ng; j < nyn - ng; j++)
+                for (int kk = ng; kk < nzn - ng; kk++) {
+                    const double ix = imX[i][j][kk];
+                    const double iy = imY[i][j][kk];
+                    const double iz = imZ[i][j][kk];
+                    re_xx += ix * s;  im_xx += ix * c;
+                    re_yx += iy * s;  im_yx += iy * c;
+                    re_zx += iz * s;  im_zx += iz * c;
+                    norm2_im += ix*ix + iy*iy + iz*iz;
+                }
+        }
+        const double half_N = 0.5 * (double)N_proj;
+        re_xx /= half_N; im_xx /= half_N;
+        re_yx /= half_N; im_yx /= half_N;
+        re_zx /= half_N; im_zx /= half_N;
+        norm2_im /= (double)N_proj;
+
+        fprintf(fp, "X,%d,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e\n",
+                m, k, re_xx, im_xx, re_yx, im_yx, re_zx, im_zx, norm2_im);
+    }
+
+    fclose(fp);
+    if (rank == 0)
+        std::cout << "*** eigenmode_probe: wrote " << path.str() << " ***" << std::endl;
 }
 
 void EMfields3D::MaxwellImage(double *im, double* vector)

@@ -136,6 +136,9 @@ public:
     void PoissonImage(double *image, double *vector);
     /*! Image of Maxwell Solver (for Solver) */
     void MaxwellImage(double *im, double *vector);
+    /*! Eigenmode probe — sweeps plane-wave test fields through MaxwellImage and
+     *  writes a CSV of (axis, mode, k, projection re/im) for spectral diagnosis. */
+    void eigenmode_probe();
     /*! Maxwell source term (for SOLVER) */
     void MaxwellSource(double *bkrylov);
     /*! Impose a constant charge inside a spherical zone of the domain */
