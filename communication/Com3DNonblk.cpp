@@ -1462,14 +1462,18 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         const bool skip_all_for_xrank_sor = needInterp && n_ghost_ > 1
             && EMf->get_col().getCrossRankMomentSOR();
 
-        //* Kahan-aware sum-on-receive, n_ghost > 1 variant.
-        if (vector_c != nullptr) {
+        //* Kahan-aware sum-on-receive, n_ghost > 1 variant. Also skipped
+        //* when CrossRankMomentSOR is on — the unified 26-direction
+        //* pre-pass already accumulated ghost natives into receivers'
+        //* strict + dup, so running the Kahan addFace family on top
+        //* would double-count.
+        if (vector_c != nullptr && !skip_all_for_xrank_sor) {
             addFace_kahan  (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeZ_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeY_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeX_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addCorner_kahan(nx, ny, nz, vector, vector_c, vct, n_ghost_);
-        } else if (!skip_all_for_xrank_sor) {
+        } else if (vector_c == nullptr && !skip_all_for_xrank_sor) {
             addFace  (nx, ny, nz, vector, vct, n_ghost_, skip_self);
             addEdgeZ (nx, ny, nz, vector, vct, n_ghost_, skip_self);
             addEdgeY (nx, ny, nz, vector, vct, n_ghost_, skip_self);
