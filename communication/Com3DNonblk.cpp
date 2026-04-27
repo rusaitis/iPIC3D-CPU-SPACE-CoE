@@ -655,7 +655,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //* Interior/boundary offset: centers use offset = 0 (no shared node); nodes
     //  use offset = 1 (ghost receives "one node deeper" than the boundary-shared
     //  node, so the send source is one step further into the interior).
-    const int offset = (isCenterFlag ? 0 : 1);
+    //* FixNodeInterpOffset: the moment-interp call is (isCenterFlag=true,
+    //  needInterp=true) but the data actually lives on nodes (node MPI
+    //  datatypes are selected via isCenterDim = isCenterFlag && !needInterp).
+    //  With the fix flag on, take offset from isCenterDim instead so the
+    //  fold/copy below see offset=1 (node convention) for the moment path.
+    const bool fix_node_offset = EMf->get_col().getFixNodeInterpOffset();
+    const int offset = fix_node_offset ? (isCenterDim ? 0 : 1)
+                                       : (isCenterFlag ? 0 : 1);
 
     //* Periodic-self ghost-source remap. When enabled, substitute g → (n_ghost-1-g)
     //  in source-index expressions so the OUTERMOST ghost (g=0) holds the value
@@ -1188,6 +1195,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  copy, stencils, moments) is self-consistently calibrated. Require
     //  nxc_r >= 2*n_ghost - 1 per rank for each self-periodic axis.
     if (needInterp) {
+        //* TSC periodic-self double-count fix. The periodic-self fold + copy
+        //* above already produced the correct sum on each periodic-self axis;
+        //* running the trailing addFace family there re-sums ghost cells (now
+        //* holding interior copies) into the LO/HI duplicates, tripling them.
+        //* Pass `skip_self_periodic` to addFace*/addCorner so they skip
+        //* periodic-self axes per-axis. Cross-rank axes still flow through.
+        const bool skip_self = EMf->get_col().getSkipPeriodicSelfAddFace();
+
         //* Kahan-aware sum-on-receive, n_ghost > 1 variant.
         if (vector_c != nullptr) {
             addFace_kahan  (nx, ny, nz, vector, vector_c, vct, n_ghost_);
@@ -1196,11 +1211,11 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             addEdgeX_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addCorner_kahan(nx, ny, nz, vector, vector_c, vct, n_ghost_);
         } else {
-            addFace  (nx, ny, nz, vector, vct, n_ghost_);
-            addEdgeZ (nx, ny, nz, vector, vct, n_ghost_);
-            addEdgeY (nx, ny, nz, vector, vct, n_ghost_);
-            addEdgeX (nx, ny, nz, vector, vct, n_ghost_);
-            addCorner(nx, ny, nz, vector, vct, n_ghost_);
+            addFace  (nx, ny, nz, vector, vct, n_ghost_, skip_self);
+            addEdgeZ (nx, ny, nz, vector, vct, n_ghost_, skip_self);
+            addEdgeY (nx, ny, nz, vector, vct, n_ghost_, skip_self);
+            addEdgeX (nx, ny, nz, vector, vct, n_ghost_, skip_self);
+            addCorner(nx, ny, nz, vector, vct, n_ghost_, skip_self);
         }
     }
 }
@@ -1428,21 +1443,33 @@ void communicateCenterBoxStencilBC_P( int nx, int ny, int nz, arr3_double _vecto
 //      right: vector[nx-1-n_ghost-g] += vector[nx-1-g]
 //  No chained accumulation: each (src, dst) pair is independent because the
 //  src lives in the ghost slab and the dst lives strictly inside the interior.
-void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
+void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
+    //* Per-axis periodic-self skip. When `skip_self_periodic` is on AND the
+    //* axis's left and right neighbours are myrank, the periodic-self fold +
+    //* copy upstream already handled that direction's halo sum; running addFace
+    //* here would double-count.
+    const int myrank = vct->getCartesian_rank();
+    const bool skip_x = skip_self_periodic &&
+        (vct->getXleft_neighbor_P() == myrank && vct->getXright_neighbor_P() == myrank);
+    const bool skip_y = skip_self_periodic &&
+        (vct->getYleft_neighbor_P() == myrank && vct->getYright_neighbor_P() == myrank);
+    const bool skip_z = skip_self_periodic &&
+        (vct->getZleft_neighbor_P() == myrank && vct->getZright_neighbor_P() == myrank);
+
     //* Perpendicular ranges widened to [1, n-2] to match the widened MPI face
     //  types. At n_ghost==1 this is [1, n-2] — unchanged. At n_ghost==2 it
     //  captures inner-ghost-row moment contributions that were previously missed.
     for (int g = 0; g < n_ghost; g++) {
         // Xright
-        if (vct->hasXrghtNeighbor_P())
+        if (vct->hasXrghtNeighbor_P() && !skip_x)
         {
             for (int j = 1; j <= ny - 2; j++)
                 for (int k = 1; k <= nz - 2; k++)
                     vector[nx - 1 - n_ghost - g][j][k] += vector[nx - 1 - g][j][k];
         }
         // XLEFT
-        if (vct->hasXleftNeighbor_P())
+        if (vct->hasXleftNeighbor_P() && !skip_x)
         {
             for (int j = 1; j <= ny - 2; j++)
                 for (int k = 1; k <= nz - 2; k++)
@@ -1450,28 +1477,28 @@ void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D *
         }
 
         // Yright
-        if (vct->hasYrghtNeighbor_P())
+        if (vct->hasYrghtNeighbor_P() && !skip_y)
         {
             for (int i = 1; i <= nx - 2; i++)
                 for (int k = 1; k <= nz - 2; k++)
                     vector[i][ny - 1 - n_ghost - g][k] += vector[i][ny - 1 - g][k];
         }
         // Yleft
-        if (vct->hasYleftNeighbor_P())
+        if (vct->hasYleftNeighbor_P() && !skip_y)
         {
             for (int i = 1; i <= nx - 2; i++)
                 for (int k = 1; k <= nz - 2; k++)
                     vector[i][n_ghost + g][k] += vector[i][g][k];
         }
         // Zright
-        if (vct->hasZrghtNeighbor_P())
+        if (vct->hasZrghtNeighbor_P() && !skip_z)
         {
             for (int i = 1; i <= nx - 2; i++)
                 for (int j = 1; j <= ny - 2; j++)
                     vector[i][j][nz - 1 - n_ghost - g] += vector[i][j][nz - 1 - g];
         }
         // ZLEFT
-        if (vct->hasZleftNeighbor_P())
+        if (vct->hasZleftNeighbor_P() && !skip_z)
         {
             for (int i = 1; i <= nx - 2; i++)
                 for (int j = 1; j <= ny - 2; j++)
@@ -1484,27 +1511,37 @@ void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D *
 //  Z-aligned edge: ghost block lives in the (x, y) cross-section.
 //  Same shift convention as addFace: (src ghost, dst interior) pairs are
 //  independent — no chained accumulation.
-void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
+void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
+    const int myrank = vct->getCartesian_rank();
+    const bool skip_x = skip_self_periodic &&
+        (vct->getXleft_neighbor_P() == myrank && vct->getXright_neighbor_P() == myrank);
+    const bool skip_y = skip_self_periodic &&
+        (vct->getYleft_neighbor_P() == myrank && vct->getYright_neighbor_P() == myrank);
+
+    //* For an edge to need addEdge, BOTH cross-section axes must contribute a
+    //* halo overlap. If either axis is periodic-self, the upstream periodic-self
+    //* fold+copy already merged that pair (the corresponding 2-D sum lives at the
+    //* cross-section corner of the duplicates).
     for (int gx = 0; gx < n_ghost; gx++)
     for (int gy = 0; gy < n_ghost; gy++)
     {
-        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P())
+        if (vct->hasXrghtNeighbor_P() && vct->hasYrghtNeighbor_P() && !(skip_x || skip_y))
         {
             for (int i = 1; i < (nz - 1); i++)
                 vector[nx - 1 - n_ghost - gx][ny - 1 - n_ghost - gy][i] += vector[nx - 1 - gx][ny - 1 - gy][i];
         }
-        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P())
+        if (vct->hasXleftNeighbor_P() && vct->hasYleftNeighbor_P() && !(skip_x || skip_y))
         {
             for (int i = 1; i < (nz - 1); i++)
                 vector[n_ghost + gx][n_ghost + gy][i] += vector[gx][gy][i];
         }
-        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P())
+        if (vct->hasXrghtNeighbor_P() && vct->hasYleftNeighbor_P() && !(skip_x || skip_y))
         {
             for (int i = 1; i < (nz - 1); i++)
                 vector[nx - 1 - n_ghost - gx][n_ghost + gy][i] += vector[nx - 1 - gx][gy][i];
         }
-        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P())
+        if (vct->hasXleftNeighbor_P() && vct->hasYrghtNeighbor_P() && !(skip_x || skip_y))
         {
             for (int i = 1; i < (nz - 1); i++)
                 vector[n_ghost + gx][ny - 1 - n_ghost - gy][i] += vector[gx][ny - 1 - gy][i];
@@ -1513,27 +1550,33 @@ void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
 }
 /** add the ghost cell values Edge Y to the 3D physical vector */
 //  Y-aligned edge: ghost block lives in the (x, z) cross-section.
-void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
+void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
+    const int myrank = vct->getCartesian_rank();
+    const bool skip_x = skip_self_periodic &&
+        (vct->getXleft_neighbor_P() == myrank && vct->getXright_neighbor_P() == myrank);
+    const bool skip_z = skip_self_periodic &&
+        (vct->getZleft_neighbor_P() == myrank && vct->getZright_neighbor_P() == myrank);
+
     for (int gx = 0; gx < n_ghost; gx++)
     for (int gz = 0; gz < n_ghost; gz++)
     {
-        if (vct->hasXrghtNeighbor_P() && vct->hasZrghtNeighbor_P())
+        if (vct->hasXrghtNeighbor_P() && vct->hasZrghtNeighbor_P() && !(skip_x || skip_z))
         {
             for (int i = 1; i < (ny - 1); i++)
                 vector[nx - 1 - n_ghost - gx][i][nz - 1 - n_ghost - gz] += vector[nx - 1 - gx][i][nz - 1 - gz];
         }
-        if (vct->hasXleftNeighbor_P() && vct->hasZleftNeighbor_P())
+        if (vct->hasXleftNeighbor_P() && vct->hasZleftNeighbor_P() && !(skip_x || skip_z))
         {
             for (int i = 1; i < (ny - 1); i++)
                 vector[n_ghost + gx][i][n_ghost + gz] += vector[gx][i][gz];
         }
-        if (vct->hasXleftNeighbor_P() && vct->hasZrghtNeighbor_P())
+        if (vct->hasXleftNeighbor_P() && vct->hasZrghtNeighbor_P() && !(skip_x || skip_z))
         {
             for (int i = 1; i < (ny - 1); i++)
                 vector[n_ghost + gx][i][nz - 1 - n_ghost - gz] += vector[gx][i][nz - 1 - gz];
         }
-        if (vct->hasXrghtNeighbor_P() && vct->hasZleftNeighbor_P())
+        if (vct->hasXrghtNeighbor_P() && vct->hasZleftNeighbor_P() && !(skip_x || skip_z))
         {
             for (int i = 1; i < (ny - 1); i++)
                 vector[nx - 1 - n_ghost - gx][i][n_ghost + gz] += vector[nx - 1 - gx][i][gz];
@@ -1543,24 +1586,30 @@ void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
 
 /** add the ghost values Edge X to the 3D physical vector */
 //  X-aligned edge: ghost block lives in the (y, z) cross-section.
-void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
+void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
+    const int myrank = vct->getCartesian_rank();
+    const bool skip_y = skip_self_periodic &&
+        (vct->getYleft_neighbor_P() == myrank && vct->getYright_neighbor_P() == myrank);
+    const bool skip_z = skip_self_periodic &&
+        (vct->getZleft_neighbor_P() == myrank && vct->getZright_neighbor_P() == myrank);
+
     for (int gy = 0; gy < n_ghost; gy++)
     for (int gz = 0; gz < n_ghost; gz++)
     {
-        if (vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P()) {
+        if (vct->hasYrghtNeighbor_P() && vct->hasZrghtNeighbor_P() && !(skip_y || skip_z)) {
             for (int i = 1; i < (nx - 1); i++)
                 vector[i][ny - 1 - n_ghost - gy][nz - 1 - n_ghost - gz] += vector[i][ny - 1 - gy][nz - 1 - gz];
         }
-        if (vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P()) {
+        if (vct->hasYleftNeighbor_P() && vct->hasZleftNeighbor_P() && !(skip_y || skip_z)) {
             for (int i = 1; i < (nx - 1); i++)
                 vector[i][n_ghost + gy][n_ghost + gz] += vector[i][gy][gz];
         }
-        if (vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P()) {
+        if (vct->hasYleftNeighbor_P() && vct->hasZrghtNeighbor_P() && !(skip_y || skip_z)) {
             for (int i = 1; i < (nx - 1); i++)
                 vector[i][n_ghost + gy][nz - 1 - n_ghost - gz] += vector[i][gy][nz - 1 - gz];
         }
-        if (vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P()) {
+        if (vct->hasYrghtNeighbor_P() && vct->hasZleftNeighbor_P() && !(skip_y || skip_z)) {
             for (int i = 1; i < (nx - 1); i++)
                 vector[i][ny - 1 - n_ghost - gy][n_ghost + gz] += vector[i][ny - 1 - gy][gz];
         }
@@ -1571,8 +1620,22 @@ void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
 //  Each corner is a single node for n_ghost == 1; for n_ghost > 1 it expands
 //  to a (gx, gy, gz) cube of nodes that are summed back into the matching
 //  inner interior corner.
-void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost)
+void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
+    const int myrank = vct->getCartesian_rank();
+    const bool skip_x = skip_self_periodic &&
+        (vct->getXleft_neighbor_P() == myrank && vct->getXright_neighbor_P() == myrank);
+    const bool skip_y = skip_self_periodic &&
+        (vct->getYleft_neighbor_P() == myrank && vct->getYright_neighbor_P() == myrank);
+    const bool skip_z = skip_self_periodic &&
+        (vct->getZleft_neighbor_P() == myrank && vct->getZright_neighbor_P() == myrank);
+
+    //* A corner participates only when ALL three axes contribute halo overlap;
+    //* if any of those axes is periodic-self, the upstream fold + copy already
+    //* merged that triple-overlap.
+    const bool any_skip = skip_x || skip_y || skip_z;
+    if (any_skip) return;
+
     for (int gx = 0; gx < n_ghost; gx++)
     for (int gy = 0; gy < n_ghost; gy++)
     for (int gz = 0; gz < n_ghost; gz++)

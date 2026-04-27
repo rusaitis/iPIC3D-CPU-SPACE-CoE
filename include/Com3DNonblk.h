@@ -115,10 +115,14 @@ void communicateInterp_old(int nx, int ny, int nz, int ns, double ****vector,
 //  loop over ghost layers. n_ghost = 1 (default) preserves the original
 //  byte-identical behaviour; n_ghost > 1 sums each of the wider ghost layers
 //  back into the corresponding inner interior nodes.
-void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
-void addEdgeX (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
-void addEdgeY (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
-void addEdgeZ (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
-void addFace  (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1);
+//* `skip_self_periodic`: when true, axes whose left/right neighbours are myrank
+//* (periodic-self) are SKIPPED. Used by the TSC moment-halo fix where the
+//* periodic-self fold + copy upstream already produced the correct sum.
+//* Default false preserves legacy behaviour for all existing callers.
+void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
+void addEdgeX (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
+void addEdgeY (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
+void addEdgeZ (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
+void addFace  (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
 
 #endif

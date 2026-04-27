@@ -227,6 +227,9 @@ class Collective
     bool   getEigenmodeProbe()           const { return EigenmodeProbe; }
     bool   getRestrictMassMatrix3Cube()  const { return RestrictMassMatrix3Cube; }
     bool   getMassMatrixSumUnify()       const { return MassMatrixSumUnify; }
+    bool   getDumpMassMatrixStages()     const { return DumpMassMatrixStages; }
+    bool   getSkipPeriodicSelfAddFace()  const { return SkipPeriodicSelfAddFace; }
+    bool   getFixNodeInterpOffset()      const { return FixNodeInterpOffset; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -341,6 +344,37 @@ class Collective
     bool   EigenmodeProbe;
     bool   RestrictMassMatrix3Cube;
     bool   MassMatrixSumUnify;
+
+    //* Stage-by-stage M dump inside communicateGhostP2G_mass_matrix at cycle 1.
+    //* Writes Mxx[0]/Myy[0]/Mzz[0] slabs at four pipeline points:
+    //*   stage0_pre_halo    — raw deposit, pre any halo communication
+    //*   stage1_post_addFace — after communicateInterp (sum-on-receive)
+    //*   stage2_post_selfcopy — after communicateNode_P (ghost copy)
+    //*   stage3_post_unify  — after periodic-duplicate unify + final halo
+    //* Localizes which step introduces the 1.83× boundary band. Default off.
+    bool   DumpMassMatrixStages;
+
+    //* TSC periodic-self halo fix. NBDerivedHaloCommN's trailing
+    //* addFace/addEdge*/addCorner block double-counts on periodic-self axes
+    //* at n_ghost=2: the periodic-self fold (lines ~720) sums ghost into the
+    //* periodic-image interior, the periodic-self copy (lines ~760) refills
+    //* ghost with interior, then addFace sums those copies back into LO/HI
+    //* duplicates — yielding ~3× over-count. When this flag is on, the
+    //* trailing addFace family skips axes that are periodic-self (left/right
+    //* neighbor == myrank). Cross-rank axes still go through addFace as
+    //* before. At n_ghost=1 (Linear/CIC) ghost cells carry no deposit so
+    //* both paths are no-ops; flag is a strict no-op there. Default off.
+    bool   SkipPeriodicSelfAddFace;
+
+    //* TSC moment-halo offset fix. The fold/copy formulas in NBDerivedHaloCommN
+    //* use `offset = isCenterFlag ? 0 : 1`, so the moment-interp path
+    //* (isCenterFlag=true, needInterp=true — but data lives on nodes via
+    //* node MPI datatypes) gets offset=0 even though it should use the node
+    //* convention offset=1. With this flag on, offset is taken from
+    //* `isCenterDim = isCenterFlag && !needInterp` instead, so node-moment
+    //* halos pick offset=1 and the periodic-self fold/copy land in the
+    //* correct destination cells. Default off.
+    bool   FixNodeInterpOffset;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

@@ -182,6 +182,18 @@ void Collective::ReadInput(string inputfile)
         //* invariance of the M·E operator at the periodic boundary. Default off.
         MassMatrixSumUnify          = config.read<bool>("MassMatrixSumUnify", false);
 
+        //* Stage-by-stage M dump inside the mass-matrix halo pipeline. Writes
+        //* Mxx[0]/Myy[0]/Mzz[0] at four points (pre-halo, post-addFace,
+        //* post-self-copy, post-unify) at cycle 1 to localise where the boundary
+        //* band is introduced.
+        DumpMassMatrixStages        = config.read<bool>("DumpMassMatrixStages", false);
+
+        //* TSC periodic-self double-count fix (see Collective.h for details).
+        SkipPeriodicSelfAddFace     = config.read<bool>("SkipPeriodicSelfAddFace", false);
+
+        //* TSC moment-halo offset fix (see Collective.h for details).
+        FixNodeInterpOffset         = config.read<bool>("FixNodeInterpOffset", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

@@ -2474,7 +2474,12 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
         //* Boundary-aware unify (see communicateGhostP2G_mass_matrix). Default
         //* averages; when MassMatrixSumUnify is on, sums to recover the full
         //* periodic deposit at the LO/HI duplicate slot.
-        const bool unify_sum = _col.getMassMatrixSumUnify();
+        //* Sum-unify is only correct at n_ghost > 1 (TSC), where each LO/HI
+        //* duplicate carries half the physical-node deposit. At n_ghost = 1
+        //* (Linear/CIC) the duplicates already hold the full value (CIC stencil
+        //* never reaches ghosts), so summing would double-count. Gate on
+        //* n_ghost_ > 1 so the flag is a strict no-op at Linear width.
+        const bool unify_sum = _col.getMassMatrixSumUnify() && n_ghost_ > 1;
 
         double ***slabs[7] = { Jxh.fetch_arr3(), Jyh.fetch_arr3(), Jzh.fetch_arr3(),
                                 moment_Jxhs, moment_Jyhs, moment_Jzhs, moment_rhons };
@@ -2539,6 +2544,17 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     //  group m in [0, ne_mass_).
     //* Kahan-aware halo sum.
     const bool kahan_halo = _col.getKahanHalo();
+    const bool dump_stages = _col.getDumpMassMatrixStages() && _col.getCurrentCycle() == 1;
+
+    //* Stage 0 — raw deposit, pre any halo communication. Captures gather
+    //* output before addFace sum-on-receive, before ghost-copy, before unify.
+    if (dump_stages)
+    {
+        arr3_double a_xx(convert_to_arr3(Mxx[0]), nxn, nyn, nzn);
+        arr3_double a_yy(convert_to_arr3(Myy[0]), nxn, nyn, nzn);
+        arr3_double a_zz(convert_to_arr3(Mzz[0]), nxn, nyn, nzn);
+        dump_maxwell_stage("Mstage0_pre_halo", a_xx, a_yy, a_zz);
+    }
 
     for (int m = 0; m < ne_mass_; m++)
     {
@@ -2585,6 +2601,17 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
             communicateInterp(nxn, nyn, nzn, moment_Mzz, vct, this);
         }
 
+        //* Stage 1 — after communicateInterp (addFace sum-on-receive merged
+        //* periodic-image partial deposits into the natives). Ghost layers
+        //* still hold raw deposit values; copy halo not yet run.
+        if (dump_stages && m == 0)
+        {
+            arr3_double a_xx(moment_Mxx, nxn, nyn, nzn);
+            arr3_double a_yy(moment_Myy, nxn, nyn, nzn);
+            arr3_double a_zz(moment_Mzz, nxn, nyn, nzn);
+            dump_maxwell_stage("Mstage1_post_addFace", a_xx, a_yy, a_zz);
+        }
+
         //* Populate the ghost layers (no sum-on-receive, just copy from interior).
         communicateNode_P(nxn, nyn, nzn, moment_Mxx, vct, this);
         communicateNode_P(nxn, nyn, nzn, moment_Mxy, vct, this);
@@ -2595,6 +2622,17 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         communicateNode_P(nxn, nyn, nzn, moment_Mzx, vct, this);
         communicateNode_P(nxn, nyn, nzn, moment_Mzy, vct, this);
         communicateNode_P(nxn, nyn, nzn, moment_Mzz, vct, this);
+
+        //* Stage 2 — after communicateNode_P (ghost layers copied from interior).
+        //* Pre-unify: LO and HI duplicates may differ if gather scatter went
+        //* asymmetrically.
+        if (dump_stages && m == 0)
+        {
+            arr3_double a_xx(moment_Mxx, nxn, nyn, nzn);
+            arr3_double a_yy(moment_Myy, nxn, nyn, nzn);
+            arr3_double a_zz(moment_Mzz, nxn, nyn, nzn);
+            dump_maxwell_stage("Mstage2_post_selfcopy", a_xx, a_yy, a_zz);
+        }
     }
 
     //* Average-unify M's periodic-duplicate LO and HI nodes on each periodic-self
@@ -2616,7 +2654,12 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         //* plasma the sum reproduces the interior value, restoring translational
         //* invariance of the M·E operator at the periodic boundary. Verified
         //* empirically by the eigenmode probe (cos-component projection).
-        const bool unify_sum = _col.getMassMatrixSumUnify();
+        //* Sum-unify is only correct at n_ghost > 1 (TSC), where each LO/HI
+        //* duplicate carries half the physical-node deposit. At n_ghost = 1
+        //* (Linear/CIC) the duplicates already hold the full value (CIC stencil
+        //* never reaches ghosts), so summing would double-count. Gate on
+        //* n_ghost_ > 1 so the flag is a strict no-op at Linear width.
+        const bool unify_sum = _col.getMassMatrixSumUnify() && n_ghost_ > 1;
 
         array4_double *Mall[9] = { &Mxx, &Mxy, &Mxz, &Myx, &Myy, &Myz, &Mzx, &Mzy, &Mzz };
 
@@ -2687,6 +2730,17 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         arr3_double a_yy(mM_yy, nxn, nyn, nzn);
         arr3_double a_zz(mM_zz, nxn, nyn, nzn);
         dump_maxwell_stage("Mdiag_g0", a_xx, a_yy, a_zz);
+    }
+
+    //* Stage 3 — final M after unify + post-unify halo refresh. Mirrors the
+    //* DumpMassMatrixDiag location but lives under the staged-dump flag so all
+    //* four stages can be requested with a single switch.
+    if (dump_stages)
+    {
+        arr3_double a_xx(convert_to_arr3(Mxx[0]), nxn, nyn, nzn);
+        arr3_double a_yy(convert_to_arr3(Myy[0]), nxn, nyn, nzn);
+        arr3_double a_zz(convert_to_arr3(Mzz[0]), nxn, nyn, nzn);
+        dump_maxwell_stage("Mstage3_post_unify", a_xx, a_yy, a_zz);
     }
 }
 
