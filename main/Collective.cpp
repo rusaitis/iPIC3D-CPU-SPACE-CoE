@@ -146,18 +146,24 @@ void Collective::ReadInput(string inputfile)
         //* Mass-matrix diagonal dump (default off).
         DumpMassMatrixDiag          = config.read<bool>("DumpMassMatrixDiag", false);
 
-        //* Average-unify M's LO/HI duplicates after gather + halo (default off).
-        UnifyMassMatrixPeriodicDup  = config.read<bool>("UnifyMassMatrixPeriodicDup", false);
+        //* Average-unify M's LO/HI duplicates after gather + halo. No-op on
+        //* Linear (CIC deposit doesn't reach ghosts → LO == HI bit-exact); at
+        //* TSC width it makes the matvec see consistent boundary mass. Default on.
+        UnifyMassMatrixPeriodicDup  = config.read<bool>("UnifyMassMatrixPeriodicDup", true);
 
-        //* Periodic-self ghost-source index correction (default off; no-op at n_ghost=1).
-        FixPeriodicSelfGhostOrder   = config.read<bool>("FixPeriodicSelfGhostOrder", false);
+        //* Periodic-self ghost-source index correction. No-op at n_ghost=1
+        //* (Linear/CIC); required at n_ghost=2 (TSC) for the self-copy to
+        //* match the MPI face/edge/corner sends. Default on.
+        FixPeriodicSelfGhostOrder   = config.read<bool>("FixPeriodicSelfGhostOrder", true);
 
         //* Diagnostic: zero M·E or curl² contribution to MaxwellImage. Default off.
         DisableMassMatrixInImage    = config.read<bool>("DisableMassMatrixInImage", false);
         DisableCurl2InImage         = config.read<bool>("DisableCurl2InImage", false);
 
-        //* Average-unify Jxh/Jyh/Jzh + per-species LO/HI duplicates (TSC fix).
-        UnifyJhPeriodicDup          = config.read<bool>("UnifyJhPeriodicDup", false);
+        //* Average-unify Jxh/Jyh/Jzh + per-species LO/HI duplicates. Same TSC
+        //* boundary-consistency rationale as UnifyMassMatrixPeriodicDup; bit-
+        //* identical no-op on Linear. Default on.
+        UnifyJhPeriodicDup          = config.read<bool>("UnifyJhPeriodicDup", true);
 
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);

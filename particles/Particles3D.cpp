@@ -215,12 +215,16 @@ void Particles3D::maxwellian(Field * EMf)
     const double q_factor =  q_sgn * grid->getVOL() / npcel;
 
     long long counter = 0;
-    for (int i = 1; i < grid->getNXC() - 1; i++)
-        for (int j = 1; j < grid->getNYC() - 1; j++)
-            for (int k = 1; k < grid->getNZC() - 1; k++)
+    //* Iterate over interior cells [n_ghost, nxc - n_ghost). The literal "1"
+    //  is correct only for n_ghost == 1; for n_ghost == 2 it would seed
+    //  particles in inner ghost cells, breaking periodic uniformity.
+    const int ng = grid->getNGhost();
+    for (int i = ng; i < grid->getNXC() - ng; i++)
+        for (int j = ng; j < grid->getNYC() - ng; j++)
+            for (int k = ng; k < grid->getNZC() - ng; k++)
             {
                 const double q = q_factor * fabs(EMf->getRHOcs(i, j, k, ns));
-                
+
                 for (int ii = 0; ii < npcelx; ii++)
                     for (int jj = 0; jj < npcely; jj++)
                         for (int kk = 0; kk < npcelz; kk++)
@@ -231,7 +235,7 @@ void Particles3D::maxwellian(Field * EMf)
 
                             double u, v, w;
                             sample_maxwellian(u, v, w, uth, vth, wth, u0, v0, w0);
-                        
+
                             create_new_particle(u, v, w, q, x, y, z);
                             counter++;
                         }
