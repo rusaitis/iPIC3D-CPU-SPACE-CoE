@@ -175,6 +175,13 @@ void Collective::ReadInput(string inputfile)
         //* couplings). Default off.
         RestrictMassMatrix3Cube     = config.read<bool>("RestrictMassMatrix3Cube", false);
 
+        //* Boundary-aware unify (Phase E.7 fix): when on, UnifyMassMatrix /
+        //* UnifyJh add LO and HI duplicate native values (each carries a partial
+        //* periodic-image deposit at TSC width) instead of averaging. For uniform
+        //* plasma the sum reproduces the interior value, restoring translational
+        //* invariance of the M·E operator at the periodic boundary. Default off.
+        MassMatrixSumUnify          = config.read<bool>("MassMatrixSumUnify", false);
+
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

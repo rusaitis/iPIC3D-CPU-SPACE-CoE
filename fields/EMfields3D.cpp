@@ -2471,6 +2471,11 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
         const bool ps_y = _col.getPERIODICY() && vct->getYLEN() == 1;
         const bool ps_z = _col.getPERIODICZ() && vct->getZLEN() == 1;
 
+        //* Boundary-aware unify (see communicateGhostP2G_mass_matrix). Default
+        //* averages; when MassMatrixSumUnify is on, sums to recover the full
+        //* periodic deposit at the LO/HI duplicate slot.
+        const bool unify_sum = _col.getMassMatrixSumUnify();
+
         double ***slabs[7] = { Jxh.fetch_arr3(), Jyh.fetch_arr3(), Jzh.fetch_arr3(),
                                 moment_Jxhs, moment_Jyhs, moment_Jzhs, moment_rhons };
 
@@ -2483,9 +2488,10 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
                 if (ihi > ilo)
                     for (int j = 0; j < nyn; ++j)
                         for (int k = 0; k < nzn; ++k) {
-                            const double avg = 0.5 * (v[ilo][j][k] + v[ihi][j][k]);
-                            v[ilo][j][k] = avg;
-                            v[ihi][j][k] = avg;
+                            const double sum = v[ilo][j][k] + v[ihi][j][k];
+                            const double val = unify_sum ? sum : 0.5 * sum;
+                            v[ilo][j][k] = val;
+                            v[ihi][j][k] = val;
                         }
             }
             if (ps_y) {
@@ -2494,9 +2500,10 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
                 if (jhi > jlo)
                     for (int i = 0; i < nxn; ++i)
                         for (int k = 0; k < nzn; ++k) {
-                            const double avg = 0.5 * (v[i][jlo][k] + v[i][jhi][k]);
-                            v[i][jlo][k] = avg;
-                            v[i][jhi][k] = avg;
+                            const double sum = v[i][jlo][k] + v[i][jhi][k];
+                            const double val = unify_sum ? sum : 0.5 * sum;
+                            v[i][jlo][k] = val;
+                            v[i][jhi][k] = val;
                         }
             }
             if (ps_z) {
@@ -2505,9 +2512,10 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
                 if (khi > klo)
                     for (int i = 0; i < nxn; ++i)
                         for (int j = 0; j < nyn; ++j) {
-                            const double avg = 0.5 * (v[i][j][klo] + v[i][j][khi]);
-                            v[i][j][klo] = avg;
-                            v[i][j][khi] = avg;
+                            const double sum = v[i][j][klo] + v[i][j][khi];
+                            const double val = unify_sum ? sum : 0.5 * sum;
+                            v[i][j][klo] = val;
+                            v[i][j][khi] = val;
                         }
             }
             //* Re-run the copy halo so ghost cells pick up the new unified
@@ -2603,6 +2611,13 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         const bool ps_y = _col.getPERIODICY() && vctp->getYLEN() == 1;
         const bool ps_z = _col.getPERIODICZ() && vctp->getZLEN() == 1;
 
+        //* Boundary-aware unify: SUM the LO/HI duplicate natives (each carries
+        //* a partial periodic-image slice) instead of averaging. For uniform
+        //* plasma the sum reproduces the interior value, restoring translational
+        //* invariance of the M·E operator at the periodic boundary. Verified
+        //* empirically by the eigenmode probe (cos-component projection).
+        const bool unify_sum = _col.getMassMatrixSumUnify();
+
         array4_double *Mall[9] = { &Mxx, &Mxy, &Mxz, &Myx, &Myy, &Myz, &Mzx, &Mzy, &Mzz };
 
         for (int g = 0; g < ne_mass_; g++)
@@ -2615,9 +2630,10 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
                 if (ihi > ilo)
                     for (int j = 0; j < nyn; ++j)
                         for (int k = 0; k < nzn; ++k) {
-                            const double avg = 0.5 * (Marr[g][ilo][j][k] + Marr[g][ihi][j][k]);
-                            Marr[g][ilo][j][k] = avg;
-                            Marr[g][ihi][j][k] = avg;
+                            const double s = Marr[g][ilo][j][k] + Marr[g][ihi][j][k];
+                            const double v = unify_sum ? s : 0.5 * s;
+                            Marr[g][ilo][j][k] = v;
+                            Marr[g][ihi][j][k] = v;
                         }
             }
             if (ps_y) {
@@ -2626,9 +2642,10 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
                 if (jhi > jlo)
                     for (int i = 0; i < nxn; ++i)
                         for (int k = 0; k < nzn; ++k) {
-                            const double avg = 0.5 * (Marr[g][i][jlo][k] + Marr[g][i][jhi][k]);
-                            Marr[g][i][jlo][k] = avg;
-                            Marr[g][i][jhi][k] = avg;
+                            const double s = Marr[g][i][jlo][k] + Marr[g][i][jhi][k];
+                            const double v = unify_sum ? s : 0.5 * s;
+                            Marr[g][i][jlo][k] = v;
+                            Marr[g][i][jhi][k] = v;
                         }
             }
             if (ps_z) {
@@ -2637,9 +2654,10 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
                 if (khi > klo)
                     for (int i = 0; i < nxn; ++i)
                         for (int j = 0; j < nyn; ++j) {
-                            const double avg = 0.5 * (Marr[g][i][j][klo] + Marr[g][i][j][khi]);
-                            Marr[g][i][j][klo] = avg;
-                            Marr[g][i][j][khi] = avg;
+                            const double s = Marr[g][i][j][klo] + Marr[g][i][j][khi];
+                            const double v = unify_sum ? s : 0.5 * s;
+                            Marr[g][i][j][klo] = v;
+                            Marr[g][i][j][khi] = v;
                         }
             }
         }

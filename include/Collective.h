@@ -226,6 +226,7 @@ class Collective
     bool   getUnifyJhPeriodicDup()       const { return UnifyJhPeriodicDup; }
     bool   getEigenmodeProbe()           const { return EigenmodeProbe; }
     bool   getRestrictMassMatrix3Cube()  const { return RestrictMassMatrix3Cube; }
+    bool   getMassMatrixSumUnify()       const { return MassMatrixSumUnify; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -339,6 +340,7 @@ class Collective
     bool   UnifyJhPeriodicDup;
     bool   EigenmodeProbe;
     bool   RestrictMassMatrix3Cube;
+    bool   MassMatrixSumUnify;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy
