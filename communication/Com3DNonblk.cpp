@@ -825,6 +825,302 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                 }
             }
         }
+
+        //! ============================================================
+        //* MULTI-AXIS CORNER COMPLETION (Phase E.14)
+        //
+        //  At a multi-rank corner cell (intersection of TWO cross-rank
+        //  periodic axes), the 26-slot SOR's diagonal-(±1,±1,0) slot only
+        //  pairs the cell with its diagonally-opposite rank — a 2-rank
+        //  sum where 4-rank consensus is required. Empirically: at np=4
+        //  X+Y=2x2, post-SOR Mxx max|Δ| at j ∈ {ng, ny-ng-1} dup rows is
+        //  ~5e-4 between paired ranks (face cells at j strict are bit-tight).
+        //
+        //  Fix: for each pair (a,b) of cross-rank axes, do a single extra
+        //  face-a exchange restricted to b's dup positions and c's strict
+        //  interior. Sender packs (i_a = dup-d_a-cell, i_b ∈ {ng, n_b-ng-1},
+        //  i_c ∈ strict). Receiver applies at periodic image (i_a flipped,
+        //  i_b same, i_c same) and sums. Post-pass sums equal the full
+        //  cross-rank moment at every multi-rank corner-line.
+        //
+        //  3-axis (8-rank) corners are NOT closed here — would need an
+        //  additional pass restricted to all three dups. Out of scope
+        //  until a config exercises it. Default off; gated under
+        //  MultiAxisCornerSOR; runs only when CrossRankMomentSOR is on.
+        //! ============================================================
+        if (EMf->get_col().getMultiAxisCornerSOR()) {
+            const bool xrank[3] = {
+                periods[0] && dims[0] > 1,
+                periods[1] && dims[1] > 1,
+                periods[2] && dims[2] > 1
+            };
+            const int  nax[3]    = {nx, ny, nz};
+
+            //* For each axis-pair (a, b), pick the c-perpendicular range:
+            //*  - c is cross-rank: send strict-c only. c-ghost is fed by
+            //*    Phase E.11's c-axis face slot from c's neighbour and is
+            //*    NOT a local raw deposit at this point — including it
+            //*    would double-count. (Note: 8-rank corners at c-dup ∩
+            //*    a-dup ∩ b-dup are NOT closed by this pass.)
+            //*  - c is single-rank periodic OR non-periodic: c-ghost holds
+            //*    LOCAL raw partial deposits; subsequent c-fold (line
+            //*    ~1060) folds c-ghost into c-strict and c-self-copy
+            //*    overwrites c-ghost from c-strict. To make those steps
+            //*    produce matched outputs at multi-rank corners, send
+            //*    the FULL c range so c-ghost AND c-dup are matched
+            //*    pre-fold.
+
+            //* Tag scheme: 300 + axis_a*12 + ((sa+1)/2)*6 + axis_b*2 + dup_side.
+            //* axis_a,axis_b ∈ {0,1,2}, sa ∈ {-1,+1}, dup_side ∈ {0=LO,1=HI}.
+            //* Range: [300, 335], disjoint from face tags (1..6) and 26-slot
+            //* SOR tags (200..226).
+            auto ctag = [](int axis_a, int sa, int axis_b, int dup_side) {
+                return 300 + axis_a * 12 + ((sa + 1) / 2) * 6 + axis_b * 2 + dup_side;
+            };
+
+            struct CSlot {
+                int axis_a, axis_b, axis_c;
+                int sa;
+                int dup_side;       //* 0 = LO (i_b = ng), 1 = HI (i_b = n_b-ng-1)
+                int dup_b;
+                int len_c;
+                int c_lo;           //* c-axis start: 0 (full) or ng+1 (strict).
+                int nbr;
+                std::vector<double> send;
+                std::vector<double> recv;
+            };
+            std::vector<CSlot> cslots;
+            cslots.reserve(24);
+
+            //* Unordered pairs only (b > a). Iterating both (a,b) and (b,a)
+            //* would double-count: pair (a,b) sa=±1 already updates ALL 4
+            //* multi-rank corner cells of each rank for that axis-pair via
+            //* the periodic-image flip on the a axis. Adding (b,a) sends
+            //* would touch the same physical cells through the b axis,
+            //* over-counting by p_off-rank-sum.
+            for (int a = 0; a < 3; ++a) {
+                if (!xrank[a]) continue;
+                for (int b = a + 1; b < 3; ++b) {
+                    if (!xrank[b]) continue;
+                    const int c = 3 - a - b;
+                    //* c-perp range: strict-c when c is cross-rank, full
+                    //* (0..nc-1) when c is single-rank periodic / non-periodic.
+                    const bool c_full = !xrank[c];
+                    const int  len_c  = c_full ? nax[c] : (nax[c] - 2 * n_ghost_ - 2);
+                    const int  c_lo   = c_full ? 0 : (n_ghost_ + 1);
+                    if (len_c <= 0) continue;
+                    for (int sa : {-1, +1}) {
+                        int sxyz[3] = {0, 0, 0};
+                        sxyz[a] = sa;
+                        const int nbr = neighbour_at(sxyz[0], sxyz[1], sxyz[2]);
+                        if (nbr == MPI_PROC_NULL || nbr == myrank) continue;
+                        for (int dup_side = 0; dup_side < 2; ++dup_side) {
+                            const int dup_b = (dup_side == 0)
+                                              ? n_ghost_
+                                              : (nax[b] - n_ghost_ - 1);
+                            cslots.push_back({a, b, c, sa, dup_side, dup_b,
+                                              len_c, c_lo, nbr, {}, {}});
+                            CSlot &s = cslots.back();
+                            s.send.resize(len_c);
+                            s.recv.resize(len_c);
+                            const int idx_a = (sa == -1)
+                                              ? n_ghost_
+                                              : (nax[a] - n_ghost_ - 1);
+                            int ijk[3];
+                            ijk[a] = idx_a;
+                            ijk[b] = dup_b;
+                            for (int hc = 0; hc < len_c; ++hc) {
+                                ijk[c] = c_lo + hc;
+                                s.send[hc] = vector[ijk[0]][ijk[1]][ijk[2]];
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::vector<MPI_Request> crqs;
+            crqs.reserve(2 * cslots.size());
+            for (CSlot &s : cslots) {
+                const int tag_send = ctag(s.axis_a,  s.sa, s.axis_b, s.dup_side);
+                const int tag_recv = ctag(s.axis_a, -s.sa, s.axis_b, s.dup_side);
+                crqs.emplace_back();
+                MPI_Irecv(s.recv.data(), s.len_c, MPI_DOUBLE, s.nbr,
+                          tag_recv, comm, &crqs.back());
+                crqs.emplace_back();
+                MPI_Isend(s.send.data(), s.len_c, MPI_DOUBLE, s.nbr,
+                          tag_send, comm, &crqs.back());
+            }
+            if (!crqs.empty())
+                MPI_Waitall(crqs.size(), crqs.data(), MPI_STATUSES_IGNORE);
+
+            //* Apply: receiver sums into the SAME i_a dup position it sent
+            //* from. The matching send across the rank boundary already
+            //* targets the same PHYSICAL cell on our side: for sa=+1 we
+            //* sent our HI X dup (i=nax-ng-1) and our X-HI Cart nbr's
+            //* matching slot packed its LO X dup (i=ng) — same physical
+            //* cell as our HI dup. The recv arrives bearing that
+            //* neighbour's value summed at the same position, so we apply
+            //* at our same dup-position. Same i_b dup, same i_c range.
+            for (const CSlot &s : cslots) {
+                const int idx_a = (s.sa == -1)
+                                  ? n_ghost_
+                                  : (nax[s.axis_a] - n_ghost_ - 1);
+                int ijk[3];
+                ijk[s.axis_a] = idx_a;
+                ijk[s.axis_b] = s.dup_b;
+                for (int hc = 0; hc < s.len_c; ++hc) {
+                    ijk[s.axis_c] = s.c_lo + hc;
+                    vector[ijk[0]][ijk[1]][ijk[2]] += s.recv[hc];
+                }
+            }
+        }
+
+        //! ============================================================
+        //* FACE-CELL COMPLETION (Phase E.16)
+        //
+        //  At face cells (a-dup ∩ b-strict-near-boundary ∩ c) where the
+        //  TSC stencil reaches across two cross-rank periodic axes, 4
+        //  ranks contribute physically but Phase E.11's 26-slot partition
+        //  routes only 3 of them to each rank. Specifically, for r0[i_a-dup,
+        //  j_b-near-LO, k_c]: r0 self + r2 (across axis a) + r3 (diagonal)
+        //  arrive via Phase E.11; r1's contribution at r1[i_a-dup, j_b-ghost,
+        //  k_c] is missing because r1's pure-b slots cover only a-strict
+        //  (lx=strict_x), and r1's diagonal slots route to r3, not r0.
+        //
+        //  Fix: for each ORDERED pair (a, b) of cross-rank axes (both (a,b)
+        //  and (b,a) needed — they cover different cells), do an extra
+        //  exchange along axis b restricted to (i_a = a-dup, j_b ∈ b-ghost,
+        //  k_c strict-or-full). Sender packs at i_a-dup ∩ j_b-ghost; the
+        //  matching neighbour-side send arrives via the periodic-image flip
+        //  on axis b (dst formula uses -s.sb), landing at i_a-dup ∩
+        //  j_b-strict-near-boundary, summing the missing diagonal rank's
+        //  contribution.
+        //
+        //  Pack reads ghost cells (h_b ∈ [0..ng-1], strictly excludes b-dup
+        //  at h_b=ng), which are NOT mutated by Phase E.11's apply (E.11
+        //  reads ghost+dup, writes strict+dup) or Phase E.14 (writes only
+        //  dup-pair cells). So pack timing is flexible — placed here for
+        //  locality. Apply lands at strict-near-boundary cells, additively
+        //  on top of any Phase E.11 contributions.
+        //
+        //  3-axis (X+Y+Z all cross-rank) is OUT OF SCOPE: at 8-rank cells
+        //  the 6 ordered pairs combined with E.11's 4 routings would total
+        //  10, over-counting. v1 is correct for ≤ 2 cross-rank axes; gate
+        //  on flag, default off.
+        //! ============================================================
+        if (EMf->get_col().getXrankFaceCellCompletion()) {
+            const bool xrank[3] = {
+                periods[0] && dims[0] > 1,
+                periods[1] && dims[1] > 1,
+                periods[2] && dims[2] > 1
+            };
+            const int  nax[3]    = {nx, ny, nz};
+
+            //* Tag: 400 + axis_a*16 + axis_b*4 + sa_side*2 + (sb+1)/2.
+            //* axis_a, axis_b ∈ {0,1,2}, sa_side ∈ {0=LO,1=HI}, sb ∈ {-1,+1}.
+            //* Range: [400, 443], disjoint from face tags (1..6),
+            //* 26-slot SOR (200..226), and Phase E.14 (300..335).
+            auto ftag = [](int axis_a, int axis_b, int sa_side, int sb) {
+                return 400 + axis_a * 16 + axis_b * 4 + sa_side * 2 + (sb + 1) / 2;
+            };
+
+            struct FSlot {
+                int axis_a, axis_b, axis_c;
+                int sa_side;       //* 0 = LO (i_a = ng), 1 = HI (i_a = nax-ng-1)
+                int sb;            //* -1 or +1
+                int len_c;
+                int c_lo;
+                int nbr;
+                std::vector<double> send;
+                std::vector<double> recv;
+            };
+            std::vector<FSlot> fslots;
+            fslots.reserve(24);
+
+            //* ORDERED pairs (a != b). (a,b) brings axis-b neighbour's
+            //* (i_a-dup, j_b-ghost, k) contribution; (b,a) brings the
+            //* axis-a neighbour's (i_b-dup, j_a-ghost, k) contribution.
+            //* These are different physical cells, so both are required.
+            for (int a = 0; a < 3; ++a) {
+                if (!xrank[a]) continue;
+                for (int b = 0; b < 3; ++b) {
+                    if (b == a || !xrank[b]) continue;
+                    const int c = 3 - a - b;
+                    //* c-perp range: same convention as Phase E.14.
+                    const bool c_full = !xrank[c];
+                    const int  len_c  = c_full ? nax[c] : (nax[c] - 2 * n_ghost_ - 2);
+                    const int  c_lo   = c_full ? 0 : (n_ghost_ + 1);
+                    if (len_c <= 0) continue;
+
+                    for (int sa_side = 0; sa_side < 2; ++sa_side) {
+                        const int idx_a = (sa_side == 0)
+                                          ? n_ghost_
+                                          : (nax[a] - n_ghost_ - 1);
+                        for (int sb : {-1, +1}) {
+                            int sxyz[3] = {0, 0, 0};
+                            sxyz[b] = sb;
+                            const int nbr = neighbour_at(sxyz[0], sxyz[1], sxyz[2]);
+                            if (nbr == MPI_PROC_NULL || nbr == myrank) continue;
+
+                            fslots.push_back({a, b, c, sa_side, sb,
+                                              len_c, c_lo, nbr, {}, {}});
+                            FSlot &s = fslots.back();
+                            const int slab = n_ghost_ * len_c;
+                            s.send.resize(slab);
+                            s.recv.resize(slab);
+                            int ijk[3];
+                            ijk[a] = idx_a;
+                            for (int h_b = 0; h_b < n_ghost_; ++h_b) {
+                                ijk[b] = src_idx(sb, nax[b], h_b);
+                                for (int hc = 0; hc < len_c; ++hc) {
+                                    ijk[c] = c_lo + hc;
+                                    s.send[h_b * len_c + hc] =
+                                        vector[ijk[0]][ijk[1]][ijk[2]];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::vector<MPI_Request> frqs;
+            frqs.reserve(2 * fslots.size());
+            for (FSlot &s : fslots) {
+                const int slab = n_ghost_ * s.len_c;
+                const int tag_send = ftag(s.axis_a, s.axis_b, s.sa_side,  s.sb);
+                const int tag_recv = ftag(s.axis_a, s.axis_b, s.sa_side, -s.sb);
+                frqs.emplace_back();
+                MPI_Irecv(s.recv.data(), slab, MPI_DOUBLE, s.nbr,
+                          tag_recv, comm, &frqs.back());
+                frqs.emplace_back();
+                MPI_Isend(s.send.data(), slab, MPI_DOUBLE, s.nbr,
+                          tag_send, comm, &frqs.back());
+            }
+            if (!frqs.empty())
+                MPI_Waitall(frqs.size(), frqs.data(), MPI_STATUSES_IGNORE);
+
+            //* Apply: matching neighbour's slot has -sb (we packed b-ghost
+            //* on +sb side, neighbour packed b-ghost on -sb side). Receiver
+            //* applies at idx_a (same dup-column position) and at j_b =
+            //* dst_idx(-s.sb, nax[b], h_b), which lands on
+            //* b-strict-near-boundary on the OPPOSITE side of the rank
+            //* (periodic image of the sender's b-ghost).
+            for (const FSlot &s : fslots) {
+                const int idx_a = (s.sa_side == 0)
+                                  ? n_ghost_
+                                  : (nax[s.axis_a] - n_ghost_ - 1);
+                int ijk[3];
+                ijk[s.axis_a] = idx_a;
+                for (int h_b = 0; h_b < n_ghost_; ++h_b) {
+                    ijk[s.axis_b] = dst_idx(-s.sb, nax[s.axis_b], h_b);
+                    for (int hc = 0; hc < s.len_c; ++hc) {
+                        ijk[s.axis_c] = s.c_lo + hc;
+                        vector[ijk[0]][ijk[1]][ijk[2]] +=
+                            s.recv[h_b * s.len_c + hc];
+                    }
+                }
+            }
+        }
     }
 
     //! ============================================================
@@ -1010,6 +1306,22 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                 vector[dx_hi][dy_hi][dz_hi] += vector[nx - 1 - gx][ny - 1 - gy][nz - 1 - gz];
             }
         }
+    }
+
+    //* Phase E.20a fix: face MPI Irecvs above wrote into vector[g][1..ny-2][1..nz-2]
+    //  etc. The periodic single-rank self-copies below READ FROM those same
+    //  buffers (e.g. ix=1..nx-2 includes ix=1 = X-LO inner-ghost slab written
+    //  by X-Irecv when commCnt[0]=1). Without a Waitall here we have a race:
+    //  whether self-copy reads pre-Irecv (zero) or post-Irecv (valid data)
+    //  is non-deterministic across reps and was the dominant source of TSC
+    //  np>1 cyc-1 ULP non-determinism.
+    //
+    //  Only run for COPY semantics (needInterp=false). The moments path
+    //  (needInterp=true) intentionally reads pre-Irecv ghost values to do
+    //  sum-on-receive folding before face Irecv overwrites them; it relies
+    //  on the trailing Waitall further down.
+    if (!needInterp && sendcnt > 0) {
+        MPI_Waitall(sendcnt, &reqList[0], &stat[0]);
     }
 
     //* Periodic single-rank self-copies (X/Y/Z). Source indices use the same
@@ -1353,6 +1665,173 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                 if (stat[si].MPI_ERROR != MPI_SUCCESS) { stopFlag = true; }
             }
             if (stopFlag) exit(EXIT_FAILURE);
+        }
+
+        //! ============================================================
+        //* DIAGONAL CART EDGE-COPY (Phase E.18)
+        //
+        //  At a 2-axis cross-rank rank, the standard EDGE PHASE above
+        //  routes through a SINGLE-axis Cart neighbour (e.g., zEdge LO X
+        //  ∩ LO Y corner gets data from left_neighborY only). The data on
+        //  that single-axis neighbour at the read position physically
+        //  represents a DIFFERENT cell than what the corner ghost should
+        //  hold — leading to ~1e-3 paired-rank inconsistency at the edge
+        //  ghost. The mass-matrix kernel reads these edge ghosts when the
+        //  TSC |offset|=2 stencil reaches them, propagating the error to
+        //  C_raw_ME at face dup pairs (~1e-6).
+        //
+        //  Fix: for each pair (a, b) of cross-rank periodic axes, exchange
+        //  the (sa, sb) corner via the DIAGONAL Cart neighbour — which
+        //  geometrically holds the correct physical cell — and OVERRIDE
+        //  the standard EDGE PHASE write. COPY semantics (= overwrite).
+        //  Range over c (third axis) covers strict + dup so all stencil
+        //  reaches are covered; ghost-c excluded since FACE PHASE handles
+        //  that direction separately.
+        //
+        //  3-axis (X+Y+Z all cross-rank) 8-rank corners are NOT closed by
+        //  this pass — would need an additional 3-axis CORNER override.
+        //  Default off; gated under `XrankDiagonalEdgeCopy`.
+        //! ============================================================
+        if (EMf->get_col().getXrankDiagonalEdgeCopy()) {
+            int my_coords_e18[3], dims_e18[3], periods_e18[3];
+            MPI_Cart_get(comm, 3, dims_e18, periods_e18, my_coords_e18);
+
+            auto neighbour_at_e18 = [&](int sx, int sy, int sz) -> int {
+                int nbr[3] = {my_coords_e18[0] + sx,
+                              my_coords_e18[1] + sy,
+                              my_coords_e18[2] + sz};
+                for (int d = 0; d < 3; ++d) {
+                    if (nbr[d] < 0 || nbr[d] >= dims_e18[d]) {
+                        if (!periods_e18[d]) return MPI_PROC_NULL;
+                        nbr[d] = (nbr[d] % dims_e18[d] + dims_e18[d]) % dims_e18[d];
+                    }
+                }
+                int r;
+                MPI_Cart_rank(comm, nbr, &r);
+                return r;
+            };
+
+            const bool xrank_e18[3] = {
+                periods_e18[0] && dims_e18[0] > 1,
+                periods_e18[1] && dims_e18[1] > 1,
+                periods_e18[2] && dims_e18[2] > 1
+            };
+            const int  nax_e18[3]    = {nx, ny, nz};
+
+            //* Tag scheme: 500 + axis_a*64 + axis_b*16 + (sa+1)/2*8 + (sb+1)/2*4
+            //*             + 0..3 for the 4 (sa, sb) combos (already encoded above).
+            //* Pair indices: (a, b) ∈ {(0,1), (0,2), (1,2)} unordered. Use the
+            //* compact form: 500 + (axis_a*3 + axis_b) * 16 + ((sa+1)/2)*8 + ((sb+1)/2)*4.
+            //* Range fits in [500, 535]: 3 pair entries * 16 each = 48 → max 547.
+            //* Disjoint from 1..6 face, 200..226, 300..335, 400..443.
+            auto detag = [](int axis_a, int axis_b, int sa, int sb) {
+                return 500 + (axis_a * 3 + axis_b) * 16
+                            + ((sa + 1) / 2) * 8
+                            + ((sb + 1) / 2) * 4;
+            };
+
+            struct DSlot {
+                int axis_a, axis_b, axis_c;
+                int sa, sb;
+                int len_c;
+                int c_lo;
+                int nbr;
+                std::vector<double> send;
+                std::vector<double> recv;
+            };
+            std::vector<DSlot> dslots;
+            dslots.reserve(12);
+
+            //* Unordered pairs (b > a) — each pair handles all 4 (sa, sb) corners.
+            for (int a = 0; a < 3; ++a) {
+                if (!xrank_e18[a]) continue;
+                for (int b = a + 1; b < 3; ++b) {
+                    if (!xrank_e18[b]) continue;
+                    const int c = 3 - a - b;
+                    //* c-perp range: cover c-strict + c-dup so the kernel's
+                    //* stencil reaches into c are valid. c-ghost is filled
+                    //* separately by FACE PHASE for the c axis.
+                    const int len_c = nax_e18[c] - 2;  // [1..nax-2]: strict + dup
+                    const int c_lo  = 1;
+                    if (len_c <= 0) continue;
+
+                    for (int sa : {-1, +1}) {
+                        for (int sb : {-1, +1}) {
+                            int sxyz[3] = {0, 0, 0};
+                            sxyz[a] = sa;
+                            sxyz[b] = sb;
+                            const int nbr = neighbour_at_e18(sxyz[0], sxyz[1], sxyz[2]);
+                            if (nbr == MPI_PROC_NULL || nbr == myrank) continue;
+
+                            dslots.push_back({a, b, c, sa, sb, len_c, c_lo,
+                                              nbr, {}, {}});
+                            DSlot &s = dslots.back();
+                            const int slab = n_ghost_ * n_ghost_ * len_c;
+                            s.send.resize(slab);
+                            s.recv.resize(slab);
+
+                            //* Pack: at (sa, sb) strict-near-bdry of self.
+                            //* For sa=+1: ijk[a] = nax-1-ng-offset-(ng-1-ga).
+                            //* For sa=-1: ijk[a] = ng+offset+(ng-1-ga).
+                            //* g_src(ga) = ng-1-ga. So ijk[a] = (sa==+1)
+                            //* ? nax-1-ng-offset-g_src(ga) : ng+offset+g_src(ga).
+                            int ijk[3];
+                            for (int ga = 0; ga < n_ghost_; ++ga) {
+                                ijk[a] = (sa == +1)
+                                         ? (nax_e18[a] - 1 - n_ghost_ - offset
+                                            - (n_ghost_ - 1 - ga))
+                                         : (n_ghost_ + offset
+                                            + (n_ghost_ - 1 - ga));
+                                for (int gb = 0; gb < n_ghost_; ++gb) {
+                                    ijk[b] = (sb == +1)
+                                             ? (nax_e18[b] - 1 - n_ghost_ - offset
+                                                - (n_ghost_ - 1 - gb))
+                                             : (n_ghost_ + offset
+                                                + (n_ghost_ - 1 - gb));
+                                    for (int hc = 0; hc < len_c; ++hc) {
+                                        ijk[c] = c_lo + hc;
+                                        s.send[(ga * n_ghost_ + gb) * len_c + hc] =
+                                            vector[ijk[0]][ijk[1]][ijk[2]];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::vector<MPI_Request> drqs;
+            drqs.reserve(2 * dslots.size());
+            for (DSlot &s : dslots) {
+                const int slab = n_ghost_ * n_ghost_ * s.len_c;
+                const int tag_send = detag(s.axis_a, s.axis_b,  s.sa,  s.sb);
+                const int tag_recv = detag(s.axis_a, s.axis_b, -s.sa, -s.sb);
+                drqs.emplace_back();
+                MPI_Irecv(s.recv.data(), slab, MPI_DOUBLE, s.nbr,
+                          tag_recv, comm, &drqs.back());
+                drqs.emplace_back();
+                MPI_Isend(s.send.data(), slab, MPI_DOUBLE, s.nbr,
+                          tag_send, comm, &drqs.back());
+            }
+            if (!drqs.empty())
+                MPI_Waitall(drqs.size(), drqs.data(), MPI_STATUSES_IGNORE);
+
+            //* Apply: COPY (=) into (sa, sb) ghost corner. Override the
+            //* wrong value written by the standard EDGE PHASE.
+            for (const DSlot &s : dslots) {
+                int ijk[3];
+                for (int ga = 0; ga < n_ghost_; ++ga) {
+                    ijk[s.axis_a] = (s.sa == -1) ? ga : (nax_e18[s.axis_a] - 1 - ga);
+                    for (int gb = 0; gb < n_ghost_; ++gb) {
+                        ijk[s.axis_b] = (s.sb == -1) ? gb : (nax_e18[s.axis_b] - 1 - gb);
+                        for (int hc = 0; hc < s.len_c; ++hc) {
+                            ijk[s.axis_c] = s.c_lo + hc;
+                            vector[ijk[0]][ijk[1]][ijk[2]] =
+                                s.recv[(ga * n_ghost_ + gb) * s.len_c + hc];
+                        }
+                    }
+                }
+            }
         }
 
         //* Periodic single-rank corner self-copies.

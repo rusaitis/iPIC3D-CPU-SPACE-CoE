@@ -200,6 +200,15 @@ void Collective::ReadInput(string inputfile)
         //* TSC cross-rank moment SOR (see Collective.h for details).
         CrossRankMomentSOR          = config.read<bool>("CrossRankMomentSOR", false);
 
+        //* Multi-axis corner completion pass on top of CrossRankMomentSOR.
+        MultiAxisCornerSOR          = config.read<bool>("MultiAxisCornerSOR", false);
+
+        //* Face-cell completion pass (Phase E.16) on top of CrossRankMomentSOR.
+        XrankFaceCellCompletion     = config.read<bool>("XrankFaceCellCompletion", false);
+
+        //* Diagonal Cart EDGE-corner copy (Phase E.18, see Collective.h).
+        XrankDiagonalEdgeCopy       = config.read<bool>("XrankDiagonalEdgeCopy", false);
+
         //* Cross-rank dup unification (see Collective.h).
         UnifyCrossRankDuplicates    = config.read<bool>("UnifyCrossRankDuplicates", false);
 

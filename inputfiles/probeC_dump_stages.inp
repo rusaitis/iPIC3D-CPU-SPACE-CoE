@@ -1,0 +1,82 @@
+###! Probe C: DumpMaxwellImageStages=1 at np=4 X+Y=2x2, cycle 1 first matvec.
+###! Diff rank 0 vs rank 1 dup-cell values per stage to localise where
+###! cross-rank ULP divergence first appears (curl² vs M·E).
+
+Case                           = Maxwellian
+SimulationName                 = probeC_dump_stages
+SaveDirName                    = output/probeC_dump_stages
+RestartDirName                 = output/probeC_dump_stages
+
+WriteMethod                    = shdf5
+output_data_precision          = DOUBLE
+restart_status                 = 0
+
+DiagnosticsOutputCycle         = 1
+RestartOutputCycle             = 0
+FieldOutputCycle               = 0
+ParticlesOutputCycle           = 0
+ParticlesDownsampleOutputCycle = 0
+
+nparam                         = 2
+custom_parameters              = 0.0        0.0
+
+B0x                            = 0.0
+B0y                            = 0.0
+B0z                            = 0.0097
+
+dt                             = 0.1
+ncycles                        = 2
+th                             = 0.5
+c                              = 1.0
+GMREStol                       = 1E-15
+
+Smooth                         = 0
+num_smoothings                 = 0
+SmoothCycle                    = 1
+
+StencilOrder                   = Quadratic
+MaxwellOperator                = lap_graddiv
+
+Lx                             = 12.5
+Ly                             = 12.5
+Lz                             = 3.125
+
+nxc                            = 16
+nyc                            = 16
+nzc                            = 8
+
+XLEN                           = 2
+YLEN                           = 2
+ZLEN                           = 1
+
+ns                             = 4
+rhoINIT                        = 1.0    1.0    1.0    1.0
+rhoINJECT                      = 0.0    0.0    0.0    0.0
+
+npcelx                         = 2      2      2      2
+npcely                         = 2      2      2      2
+npcelz                         = 2      2      2      2
+NpMaxNpRatio                   = 6.0
+
+qom                            = -256.0 1.0   -256.0  1.0
+
+uth                            = 0.045  0.0063 0.045  0.0063
+vth                            = 0.045  0.0063 0.045  0.0063
+wth                            = 0.045  0.0063 0.045  0.0063
+
+u0                             = 0.0    0.0    0.0    0.0
+v0                             = 0.0    0.0    0.0    0.0
+w0                             = 0.0    0.0    0.0    0.0
+
+PERIODICX                      = 1
+PERIODICY                      = 1
+PERIODICZ                      = 1
+
+SkipPeriodicSelfAddFace        = 1
+MassMatrixSumUnify             = 1
+FixNodeInterpOffset            = 1
+CrossRankMomentSOR             = 1
+UnifyCrossRankDuplicates       = 1
+
+DumpMaxwellImageStages         = 1
+DumpMaxwellImageStagesCycle    = 1

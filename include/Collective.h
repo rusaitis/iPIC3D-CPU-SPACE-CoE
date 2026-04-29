@@ -232,6 +232,9 @@ class Collective
     bool   getFixNodeInterpOffset()      const { return FixNodeInterpOffset; }
     bool   getCompletePeriodicSelfFold() const { return CompletePeriodicSelfFold; }
     bool   getCrossRankMomentSOR()       const { return CrossRankMomentSOR; }
+    bool   getMultiAxisCornerSOR()       const { return MultiAxisCornerSOR; }
+    bool   getXrankFaceCellCompletion()  const { return XrankFaceCellCompletion; }
+    bool   getXrankDiagonalEdgeCopy()    const { return XrankDiagonalEdgeCopy; }
     bool   getUnifyCrossRankDuplicates() const { return UnifyCrossRankDuplicates; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
@@ -401,6 +404,44 @@ class Collective
     //* into its strict interior using the same dst-formulas as the
     //* periodic-self fold. Default off; no-op at n_ghost=1.
     bool   CrossRankMomentSOR;
+
+    //* Multi-axis corner completion for the moment SOR. Phase E.11's diagonal
+    //* slots produce 2-rank pairwise sums at multi-rank corner cells (cells at
+    //* the intersection of two cross-rank periodic axes), where 4-rank consensus
+    //* is required. With this flag on, after the 26-slot SOR a per-axis-pair
+    //* completion pass exchanges the corner cells (a-dup ∩ b-dup, c-strict)
+    //* across the a-direction neighbour, summing the cross-rank deficit. No-op
+    //* unless n_ghost > 1 AND at least two axes are cross-rank periodic. 8-rank
+    //* corners (3 cross-rank axes meeting) are NOT closed by this pass — they
+    //* would need an additional 3-axis completion. Default off.
+    bool   MultiAxisCornerSOR;
+
+    //* Face-cell completion for the moment SOR. Phase E.11's 26-slot partition
+    //* routes only 3 of 4 contributing ranks to face cells (a-dup ∩ b-strict-near-
+    //* boundary ∩ c) where the TSC stencil reaches across two cross-rank axes.
+    //* The missing diagonal contribution comes from rank (sb=±1 along axis b).
+    //* This flag adds a per-ordered-axis-pair pass that packs raw pre-SOR values
+    //* on the (i_a = a-dup) plane at b-ghost rows and forwards them to the b-axis
+    //* neighbour, who applies them additively at its mirrored b-strict-near-boundary
+    //* rows. Pre-SOR pack timing matches Phase E.11; apply runs LAST so cells
+    //* already received their Phase E.11 + E.14 sums. Default off; v1 valid for
+    //* configurations with at most 2 cross-rank periodic axes.
+    bool   XrankFaceCellCompletion;
+
+    //* Diagonal Cart EDGE-corner halo copy for multi-axis cross-rank
+    //* (Phase E.18). The standard EDGE PHASE in `NBDerivedHaloCommN` routes
+    //* through a SINGLE-axis Cart neighbour (e.g., zEdge uses
+    //* left_neighborY/right_neighborY only). At a 2-axis cross-rank rank,
+    //* the diagonal-corner ghost cell physically lives in the (sa, sb)
+    //* DIAGONAL Cart neighbour's strict — NOT in the single-axis neighbour.
+    //* The standard write puts the wrong physical cell there, causing M·E
+    //* divergence at face dup pairs (max ~1e-3 at Mxx[0]) because the
+    //* mass-matrix kernel reads from these edge ghosts when the |offset|=2
+    //* TSC stencil reaches them. With this flag on, an additional pass
+    //* exchanges with each diagonal Cart neighbour and OVERRIDES the
+    //* standard EDGE PHASE write with the correct physical cell. Default
+    //* off; v1 covers the 2-axis cross-rank case (X+Y, X+Z, Y+Z).
+    bool   XrankDiagonalEdgeCopy;
 
     //* Cross-rank duplicate unification at MaxwellImage / unify_periodic_duplicates.
     //* On a periodic axis with multiple ranks (XLEN>1, etc.), the LO duplicate
