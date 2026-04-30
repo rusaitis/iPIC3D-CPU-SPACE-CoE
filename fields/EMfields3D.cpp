@@ -2552,47 +2552,28 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
 
     for (int m = 0; m < ne_mass_; m++)
     {
-        double ***moment_Mxx = convert_to_arr3(Mxx[m]);
-        double ***moment_Mxy = convert_to_arr3(Mxy[m]);
-        double ***moment_Mxz = convert_to_arr3(Mxz[m]);
-        double ***moment_Myx = convert_to_arr3(Myx[m]);
-        double ***moment_Myy = convert_to_arr3(Myy[m]);
-        double ***moment_Myz = convert_to_arr3(Myz[m]);
-        double ***moment_Mzx = convert_to_arr3(Mzx[m]);
-        double ***moment_Mzy = convert_to_arr3(Mzy[m]);
-        double ***moment_Mzz = convert_to_arr3(Mzz[m]);
+        //* The 9 mass-matrix components share (nxn, nyn, nzn) and are
+        //* batched into one halo call per phase. PR-A scope: per-g batching
+        //* (N=9). Cuts mass-matrix halo calls 9× — the m loop still posts
+        //* one batched halo per iteration; PR-B (N=9*ne_mass_) is a future
+        //* refinement.
+        double ***comps[9] = {
+            convert_to_arr3(Mxx[m]), convert_to_arr3(Mxy[m]), convert_to_arr3(Mxz[m]),
+            convert_to_arr3(Myx[m]), convert_to_arr3(Myy[m]), convert_to_arr3(Myz[m]),
+            convert_to_arr3(Mzx[m]), convert_to_arr3(Mzy[m]), convert_to_arr3(Mzz[m])
+        };
 
         //* Halo sum (interpolation pattern: face/edge/corner addFace into the
         //  matching interior nodes).
         if (kahan_halo) {
-            double ***mc_Mxx = convert_to_arr3(Mxx_c[m]);
-            double ***mc_Mxy = convert_to_arr3(Mxy_c[m]);
-            double ***mc_Mxz = convert_to_arr3(Mxz_c[m]);
-            double ***mc_Myx = convert_to_arr3(Myx_c[m]);
-            double ***mc_Myy = convert_to_arr3(Myy_c[m]);
-            double ***mc_Myz = convert_to_arr3(Myz_c[m]);
-            double ***mc_Mzx = convert_to_arr3(Mzx_c[m]);
-            double ***mc_Mzy = convert_to_arr3(Mzy_c[m]);
-            double ***mc_Mzz = convert_to_arr3(Mzz_c[m]);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Mxx, mc_Mxx, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Mxy, mc_Mxy, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Mxz, mc_Mxz, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Myx, mc_Myx, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Myy, mc_Myy, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Myz, mc_Myz, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Mzx, mc_Mzx, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Mzy, mc_Mzy, vct, this);
-            communicateInterp_kahan(nxn, nyn, nzn, moment_Mzz, mc_Mzz, vct, this);
+            double ***comps_c[9] = {
+                convert_to_arr3(Mxx_c[m]), convert_to_arr3(Mxy_c[m]), convert_to_arr3(Mxz_c[m]),
+                convert_to_arr3(Myx_c[m]), convert_to_arr3(Myy_c[m]), convert_to_arr3(Myz_c[m]),
+                convert_to_arr3(Mzx_c[m]), convert_to_arr3(Mzy_c[m]), convert_to_arr3(Mzz_c[m])
+            };
+            communicateInterp_multi_kahan(nxn, nyn, nzn, 9, comps, comps_c, vct, this);
         } else {
-            communicateInterp(nxn, nyn, nzn, moment_Mxx, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Mxy, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Mxz, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Myx, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Myy, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Myz, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Mzx, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Mzy, vct, this);
-            communicateInterp(nxn, nyn, nzn, moment_Mzz, vct, this);
+            communicateInterp_multi(nxn, nyn, nzn, 9, comps, vct, this);
         }
 
         //* Stage 1 — after communicateInterp (addFace sum-on-receive merged
@@ -2600,31 +2581,23 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         //* still hold raw deposit values; copy halo not yet run.
         if (dump_stages && m == 0)
         {
-            arr3_double a_xx(moment_Mxx, nxn, nyn, nzn);
-            arr3_double a_yy(moment_Myy, nxn, nyn, nzn);
-            arr3_double a_zz(moment_Mzz, nxn, nyn, nzn);
+            arr3_double a_xx(comps[0], nxn, nyn, nzn);
+            arr3_double a_yy(comps[4], nxn, nyn, nzn);
+            arr3_double a_zz(comps[8], nxn, nyn, nzn);
             dump_maxwell_stage("Mstage1_post_addFace", a_xx, a_yy, a_zz);
         }
 
         //* Populate the ghost layers (no sum-on-receive, just copy from interior).
-        communicateNode_P(nxn, nyn, nzn, moment_Mxx, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Mxy, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Mxz, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Myx, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Myy, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Myz, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Mzx, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Mzy, vct, this);
-        communicateNode_P(nxn, nyn, nzn, moment_Mzz, vct, this);
+        communicateNode_P_multi(nxn, nyn, nzn, 9, comps, vct, this);
 
         //* Stage 2 — after communicateNode_P (ghost layers copied from interior).
         //* Pre-unify: LO and HI duplicates may differ if gather scatter went
         //* asymmetrically.
         if (dump_stages && m == 0)
         {
-            arr3_double a_xx(moment_Mxx, nxn, nyn, nzn);
-            arr3_double a_yy(moment_Myy, nxn, nyn, nzn);
-            arr3_double a_zz(moment_Mzz, nxn, nyn, nzn);
+            arr3_double a_xx(comps[0], nxn, nyn, nzn);
+            arr3_double a_yy(comps[4], nxn, nyn, nzn);
+            arr3_double a_zz(comps[8], nxn, nyn, nzn);
             dump_maxwell_stage("Mstage2_post_selfcopy", a_xx, a_yy, a_zz);
         }
     }

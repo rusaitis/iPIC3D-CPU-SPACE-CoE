@@ -105,6 +105,19 @@ void communicateInterp_kahan(int nx, int ny, int nz, double*** vector, double***
 void communicateInterp_kahan(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c,
                              const VirtualTopology3D * vct, EMfields3D *EMf);
 
+//* Multi-field batched halo wrappers. `vectors` is an array of `n_fields`
+//* pointers to 3D arrays sharing the same (nx, ny, nz) extents and Cart
+//* topology. At n_ghost > 1 (TSC) all fields exchange in one batched MPI
+//* message per direction; at n_ghost == 1 (CIC) the wrappers fall back to
+//* looping the single-field legacy path.
+void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
+                              const VirtualTopology3D *vct, EMfields3D *EMf);
+void communicateInterp_multi_kahan(int nx, int ny, int nz, int n_fields,
+                                    double ****vectors, double ****vectors_c,
+                                    const VirtualTopology3D *vct, EMfields3D *EMf);
+void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
+                              const VirtualTopology3D *vct, EMfields3D *EMf);
+
 void communicateNode_P_old(int nx, int ny, int nz, int ns, double ****vector, const VirtualTopology3D *vct, EMfields3D *EMf);
 // void communicateInterp(int nx, int ny, int nz, double ****vector, int ns, const VirtualTopology3D * vct);
 void communicateInterp_old(int nx, int ny, int nz, int ns, double ****vector, 

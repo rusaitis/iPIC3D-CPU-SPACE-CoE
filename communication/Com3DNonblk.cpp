@@ -23,10 +23,19 @@
 #include "Collective.h"
 
 //* Forward declaration of the n_ghost > 1 helper (definition further down).
-static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
+//* Multi-field signature: `vectors` is an array of `n_fields` pointers to
+//* 3D field arrays sharing the same (nx, ny, nz) extents and same MPI
+//* topology. All N fields are exchanged in one batched MPI message per
+//* direction (slab × N_fields doubles). At n_fields=1 this is bit-
+//* identical to the legacy single-field path. Optional `vectors_c`
+//* (Kahan companions) follows the same shape — pass nullptr for legacy
+//* COPY semantics, or a non-null array of N companion pointers to
+//* enable Neumaier compensation in the trailing addFace at n_ghost=1.
+static void NBDerivedHaloCommN(int nx, int ny, int nz,
+                                int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
                                 bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
-                                double ***vector_c = nullptr);
+                                double ****vectors_c = nullptr);
 
 //* forward declarations of the Kahan-compensated sum-on-receive
 //* helpers (definitions near the legacy `addFace`/`addEdge*`/`addCorner`
@@ -49,9 +58,18 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 {
     //* Wider ghost-slab path goes through the loop-based helper. n_ghost == 1
     //* falls through to the legacy merged-datatype fast path below.
+    //* Wrap the single-field pointer in a 1-element array so the
+    //* multi-field helper (NBDerivedHaloCommN) sees vectors[0] = vector.
     if (EMf->getNGhost() > 1) {
-        NBDerivedHaloCommN(nx, ny, nz, vector, vct, EMf,
-                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vector_c);
+        double*** vectors[1] = {vector};
+        if (vector_c != nullptr) {
+            double*** vectors_c[1] = {vector_c};
+            NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
+                               isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vectors_c);
+        } else {
+            NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
+                               isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, nullptr);
+        }
         return;
     }
 
@@ -592,6 +610,97 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 
 
 //! ================================================================================
+//* HaloContext: state computed once per NBDerivedHaloCommN call, shared by the
+//* (future) multi-field variant. Holds n_ghost, the MPI communicator, the
+//* per-axis neighbour ranks, the Cartesian topology coords/dims/periods,
+//* and the offset/isCenterDim derived from the call's flags. Carries the
+//* two helpers (g_src and neighbour_at) as methods so the multi-field
+//* path can reuse them.
+//! ================================================================================
+namespace {
+
+struct HaloContext {
+    int n_ghost;
+    MPI_Comm comm;
+    int myrank;
+
+    //* Neighbour ranks, indexed: 0=Xleft 1=Xright 2=Yleft 3=Yright 4=Zleft 5=Zright.
+    int neighbours[6];
+    int communicationCnt[6];
+
+    //* Cartesian topology cache (single MPI_Cart_get).
+    int my_coords[3];
+    int dims[3];
+    int periods[3];
+    bool any_xrank_periodic;
+
+    //* Field semantics.
+    bool isCenterDim;
+    int  offset;
+
+    //* Periodic-self flags: axis is periodic and decomposition along axis = 1.
+    bool ps_x_self, ps_y_self, ps_z_self;
+
+    //* Periodic-self ghost-source remap, no-op at n_ghost=1.
+    int g_src(int g) const { return n_ghost - 1 - g; }
+
+    //* Cart-neighbour lookup with periodic wrap. Returns MPI_PROC_NULL on
+    //* non-periodic out-of-range, myrank when the neighbour wraps to self.
+    int neighbour_at(int sx, int sy, int sz) const {
+        int nbr[3] = {my_coords[0] + sx, my_coords[1] + sy, my_coords[2] + sz};
+        for (int d = 0; d < 3; ++d) {
+            if (nbr[d] < 0 || nbr[d] >= dims[d]) {
+                if (!periods[d]) return MPI_PROC_NULL;
+                nbr[d] = (nbr[d] % dims[d] + dims[d]) % dims[d];
+            }
+        }
+        int r;
+        MPI_Cart_rank(comm, nbr, &r);
+        return r;
+    }
+};
+
+static HaloContext make_halo_context(EMfields3D *EMf,
+                                      const VirtualTopology3D *vct,
+                                      bool isCenterFlag, bool needInterp,
+                                      bool isParticle)
+{
+    HaloContext ctx;
+    ctx.n_ghost = EMf->getNGhost();
+    ctx.comm    = isParticle ? vct->getParticleComm() : vct->getFieldComm();
+    ctx.myrank  = vct->getCartesian_rank();
+
+    ctx.neighbours[0] = isParticle ? vct->getXleft_neighbor_P()  : vct->getXleft_neighbor();
+    ctx.neighbours[1] = isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
+    ctx.neighbours[2] = isParticle ? vct->getYleft_neighbor_P()  : vct->getYleft_neighbor();
+    ctx.neighbours[3] = isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
+    ctx.neighbours[4] = isParticle ? vct->getZleft_neighbor_P()  : vct->getZleft_neighbor();
+    ctx.neighbours[5] = isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
+
+    for (int i = 0; i < 6; ++i) {
+        ctx.communicationCnt[i] =
+            (ctx.neighbours[i] != MPI_PROC_NULL && ctx.neighbours[i] != ctx.myrank) ? 1 : 0;
+    }
+
+    MPI_Cart_get(ctx.comm, 3, ctx.dims, ctx.periods, ctx.my_coords);
+    ctx.any_xrank_periodic =
+        (ctx.periods[0] && ctx.dims[0] > 1) ||
+        (ctx.periods[1] && ctx.dims[1] > 1) ||
+        (ctx.periods[2] && ctx.dims[2] > 1);
+
+    ctx.isCenterDim = (isCenterFlag && !needInterp);
+    ctx.offset      = ctx.isCenterDim ? 0 : 1;
+
+    ctx.ps_x_self = (ctx.neighbours[0] == ctx.myrank && ctx.neighbours[1] == ctx.myrank);
+    ctx.ps_y_self = (ctx.neighbours[2] == ctx.myrank && ctx.neighbours[3] == ctx.myrank);
+    ctx.ps_z_self = (ctx.neighbours[4] == ctx.myrank && ctx.neighbours[5] == ctx.myrank);
+
+    return ctx;
+}
+
+}  // namespace
+
+//! ================================================================================
 //  NBDerivedHaloCommN: wider ghost-slab variant of NBDerivedHaloComm.
 //
 //  Used when grid->getNGhost() > 1. Each layer of the n_ghost-thick ghost slab
@@ -607,14 +716,29 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
 //    is NOT widened here — for n_ghost > 1 the per-species moment halo sum
 //    routes through the 3D modern exchange.
 //! ================================================================================
-static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
+static void NBDerivedHaloCommN(int nx, int ny, int nz,
+                                int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
                                 bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
-                                double ***vector_c)
+                                double ****vectors_c)
 {
-    const int n_ghost_ = EMf->getNGhost();
+    //* Single-source-of-truth halo state. Holds n_ghost, comm, neighbour
+    //* ranks, Cartesian topology coords/dims/periods, the pre-resolved
+    //* face/edge MPI datatypes, the offset, and the periodic-self flags.
+    //* Below we alias the struct members back to the legacy local-variable
+    //* names so the rest of this function (and the per-axis pre-passes)
+    //* read unchanged.
+    const HaloContext _ctx = make_halo_context(EMf, vct, isCenterFlag, needInterp, isParticle);
 
-    const MPI_Comm comm = isParticle ? vct->getParticleComm() : vct->getFieldComm();
+    //* NOTE: this routine is multi-field (handles N fields per call).
+    //* Each pack/unpack/sum-on-receive/self-copy section below loops
+    //* over [0, n_fields) and indexes vectors[f] / vectors_c[f]. Buffer
+    //* sizes scale by n_fields; per-direction MPI message granularity
+    //* stays at one message per direction with payload N × slab_size
+    //* doubles.
+
+    const int      n_ghost_ = _ctx.n_ghost;
+    const MPI_Comm comm     = _ctx.comm;
     #ifdef DEBUG
         MPI_Errhandler_set(comm, MPI_ERRORS_RETURN);
     #endif
@@ -624,33 +748,19 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     static const int MAX_REQS = 512;
     MPI_Status  stat[MAX_REQS];
     MPI_Request reqList[MAX_REQS];
-    int communicationCnt[6] = {0,0,0,0,0,0};
     int recvcnt = 0, sendcnt = 0;
 
     const int tag_XL=1,tag_YL=2,tag_ZL=3,tag_XR=4,tag_YR=5,tag_ZR=6;
-    const int myrank = vct->getCartesian_rank();
-    const int right_neighborX = isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
-    const int left_neighborX  = isParticle ? vct->getXleft_neighbor_P()  : vct->getXleft_neighbor();
-    const int right_neighborY = isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
-    const int left_neighborY  = isParticle ? vct->getYleft_neighbor_P()  : vct->getYleft_neighbor();
-    const int right_neighborZ = isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
-    const int left_neighborZ  = isParticle ? vct->getZleft_neighbor_P()  : vct->getZleft_neighbor();
+    const int myrank          = _ctx.myrank;
+    const int left_neighborX  = _ctx.neighbours[0];
+    const int right_neighborX = _ctx.neighbours[1];
+    const int left_neighborY  = _ctx.neighbours[2];
+    const int right_neighborY = _ctx.neighbours[3];
+    const int left_neighborZ  = _ctx.neighbours[4];
+    const int right_neighborZ = _ctx.neighbours[5];
 
-    const bool isCenterDim = (isCenterFlag && !needInterp);
-
-    const MPI_Datatype yzFacetype = EMf->getYZFacetype(isCenterDim);
-    const MPI_Datatype xzFacetype = EMf->getXZFacetype(isCenterDim);
-    const MPI_Datatype xyFacetype = EMf->getXYFacetype(isCenterDim);
-    const MPI_Datatype xEdgetype  = EMf->getXEdgetype(isCenterDim);
-    const MPI_Datatype yEdgetype  = EMf->getYEdgetype(isCenterDim);
-    const MPI_Datatype zEdgetype  = EMf->getZEdgetype(isCenterDim);
-
-    if (left_neighborX  != MPI_PROC_NULL && left_neighborX  != myrank) communicationCnt[0] = 1;
-    if (right_neighborX != MPI_PROC_NULL && right_neighborX != myrank) communicationCnt[1] = 1;
-    if (left_neighborY  != MPI_PROC_NULL && left_neighborY  != myrank) communicationCnt[2] = 1;
-    if (right_neighborY != MPI_PROC_NULL && right_neighborY != myrank) communicationCnt[3] = 1;
-    if (left_neighborZ  != MPI_PROC_NULL && left_neighborZ  != myrank) communicationCnt[4] = 1;
-    if (right_neighborZ != MPI_PROC_NULL && right_neighborZ != myrank) communicationCnt[5] = 1;
+    int communicationCnt[6];
+    for (int i = 0; i < 6; ++i) communicationCnt[i] = _ctx.communicationCnt[i];
 
     //* Interior/boundary offset: centers use offset = 0 (no shared node);
     //  nodes use offset = 1 (ghost receives "one node deeper" than the
@@ -658,12 +768,12 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  the interior). The moment-interp path (isCenterFlag=true,
     //  needInterp=true) actually carries node data, so we take offset
     //  from isCenterDim — which already filters needInterp out.
-    const int offset = isCenterDim ? 0 : 1;
+    const int offset = _ctx.offset;
 
     //* Periodic-self ghost-source remap: substitute g → (n_ghost-1-g) so
     //  the OUTERMOST ghost (g=0) holds the value FURTHEST from the active
     //  interior. No-op at n_ghost=1.
-    auto g_src = [&](int g) { return n_ghost_ - 1 - g; };
+    auto g_src = [&](int g) { return _ctx.g_src(g); };
 
     //! ============================================================
     //* CROSS-RANK MOMENT SOR PRE-PASS (faces + edges + corners)
@@ -694,38 +804,16 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  Strict no-op at n_ghost=1
     //  and at periodic-self axes (Cartesian neighbour wraps to self).
     //! ============================================================
-    //* Resolve Cartesian topology + neighbour-at helper. Loaded once per
-    //* call (was being re-done by both the SOR pre-pass and the
-    //* XrankDiagonalEdgeCopy block). periods[] and dims[] make the wrap
-    //* explicit so periodic-self axes reduce to "neighbour == myrank"
-    //* and get filtered out cleanly.
-    int my_coords[3], dims[3], periods[3];
-    MPI_Cart_get(comm, 3, dims, periods, my_coords);
-
-    //* Cart-neighbour lookup. Declared at function scope so the SOR
-    //* pre-pass AND the XrankDiagonalEdgeCopy block both call the same
-    //* lambda.
+    //* Cartesian topology + neighbour-at helper come from _ctx (one
+    //* MPI_Cart_get per call, reused across the SOR pre-pass and the
+    //* XrankDiagonalEdgeCopy block). Aliased to the legacy names below.
+    const int* my_coords = _ctx.my_coords;
+    const int* dims      = _ctx.dims;
+    const int* periods   = _ctx.periods;
     auto neighbour_at = [&](int sx, int sy, int sz) -> int {
-        int nbr[3] = {my_coords[0] + sx, my_coords[1] + sy, my_coords[2] + sz};
-        for (int d = 0; d < 3; ++d) {
-            if (nbr[d] < 0 || nbr[d] >= dims[d]) {
-                if (!periods[d]) return MPI_PROC_NULL;
-                nbr[d] = (nbr[d] % dims[d] + dims[d]) % dims[d];
-            }
-        }
-        int r;
-        MPI_Cart_rank(comm, nbr, &r);
-        return r;
+        return _ctx.neighbour_at(sx, sy, sz);
     };
-
-    //* Cross-rank periodic axis check: SOR pre-pass + multi-axis completion
-    //* passes are pure no-ops at np=1 (neighbours all == myrank) and at
-    //* configs with no cross-rank periodic axis. Skip the bookkeeping when
-    //* none exists so 1000+ halo calls per cycle don't pay the iterate-
-    //* then-skip cost on small / single-axis decompositions.
-    const bool any_xrank_periodic =
-        (periods[0] && dims[0] > 1) || (periods[1] && dims[1] > 1)
-                                    || (periods[2] && dims[2] > 1);
+    const bool any_xrank_periodic = _ctx.any_xrank_periodic;
 
     if (needInterp && n_ghost_ > 1 && any_xrank_periodic) {
 
@@ -790,15 +878,21 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             slots.push_back({sx, sy, sz, nbr, lx, ly, lz, {}, {}});
             ExchSlot &s = slots.back();
             const int slab = lx * ly * lz;
-            s.send.resize(slab);
-            s.recv.resize(slab);
-            for (int hx = 0; hx < lx; ++hx) {
-                const int ix = src_idx(sx, nx, hx);
-                for (int hy = 0; hy < ly; ++hy) {
-                    const int iy = src_idx(sy, ny, hy);
-                    for (int hz = 0; hz < lz; ++hz) {
-                        const int iz = src_idx(sz, nz, hz);
-                        s.send[(hx * ly + hy) * lz + hz] = vector[ix][iy][iz];
+            s.send.resize(n_fields * slab);
+            s.recv.resize(n_fields * slab);
+            //* Field-major pack: buf[f*slab + (hx*ly+hy)*lz+hz]. Both
+            //* ranks pack/unpack in this order so the corresponding
+            //* neighbour's slot reads matching doubles into matching
+            //* cells.
+            for (int f = 0; f < n_fields; ++f) {
+                for (int hx = 0; hx < lx; ++hx) {
+                    const int ix = src_idx(sx, nx, hx);
+                    for (int hy = 0; hy < ly; ++hy) {
+                        const int iy = src_idx(sy, ny, hy);
+                        for (int hz = 0; hz < lz; ++hz) {
+                            const int iz = src_idx(sz, nz, hz);
+                            s.send[f * slab + (hx * ly + hy) * lz + hz] = vectors[f][ix][iy][iz];
+                        }
                     }
                 }
             }
@@ -807,13 +901,13 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         std::vector<MPI_Request> rqs;
         rqs.reserve(2 * slots.size());
         for (ExchSlot &s : slots) {
-            const int slab = s.lx * s.ly * s.lz;
+            const int slab_total = n_fields * s.lx * s.ly * s.lz;
             const int tag_send = encode_tag( s.sx,  s.sy,  s.sz);
             const int tag_recv = encode_tag(-s.sx, -s.sy, -s.sz);
             rqs.emplace_back();
-            MPI_Irecv(s.recv.data(), slab, MPI_DOUBLE, s.nbr, tag_recv, comm, &rqs.back());
+            MPI_Irecv(s.recv.data(), slab_total, MPI_DOUBLE, s.nbr, tag_recv, comm, &rqs.back());
             rqs.emplace_back();
-            MPI_Isend(s.send.data(), slab, MPI_DOUBLE, s.nbr, tag_send, comm, &rqs.back());
+            MPI_Isend(s.send.data(), slab_total, MPI_DOUBLE, s.nbr, tag_send, comm, &rqs.back());
         }
         if (!rqs.empty()) MPI_Waitall(rqs.size(), rqs.data(), MPI_STATUSES_IGNORE);
 
@@ -824,13 +918,16 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //* (-s.sx,-s.sy,-s.sz) returns: LO strict + LO dup for sd=-1,
         //* HI strict + HI dup for sd=+1, strict perpendicular for sd=0.
         for (const ExchSlot &s : slots) {
-            for (int hx = 0; hx < s.lx; ++hx) {
-                const int ix = dst_idx(-s.sx, nx, hx);
-                for (int hy = 0; hy < s.ly; ++hy) {
-                    const int iy = dst_idx(-s.sy, ny, hy);
-                    for (int hz = 0; hz < s.lz; ++hz) {
-                        const int iz = dst_idx(-s.sz, nz, hz);
-                        vector[ix][iy][iz] += s.recv[(hx * s.ly + hy) * s.lz + hz];
+            const int slab = s.lx * s.ly * s.lz;
+            for (int f = 0; f < n_fields; ++f) {
+                for (int hx = 0; hx < s.lx; ++hx) {
+                    const int ix = dst_idx(-s.sx, nx, hx);
+                    for (int hy = 0; hy < s.ly; ++hy) {
+                        const int iy = dst_idx(-s.sy, ny, hy);
+                        for (int hz = 0; hz < s.lz; ++hz) {
+                            const int iz = dst_idx(-s.sz, nz, hz);
+                            vectors[f][ix][iy][iz] += s.recv[f * slab + (hx * s.ly + hy) * s.lz + hz];
+                        }
                     }
                 }
             }
@@ -930,17 +1027,19 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                             cslots.push_back({a, b, c, sa, dup_side, dup_b,
                                               len_c, c_lo, nbr, {}, {}});
                             CSlot &s = cslots.back();
-                            s.send.resize(len_c);
-                            s.recv.resize(len_c);
+                            s.send.resize(n_fields * len_c);
+                            s.recv.resize(n_fields * len_c);
                             const int idx_a = (sa == -1)
                                               ? n_ghost_
                                               : (nax[a] - n_ghost_ - 1);
                             int ijk[3];
                             ijk[a] = idx_a;
                             ijk[b] = dup_b;
-                            for (int hc = 0; hc < len_c; ++hc) {
-                                ijk[c] = c_lo + hc;
-                                s.send[hc] = vector[ijk[0]][ijk[1]][ijk[2]];
+                            for (int f = 0; f < n_fields; ++f) {
+                                for (int hc = 0; hc < len_c; ++hc) {
+                                    ijk[c] = c_lo + hc;
+                                    s.send[f * len_c + hc] = vectors[f][ijk[0]][ijk[1]][ijk[2]];
+                                }
                             }
                         }
                     }
@@ -950,13 +1049,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             std::vector<MPI_Request> crqs;
             crqs.reserve(2 * cslots.size());
             for (CSlot &s : cslots) {
+                const int n = n_fields * s.len_c;
                 const int tag_send = ctag(s.axis_a,  s.sa, s.axis_b, s.dup_side);
                 const int tag_recv = ctag(s.axis_a, -s.sa, s.axis_b, s.dup_side);
                 crqs.emplace_back();
-                MPI_Irecv(s.recv.data(), s.len_c, MPI_DOUBLE, s.nbr,
+                MPI_Irecv(s.recv.data(), n, MPI_DOUBLE, s.nbr,
                           tag_recv, comm, &crqs.back());
                 crqs.emplace_back();
-                MPI_Isend(s.send.data(), s.len_c, MPI_DOUBLE, s.nbr,
+                MPI_Isend(s.send.data(), n, MPI_DOUBLE, s.nbr,
                           tag_send, comm, &crqs.back());
             }
             if (!crqs.empty())
@@ -977,9 +1077,11 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                 int ijk[3];
                 ijk[s.axis_a] = idx_a;
                 ijk[s.axis_b] = s.dup_b;
-                for (int hc = 0; hc < s.len_c; ++hc) {
-                    ijk[s.axis_c] = s.c_lo + hc;
-                    vector[ijk[0]][ijk[1]][ijk[2]] += s.recv[hc];
+                for (int f = 0; f < n_fields; ++f) {
+                    for (int hc = 0; hc < s.len_c; ++hc) {
+                        ijk[s.axis_c] = s.c_lo + hc;
+                        vectors[f][ijk[0]][ijk[1]][ijk[2]] += s.recv[f * s.len_c + hc];
+                    }
                 }
             }
         }
@@ -1074,16 +1176,18 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                                               len_c, c_lo, nbr, {}, {}});
                             FSlot &s = fslots.back();
                             const int slab = n_ghost_ * len_c;
-                            s.send.resize(slab);
-                            s.recv.resize(slab);
+                            s.send.resize(n_fields * slab);
+                            s.recv.resize(n_fields * slab);
                             int ijk[3];
                             ijk[a] = idx_a;
-                            for (int h_b = 0; h_b < n_ghost_; ++h_b) {
-                                ijk[b] = src_idx(sb, nax[b], h_b);
-                                for (int hc = 0; hc < len_c; ++hc) {
-                                    ijk[c] = c_lo + hc;
-                                    s.send[h_b * len_c + hc] =
-                                        vector[ijk[0]][ijk[1]][ijk[2]];
+                            for (int f = 0; f < n_fields; ++f) {
+                                for (int h_b = 0; h_b < n_ghost_; ++h_b) {
+                                    ijk[b] = src_idx(sb, nax[b], h_b);
+                                    for (int hc = 0; hc < len_c; ++hc) {
+                                        ijk[c] = c_lo + hc;
+                                        s.send[f * slab + h_b * len_c + hc] =
+                                            vectors[f][ijk[0]][ijk[1]][ijk[2]];
+                                    }
                                 }
                             }
                         }
@@ -1094,14 +1198,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             std::vector<MPI_Request> frqs;
             frqs.reserve(2 * fslots.size());
             for (FSlot &s : fslots) {
-                const int slab = n_ghost_ * s.len_c;
+                const int n = n_fields * n_ghost_ * s.len_c;
                 const int tag_send = ftag(s.axis_a, s.axis_b, s.sa_side,  s.sb);
                 const int tag_recv = ftag(s.axis_a, s.axis_b, s.sa_side, -s.sb);
                 frqs.emplace_back();
-                MPI_Irecv(s.recv.data(), slab, MPI_DOUBLE, s.nbr,
+                MPI_Irecv(s.recv.data(), n, MPI_DOUBLE, s.nbr,
                           tag_recv, comm, &frqs.back());
                 frqs.emplace_back();
-                MPI_Isend(s.send.data(), slab, MPI_DOUBLE, s.nbr,
+                MPI_Isend(s.send.data(), n, MPI_DOUBLE, s.nbr,
                           tag_send, comm, &frqs.back());
             }
             if (!frqs.empty())
@@ -1117,14 +1221,17 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                 const int idx_a = (s.sa_side == 0)
                                   ? n_ghost_
                                   : (nax[s.axis_a] - n_ghost_ - 1);
+                const int slab = n_ghost_ * s.len_c;
                 int ijk[3];
                 ijk[s.axis_a] = idx_a;
-                for (int h_b = 0; h_b < n_ghost_; ++h_b) {
-                    ijk[s.axis_b] = dst_idx(-s.sb, nax[s.axis_b], h_b);
-                    for (int hc = 0; hc < s.len_c; ++hc) {
-                        ijk[s.axis_c] = s.c_lo + hc;
-                        vector[ijk[0]][ijk[1]][ijk[2]] +=
-                            s.recv[h_b * s.len_c + hc];
+                for (int f = 0; f < n_fields; ++f) {
+                    for (int h_b = 0; h_b < n_ghost_; ++h_b) {
+                        ijk[s.axis_b] = dst_idx(-s.sb, nax[s.axis_b], h_b);
+                        for (int hc = 0; hc < s.len_c; ++hc) {
+                            ijk[s.axis_c] = s.c_lo + hc;
+                            vectors[f][ijk[0]][ijk[1]][ijk[2]] +=
+                                s.recv[f * slab + h_b * s.len_c + hc];
+                        }
                     }
                 }
             }
@@ -1132,166 +1239,273 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     }
 
     //! ============================================================
-    //  FACE PHASE
-    //  Each of the 6 face directions exchanges n_ghost slab layers.
+    //  FACE PHASE — manual pack / unpack at N=1.
+    //  Each of the 6 face directions exchanges n_ghost slab layers,
+    //  batched into one MPI message per direction (vs n_ghost messages
+    //  with the strided yzFacetype/xzFacetype/xyFacetype types this
+    //  block used to call). Bit-identical end state: same doubles in
+    //  same destination cells. Manual pack/unpack also closes the
+    //  E.20 race window structurally — Irecv targets a contiguous
+    //  recv buffer rather than vector[g] directly, so periodic-self
+    //  self-copies and sum-on-receive read vector untouched until the
+    //  Waitall+unpack pair below. The (future) multi-field variant
+    //  batches N field slabs into the same per-direction buffer.
     //! ============================================================
-    for (int g = 0; g < n_ghost_; g++) {
-        if (communicationCnt[0])
-            MPI_Irecv(&vector[g][1][1],       1, yzFacetype, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
-        if (communicationCnt[1])
-            MPI_Irecv(&vector[nx-1-g][1][1],  1, yzFacetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
-        if (communicationCnt[2])
-            MPI_Irecv(&vector[1][g][1],       1, xzFacetype, left_neighborY,  tag_YR, comm, &reqList[recvcnt++]);
-        if (communicationCnt[3])
-            MPI_Irecv(&vector[1][ny-1-g][1],  1, xzFacetype, right_neighborY, tag_YL, comm, &reqList[recvcnt++]);
-        if (communicationCnt[4])
-            MPI_Irecv(&vector[1][1][g],       1, xyFacetype, left_neighborZ,  tag_ZR, comm, &reqList[recvcnt++]);
-        if (communicationCnt[5])
-            MPI_Irecv(&vector[1][1][nz-1-g],  1, xyFacetype, right_neighborZ, tag_ZL, comm, &reqList[recvcnt++]);
+    const int yz_per_layer = (ny - 2) * (nz - 2);
+    const int xz_per_layer = (nx - 2) * (nz - 2);
+    const int xy_per_layer = (nx - 2) * (ny - 2);
+    const int per_layer[6] = {
+        yz_per_layer, yz_per_layer,
+        xz_per_layer, xz_per_layer,
+        xy_per_layer, xy_per_layer
+    };
+    const int neighbours_arr[6] = {
+        left_neighborX, right_neighborX,
+        left_neighborY, right_neighborY,
+        left_neighborZ, right_neighborZ
+    };
+    const int recv_tags[6] = {tag_XR, tag_XL, tag_YR, tag_YL, tag_ZR, tag_ZL};
+    const int send_tags[6] = {tag_XL, tag_XR, tag_YL, tag_YR, tag_ZL, tag_ZR};
+
+    //* Per-direction batched buffer = n_fields × n_ghost × per_layer doubles.
+    //* Layout: field-major outer (f) → layer (g) → cell (j,k or i,k or i,j).
+    std::vector<double> face_send_bufs[6];
+    std::vector<double> face_recv_bufs[6];
+    for (int d = 0; d < 6; ++d) {
+        if (!communicationCnt[d]) continue;
+        face_send_bufs[d].resize(n_fields * n_ghost_ * per_layer[d]);
+        face_recv_bufs[d].resize(n_fields * n_ghost_ * per_layer[d]);
+    }
+
+    //* Pack a yz / xz / xy face slab (fixed coord on the named axis,
+    //* strict-interior on the other two) into a contiguous buffer for one
+    //* field. Iteration order matches the strided MPI types (j,k for yz;
+    //* i,k for xz; i,j for xy) so the receiver's unpack lands the same
+    //* doubles in the same cells.
+    auto pack_yz = [&](int f, int ix, double* buf) {
+        int idx = 0;
+        for (int j = 1; j <= ny - 2; ++j)
+            for (int k = 1; k <= nz - 2; ++k)
+                buf[idx++] = vectors[f][ix][j][k];
+    };
+    auto unpack_yz_copy = [&](int f, int ix, const double* buf) {
+        int idx = 0;
+        for (int j = 1; j <= ny - 2; ++j)
+            for (int k = 1; k <= nz - 2; ++k)
+                vectors[f][ix][j][k] = buf[idx++];
+    };
+    auto pack_xz = [&](int f, int iy, double* buf) {
+        int idx = 0;
+        for (int i = 1; i <= nx - 2; ++i)
+            for (int k = 1; k <= nz - 2; ++k)
+                buf[idx++] = vectors[f][i][iy][k];
+    };
+    auto unpack_xz_copy = [&](int f, int iy, const double* buf) {
+        int idx = 0;
+        for (int i = 1; i <= nx - 2; ++i)
+            for (int k = 1; k <= nz - 2; ++k)
+                vectors[f][i][iy][k] = buf[idx++];
+    };
+    auto pack_xy = [&](int f, int iz, double* buf) {
+        int idx = 0;
+        for (int i = 1; i <= nx - 2; ++i)
+            for (int j = 1; j <= ny - 2; ++j)
+                buf[idx++] = vectors[f][i][j][iz];
+    };
+    auto unpack_xy_copy = [&](int f, int iz, const double* buf) {
+        int idx = 0;
+        for (int i = 1; i <= nx - 2; ++i)
+            for (int j = 1; j <= ny - 2; ++j)
+                vectors[f][i][j][iz] = buf[idx++];
+    };
+
+    //* Pack send buffers from strict-interior cells. Same g_src(g) =
+    //  (n_ghost-1-g) source-depth swap as the legacy MPI-types path so
+    //  the receiver's outermost ghost (g=0) gets the deepest-interior
+    //  source — no-op at n_ghost=1; swaps the two layers at n_ghost=2.
+    //  Field-major: f-block of size (n_ghost × per_layer) per field.
+    for (int f = 0; f < n_fields; ++f) {
+        for (int g = 0; g < n_ghost_; ++g) {
+            const int s = g_src(g);
+            if (communicationCnt[0])
+                pack_yz(f, n_ghost_ + offset + s,
+                        face_send_bufs[0].data() + (f * n_ghost_ + g) * yz_per_layer);
+            if (communicationCnt[1])
+                pack_yz(f, nx - 1 - n_ghost_ - offset - s,
+                        face_send_bufs[1].data() + (f * n_ghost_ + g) * yz_per_layer);
+            if (communicationCnt[2])
+                pack_xz(f, n_ghost_ + offset + s,
+                        face_send_bufs[2].data() + (f * n_ghost_ + g) * xz_per_layer);
+            if (communicationCnt[3])
+                pack_xz(f, ny - 1 - n_ghost_ - offset - s,
+                        face_send_bufs[3].data() + (f * n_ghost_ + g) * xz_per_layer);
+            if (communicationCnt[4])
+                pack_xy(f, n_ghost_ + offset + s,
+                        face_send_bufs[4].data() + (f * n_ghost_ + g) * xy_per_layer);
+            if (communicationCnt[5])
+                pack_xy(f, nz - 1 - n_ghost_ - offset - s,
+                        face_send_bufs[5].data() + (f * n_ghost_ + g) * xy_per_layer);
+        }
+    }
+
+    //* Post Irecv (into recv buffers) + Isend (from send buffers).
+    //  One MPI message per direction carrying n_fields × n_ghost layers concatenated.
+    for (int d = 0; d < 6; ++d) {
+        if (!communicationCnt[d]) continue;
+        const int n = n_fields * n_ghost_ * per_layer[d];
+        MPI_Irecv(face_recv_bufs[d].data(), n, MPI_DOUBLE, neighbours_arr[d],
+                  recv_tags[d], comm, &reqList[recvcnt++]);
     }
     sendcnt = recvcnt;
-    //* Send-side ghost-layer pairing. Receiver puts incoming layer g into
-    //  ghost slot g where g=0 is OUTERMOST. The outermost ghost physically
-    //  corresponds to the value FURTHEST from the active interior, so the
-    //  matching send must come from depth (n_ghost-1) into the sender's
-    //  interior — i.e., the same g_src(g) = (n_ghost-1-g) substitution
-    //  Phase B applied to the periodic-self self-copy below. At n_ghost=1
-    //  the substitution is a no-op (only one layer); at n_ghost=2 it swaps
-    //  the two outgoing layers so receivers get the right depth in the right
-    //  ghost slot.
-    for (int g = 0; g < n_ghost_; g++) {
-        const int s = g_src(g);
-        if (communicationCnt[0])
-            MPI_Isend(&vector[n_ghost_+offset+s][1][1],       1, yzFacetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-        if (communicationCnt[1])
-            MPI_Isend(&vector[nx-1-n_ghost_-offset-s][1][1],  1, yzFacetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-        if (communicationCnt[2])
-            MPI_Isend(&vector[1][n_ghost_+offset+s][1],       1, xzFacetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
-        if (communicationCnt[3])
-            MPI_Isend(&vector[1][ny-1-n_ghost_-offset-s][1],  1, xzFacetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
-        if (communicationCnt[4])
-            MPI_Isend(&vector[1][1][n_ghost_+offset+s],       1, xyFacetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
-        if (communicationCnt[5])
-            MPI_Isend(&vector[1][1][nz-1-n_ghost_-offset-s],  1, xyFacetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+    for (int d = 0; d < 6; ++d) {
+        if (!communicationCnt[d]) continue;
+        const int n = n_fields * n_ghost_ * per_layer[d];
+        MPI_Isend(face_send_bufs[d].data(), n, MPI_DOUBLE, neighbours_arr[d],
+                  send_tags[d], comm, &reqList[sendcnt++]);
     }
     assert_eq(recvcnt, sendcnt - recvcnt);
     assert_le(sendcnt, MAX_REQS);
 
+    //* Unpack helper. Writes recv buffers into the LO/HI ghost slabs at
+    //* the same destination cells the strided Irecv used to target.
+    auto unpack_face_recvs = [&]() {
+        for (int f = 0; f < n_fields; ++f) {
+            for (int g = 0; g < n_ghost_; ++g) {
+                if (communicationCnt[0])
+                    unpack_yz_copy(f, g,
+                                   face_recv_bufs[0].data() + (f * n_ghost_ + g) * yz_per_layer);
+                if (communicationCnt[1])
+                    unpack_yz_copy(f, nx - 1 - g,
+                                   face_recv_bufs[1].data() + (f * n_ghost_ + g) * yz_per_layer);
+                if (communicationCnt[2])
+                    unpack_xz_copy(f, g,
+                                   face_recv_bufs[2].data() + (f * n_ghost_ + g) * xz_per_layer);
+                if (communicationCnt[3])
+                    unpack_xz_copy(f, ny - 1 - g,
+                                   face_recv_bufs[3].data() + (f * n_ghost_ + g) * xz_per_layer);
+                if (communicationCnt[4])
+                    unpack_xy_copy(f, g,
+                                   face_recv_bufs[4].data() + (f * n_ghost_ + g) * xy_per_layer);
+                if (communicationCnt[5])
+                    unpack_xy_copy(f, nz - 1 - g,
+                                   face_recv_bufs[5].data() + (f * n_ghost_ + g) * xy_per_layer);
+            }
+        }
+    };
+
     //* Sum-on-receive at periodic-self for needInterp=true (moments path).
     //  At TSC width the gather deposits to ghost cells; periodic-image sums
     //  recover those contributions before the overwrite below clobbers them.
-    //  At Linear width the CIC stencil never reaches ghosts so this loop adds
-    //  zero — strict no-op. The destination is the periodic-image interior:
-    //    LO ghost vector[g]      → vector[g + nx - 2*n_ghost - offset]
-    //    HI ghost vector[nx-1-g] → vector[(2*n_ghost - 1 + offset) - g]
-    //  Verified for nodes (offset=1) and cells (offset=0). For n_ghost=1 this
-    //  loop also adds zero on Linear because Linear never deposits to ghosts.
+    //  Reads vector[g] which is untouched by Irecv now (recv goes to recv_bufs).
     const bool ps_x_self = (right_neighborX == myrank && left_neighborX == myrank);
     const bool ps_y_self = (right_neighborY == myrank && left_neighborY == myrank);
     const bool ps_z_self = (right_neighborZ == myrank && left_neighborZ == myrank);
 
     if (needInterp) {
-        if (ps_x_self) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int dst_lo = g + nx - 2 * n_ghost_ - offset;
-                const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
-                for (int iy = 1; iy <= ny - 2; iy++)
-                    for (int iz = 1; iz <= nz - 2; iz++) {
-                        vector[dst_lo][iy][iz] += vector[g][iy][iz];
-                        vector[dst_hi][iy][iz] += vector[nx - 1 - g][iy][iz];
-                    }
+        for (int f = 0; f < n_fields; ++f) {
+            if (ps_x_self) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int dst_lo = g + nx - 2 * n_ghost_ - offset;
+                    const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
+                    for (int iy = 1; iy <= ny - 2; iy++)
+                        for (int iz = 1; iz <= nz - 2; iz++) {
+                            vectors[f][dst_lo][iy][iz] += vectors[f][g][iy][iz];
+                            vectors[f][dst_hi][iy][iz] += vectors[f][nx - 1 - g][iy][iz];
+                        }
+                }
+            }
+            if (ps_y_self) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int dst_lo = g + ny - 2 * n_ghost_ - offset;
+                    const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
+                    for (int ix = 1; ix <= nx - 2; ix++)
+                        for (int iz = 1; iz <= nz - 2; iz++) {
+                            vectors[f][ix][dst_lo][iz] += vectors[f][ix][g][iz];
+                            vectors[f][ix][dst_hi][iz] += vectors[f][ix][ny - 1 - g][iz];
+                        }
+                }
+            }
+            if (ps_z_self) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int dst_lo = g + nz - 2 * n_ghost_ - offset;
+                    const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
+                    for (int ix = 1; ix <= nx - 2; ix++)
+                        for (int iy = 1; iy <= ny - 2; iy++) {
+                            vectors[f][ix][iy][dst_lo] += vectors[f][ix][iy][g];
+                            vectors[f][ix][iy][dst_hi] += vectors[f][ix][iy][nz - 1 - g];
+                        }
+                }
             }
         }
-        if (ps_y_self) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int dst_lo = g + ny - 2 * n_ghost_ - offset;
-                const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
-                for (int ix = 1; ix <= nx - 2; ix++)
-                    for (int iz = 1; iz <= nz - 2; iz++) {
-                        vector[ix][dst_lo][iz] += vector[ix][g][iz];
-                        vector[ix][dst_hi][iz] += vector[ix][ny - 1 - g][iz];
-                    }
-            }
-        }
-        if (ps_z_self) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int dst_lo = g + nz - 2 * n_ghost_ - offset;
-                const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
-                for (int ix = 1; ix <= nx - 2; ix++)
-                    for (int iy = 1; iy <= ny - 2; iy++) {
-                        vector[ix][iy][dst_lo] += vector[ix][iy][g];
-                        vector[ix][iy][dst_hi] += vector[ix][iy][nz - 1 - g];
-                    }
-            }
-        }
-    }
-
-    //* Phase E.20a fix: face MPI Irecvs above wrote into vector[g][1..ny-2][1..nz-2]
-    //  etc. The periodic single-rank self-copies below READ FROM those same
-    //  buffers (e.g. ix=1..nx-2 includes ix=1 = X-LO inner-ghost slab written
-    //  by X-Irecv when commCnt[0]=1). Without a Waitall here we have a race:
-    //  whether self-copy reads pre-Irecv (zero) or post-Irecv (valid data)
-    //  is non-deterministic across reps and was the dominant source of TSC
-    //  np>1 cyc-1 ULP non-determinism.
-    //
-    //  Only run for COPY semantics (needInterp=false). The moments path
-    //  (needInterp=true) intentionally reads pre-Irecv ghost values to do
-    //  sum-on-receive folding before face Irecv overwrites them; it relies
-    //  on the trailing Waitall further down.
-    if (!needInterp && sendcnt > 0) {
-        MPI_Waitall(sendcnt, &reqList[0], &stat[0]);
     }
 
     //* Periodic single-rank self-copies (X/Y/Z). Source indices use the same
     //  (n_ghost + offset + g) depth convention as the MPI face sends, with
     //  modular wrapping for thin dimensions where the source would otherwise
     //  fall outside the interior range [n_ghost, n-1-n_ghost].
-    //  stride = n - 2*n_ghost - offset = nxc_r (distinct periodic nodes/centers).
-    //  For offset=0 (moment/interp path), this reduces to the original formula.
-    //  For offset=1 (node field-copy path), this corrects the source to match MPI.
-    if (right_neighborX == myrank && left_neighborX == myrank) {
-        const int stride_x = nx - 2 * n_ghost_ - offset;
-        for (int g = 0; g < n_ghost_; g++) {
-            int sL = nx - 1 - n_ghost_ - offset - g_src(g);
-            if (sL < n_ghost_) sL += stride_x;
-            int sR = n_ghost_ + offset + g_src(g);
-            if (sR > nx - 1 - n_ghost_) sR -= stride_x;
-            for (int iy = 1; iy < ny - 1; iy++)
-                for (int iz = 1; iz < nz - 1; iz++) {
-                    vector[g][iy][iz]            = vector[sL][iy][iz];
-                    vector[nx - 1 - g][iy][iz]   = vector[sR][iy][iz];
+    //
+    //  Bit-identicality: at !needInterp the legacy code did E.20-conditional
+    //  Waitall before self-copies → vector[sL] reads were post-Irecv. We
+    //  preserve that by Waitall+unpack BEFORE self-copies on the !needInterp
+    //  branch. At needInterp=true the legacy code ran self-copies with
+    //  Irecvs in-flight (reading pre-Irecv-progress = local-gather values
+    //  on cells that were Y/Z Irecv targets). We preserve that semantic by
+    //  running self-copies BEFORE unpack on the needInterp branch — Irecv
+    //  doesn't touch vector at all, so the cells read in self-copy are
+    //  exactly the pre-call (== local-gather) values.
+    auto periodic_self_copies = [&]() {
+        for (int f = 0; f < n_fields; ++f) {
+            if (right_neighborX == myrank && left_neighborX == myrank) {
+                const int stride_x = nx - 2 * n_ghost_ - offset;
+                for (int g = 0; g < n_ghost_; g++) {
+                    int sL = nx - 1 - n_ghost_ - offset - g_src(g);
+                    if (sL < n_ghost_) sL += stride_x;
+                    int sR = n_ghost_ + offset + g_src(g);
+                    if (sR > nx - 1 - n_ghost_) sR -= stride_x;
+                    for (int iy = 1; iy < ny - 1; iy++)
+                        for (int iz = 1; iz < nz - 1; iz++) {
+                            vectors[f][g][iy][iz]            = vectors[f][sL][iy][iz];
+                            vectors[f][nx - 1 - g][iy][iz]   = vectors[f][sR][iy][iz];
+                        }
                 }
-        }
-    }
-    if (right_neighborY == myrank && left_neighborY == myrank) {
-        const int stride_y = ny - 2 * n_ghost_ - offset;
-        for (int g = 0; g < n_ghost_; g++) {
-            int sL = ny - 1 - n_ghost_ - offset - g_src(g);
-            if (sL < n_ghost_) sL += stride_y;
-            int sR = n_ghost_ + offset + g_src(g);
-            if (sR > ny - 1 - n_ghost_) sR -= stride_y;
-            for (int ix = 1; ix < nx - 1; ix++)
-                for (int iz = 1; iz < nz - 1; iz++) {
-                    vector[ix][g][iz]            = vector[ix][sL][iz];
-                    vector[ix][ny - 1 - g][iz]   = vector[ix][sR][iz];
+            }
+            if (right_neighborY == myrank && left_neighborY == myrank) {
+                const int stride_y = ny - 2 * n_ghost_ - offset;
+                for (int g = 0; g < n_ghost_; g++) {
+                    int sL = ny - 1 - n_ghost_ - offset - g_src(g);
+                    if (sL < n_ghost_) sL += stride_y;
+                    int sR = n_ghost_ + offset + g_src(g);
+                    if (sR > ny - 1 - n_ghost_) sR -= stride_y;
+                    for (int ix = 1; ix < nx - 1; ix++)
+                        for (int iz = 1; iz < nz - 1; iz++) {
+                            vectors[f][ix][g][iz]            = vectors[f][ix][sL][iz];
+                            vectors[f][ix][ny - 1 - g][iz]   = vectors[f][ix][sR][iz];
+                        }
                 }
-        }
-    }
-    if (right_neighborZ == myrank && left_neighborZ == myrank) {
-        const int stride_z = nz - 2 * n_ghost_ - offset;
-        for (int g = 0; g < n_ghost_; g++) {
-            int sL = nz - 1 - n_ghost_ - offset - g_src(g);
-            if (sL < n_ghost_) sL += stride_z;
-            int sR = n_ghost_ + offset + g_src(g);
-            if (sR > nz - 1 - n_ghost_) sR -= stride_z;
-            for (int ix = 1; ix < nx - 1; ix++)
-                for (int iy = 1; iy < ny - 1; iy++) {
-                    vector[ix][iy][g]            = vector[ix][iy][sL];
-                    vector[ix][iy][nz - 1 - g]   = vector[ix][iy][sR];
+            }
+            if (right_neighborZ == myrank && left_neighborZ == myrank) {
+                const int stride_z = nz - 2 * n_ghost_ - offset;
+                for (int g = 0; g < n_ghost_; g++) {
+                    int sL = nz - 1 - n_ghost_ - offset - g_src(g);
+                    if (sL < n_ghost_) sL += stride_z;
+                    int sR = n_ghost_ + offset + g_src(g);
+                    if (sR > nz - 1 - n_ghost_) sR -= stride_z;
+                    for (int ix = 1; ix < nx - 1; ix++)
+                        for (int iy = 1; iy < ny - 1; iy++) {
+                            vectors[f][ix][iy][g]            = vectors[f][ix][iy][sL];
+                            vectors[f][ix][iy][nz - 1 - g]   = vectors[f][ix][iy][sR];
+                        }
                 }
+            }
         }
-    }
+    };
 
+    //* needInterp=true: self-copies with Irecv data still in recv_bufs
+    //  (vector[sL] holds pre-call / local-gather values).
+    if (needInterp) periodic_self_copies();
+
+    //* Waitall (unconditional — manual pack/unpack closes the E.20
+    //  race regardless of needInterp).
     if (sendcnt > 0) {
         MPI_Waitall(sendcnt, &reqList[0], &stat[0]);
         bool stopFlag = false;
@@ -1301,108 +1515,248 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         if (stopFlag) exit(EXIT_FAILURE);
     }
 
+    //* Unpack neighbour values into vector[g] / vector[nx-1-g] etc.
+    //  At needInterp=true: this lands AFTER the self-copies (which already
+    //  read pre-unpack values).
+    //  At !needInterp: this lands BEFORE the self-copies (which need to
+    //  read post-Irecv neighbour values at cells where other-axis Irecv
+    //  targets overlap with the self-copy's source range).
+    unpack_face_recvs();
+
+    //* !needInterp: self-copies read post-unpack values, matching the
+    //  legacy E.20-conditional-Waitall-then-self-copy ordering.
+    if (!needInterp) periodic_self_copies();
+
     if (!isFaceOnlyFlag) {
         //! ============================================================
-        //  EDGE PHASE
+        //  EDGE PHASE — manual pack / unpack at N=1.
+        //
         //  Each axis has 4 edges (corners of the perpendicular face).
         //  For n_ghost > 1 each corner expands to an n_ghost x n_ghost
         //  block in the cross-section perpendicular to the edge direction.
+        //  Routing: yEdge → X neighbours, zEdge → Y neighbours, xEdge →
+        //  Z neighbours; each Cart side carries its 2 perp corners
+        //  (e.g., yEdge X-LO carries Z-LO + Z-HI corners) batched into
+        //  one MPI message. Replaces the strided yEdgetype/zEdgetype/
+        //  xEdgetype custom datatypes.
+        //
+        //  Bit-identicality vs the legacy MPI-types path: legacy ran
+        //  edge self-copies BEFORE the EDGE Waitall (Irecvs in flight,
+        //  pre-progress reads). Manual pack/unpack mirrors that — we
+        //  run self-copies BEFORE Waitall+unpack so vector[sL] reads
+        //  see the same FACE-post-unpack-but-EDGE-pre-Irecv state as
+        //  the legacy path. Where self-copy and unpack target the same
+        //  cell, unpack runs second and wins, matching the legacy
+        //  "Irecv data overwrites self-copy" end state.
         //! ============================================================
         recvcnt = 0; sendcnt = 0;
 
-        //? yEdge: Y-aligned line at (X, Z) corners. Cross-section = (gx, gz).
-        for (int gx = 0; gx < n_ghost_; gx++)
-        for (int gz = 0; gz < n_ghost_; gz++)
-        {
-            if (communicationCnt[0]) {
-                if (communicationCnt[4]) MPI_Irecv(&vector[gx][1][gz],            1, yEdgetype, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
-                if (communicationCnt[5]) MPI_Irecv(&vector[gx][1][nz-1-gz],       1, yEdgetype, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
+        const int n_ghost_sq = n_ghost_ * n_ghost_;
+        const int yedge_xs   = ny - 2;        // doubles per cross-section along Y
+        const int zedge_xs   = nz - 2;        // along Z
+        const int xedge_xs   = nx - 2;        // along X
+
+        //* Per Cart-direction d ∈ [0..5]: which edge axis routes through
+        //* and which two perp commCnt sides feed the 2 corners.
+        //*   d=0 X-LO / d=1 X-HI : yEdge, perp = Z (sides 4,5), xs len = ny-2
+        //*   d=2 Y-LO / d=3 Y-HI : zEdge, perp = X (sides 0,1), xs len = nz-2
+        //*   d=4 Z-LO / d=5 Z-HI : xEdge, perp = Y (sides 2,3), xs len = nx-2
+        const int edge_perp_lo[6] = {4, 4, 0, 0, 2, 2};
+        const int edge_perp_hi[6] = {5, 5, 1, 1, 3, 3};
+        const int edge_xs[6]      = {yedge_xs, yedge_xs, zedge_xs, zedge_xs, xedge_xs, xedge_xs};
+
+        //* Per-direction batched buffer = n_fields × active_perp × n_ghost^2 × edge_xs.
+        //* Layout: field-major outer (f) → perp-side block (LO before HI) → cross-section.
+        std::vector<double> edge_send_bufs[6];
+        std::vector<double> edge_recv_bufs[6];
+        for (int d = 0; d < 6; ++d) {
+            if (!communicationCnt[d]) continue;
+            const int active_perp = communicationCnt[edge_perp_lo[d]]
+                                  + communicationCnt[edge_perp_hi[d]];
+            if (active_perp == 0) continue;
+            const int total = n_fields * active_perp * n_ghost_sq * edge_xs[d];
+            edge_send_bufs[d].resize(total);
+            edge_recv_bufs[d].resize(total);
+        }
+
+        //* Per-edge pack/unpack helpers. Each maps a (field, route-side, perp-side)
+        //* triple to its n_ghost^2 cross-section block in a contiguous buffer.
+        //* Iteration order: outer (g_route, g_perp), inner (along-axis 1..N-2)
+        //* — matches the strided MPI types' implicit traversal.
+        auto pack_yedge_send = [&](int f, int x_side, int z_side, double* buf) {
+            int idx = 0;
+            for (int gx = 0; gx < n_ghost_; ++gx) {
+                const int sx = g_src(gx);
+                const int ix = (x_side == 0) ? (n_ghost_ + offset + sx)
+                                             : (nx - 1 - n_ghost_ - offset - sx);
+                for (int gz = 0; gz < n_ghost_; ++gz) {
+                    const int sz = g_src(gz);
+                    const int iz = (z_side == 0) ? (n_ghost_ + offset + sz)
+                                                 : (nz - 1 - n_ghost_ - offset - sz);
+                    for (int iy = 1; iy <= ny - 2; ++iy)
+                        buf[idx++] = vectors[f][ix][iy][iz];
+                }
             }
-            if (communicationCnt[1]) {
-                if (communicationCnt[4]) MPI_Irecv(&vector[nx-1-gx][1][gz],       1, yEdgetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
-                if (communicationCnt[5]) MPI_Irecv(&vector[nx-1-gx][1][nz-1-gz],  1, yEdgetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+        };
+        auto unpack_yedge_copy = [&](int f, int x_side, int z_side, const double* buf) {
+            int idx = 0;
+            for (int gx = 0; gx < n_ghost_; ++gx) {
+                const int ix = (x_side == 0) ? gx : (nx - 1 - gx);
+                for (int gz = 0; gz < n_ghost_; ++gz) {
+                    const int iz = (z_side == 0) ? gz : (nz - 1 - gz);
+                    for (int iy = 1; iy <= ny - 2; ++iy)
+                        vectors[f][ix][iy][iz] = buf[idx++];
+                }
+            }
+        };
+        auto pack_zedge_send = [&](int f, int y_side, int x_side, double* buf) {
+            int idx = 0;
+            for (int gx = 0; gx < n_ghost_; ++gx) {
+                const int sx = g_src(gx);
+                const int ix = (x_side == 0) ? (n_ghost_ + offset + sx)
+                                             : (nx - 1 - n_ghost_ - offset - sx);
+                for (int gy = 0; gy < n_ghost_; ++gy) {
+                    const int sy = g_src(gy);
+                    const int iy = (y_side == 0) ? (n_ghost_ + offset + sy)
+                                                 : (ny - 1 - n_ghost_ - offset - sy);
+                    for (int iz = 1; iz <= nz - 2; ++iz)
+                        buf[idx++] = vectors[f][ix][iy][iz];
+                }
+            }
+        };
+        auto unpack_zedge_copy = [&](int f, int y_side, int x_side, const double* buf) {
+            int idx = 0;
+            for (int gx = 0; gx < n_ghost_; ++gx) {
+                const int ix = (x_side == 0) ? gx : (nx - 1 - gx);
+                for (int gy = 0; gy < n_ghost_; ++gy) {
+                    const int iy = (y_side == 0) ? gy : (ny - 1 - gy);
+                    for (int iz = 1; iz <= nz - 2; ++iz)
+                        vectors[f][ix][iy][iz] = buf[idx++];
+                }
+            }
+        };
+        auto pack_xedge_send = [&](int f, int z_side, int y_side, double* buf) {
+            int idx = 0;
+            for (int gy = 0; gy < n_ghost_; ++gy) {
+                const int sy = g_src(gy);
+                const int iy = (y_side == 0) ? (n_ghost_ + offset + sy)
+                                             : (ny - 1 - n_ghost_ - offset - sy);
+                for (int gz = 0; gz < n_ghost_; ++gz) {
+                    const int sz = g_src(gz);
+                    const int iz = (z_side == 0) ? (n_ghost_ + offset + sz)
+                                                 : (nz - 1 - n_ghost_ - offset - sz);
+                    for (int ix = 1; ix <= nx - 2; ++ix)
+                        buf[idx++] = vectors[f][ix][iy][iz];
+                }
+            }
+        };
+        auto unpack_xedge_copy = [&](int f, int z_side, int y_side, const double* buf) {
+            int idx = 0;
+            for (int gy = 0; gy < n_ghost_; ++gy) {
+                const int iy = (y_side == 0) ? gy : (ny - 1 - gy);
+                for (int gz = 0; gz < n_ghost_; ++gz) {
+                    const int iz = (z_side == 0) ? gz : (nz - 1 - gz);
+                    for (int ix = 1; ix <= nx - 2; ++ix)
+                        vectors[f][ix][iy][iz] = buf[idx++];
+                }
+            }
+        };
+
+        const int yedge_block = n_ghost_sq * yedge_xs;
+        const int zedge_block = n_ghost_sq * zedge_xs;
+        const int xedge_block = n_ghost_sq * xedge_xs;
+
+        //* Pack send buffers. Field-major outer (f), then perp LO before perp HI.
+        //* Both ranks pack in the same canonical order so the receiver's unpack
+        //* lands matching doubles in matching cells.
+        for (int f = 0; f < n_fields; ++f) {
+            if (communicationCnt[0]) { // X-LO yEdge: perp Z-LO, Z-HI
+                int off = f * (communicationCnt[4] + communicationCnt[5]) * yedge_block;
+                if (communicationCnt[4]) { pack_yedge_send(f, 0, 0, edge_send_bufs[0].data() + off); off += yedge_block; }
+                if (communicationCnt[5]) { pack_yedge_send(f, 0, 1, edge_send_bufs[0].data() + off); off += yedge_block; }
+            }
+            if (communicationCnt[1]) { // X-HI yEdge
+                int off = f * (communicationCnt[4] + communicationCnt[5]) * yedge_block;
+                if (communicationCnt[4]) { pack_yedge_send(f, 1, 0, edge_send_bufs[1].data() + off); off += yedge_block; }
+                if (communicationCnt[5]) { pack_yedge_send(f, 1, 1, edge_send_bufs[1].data() + off); off += yedge_block; }
+            }
+            if (communicationCnt[2]) { // Y-LO zEdge: perp X-LO, X-HI
+                int off = f * (communicationCnt[0] + communicationCnt[1]) * zedge_block;
+                if (communicationCnt[0]) { pack_zedge_send(f, 0, 0, edge_send_bufs[2].data() + off); off += zedge_block; }
+                if (communicationCnt[1]) { pack_zedge_send(f, 0, 1, edge_send_bufs[2].data() + off); off += zedge_block; }
+            }
+            if (communicationCnt[3]) { // Y-HI zEdge
+                int off = f * (communicationCnt[0] + communicationCnt[1]) * zedge_block;
+                if (communicationCnt[0]) { pack_zedge_send(f, 1, 0, edge_send_bufs[3].data() + off); off += zedge_block; }
+                if (communicationCnt[1]) { pack_zedge_send(f, 1, 1, edge_send_bufs[3].data() + off); off += zedge_block; }
+            }
+            if (communicationCnt[4]) { // Z-LO xEdge: perp Y-LO, Y-HI
+                int off = f * (communicationCnt[2] + communicationCnt[3]) * xedge_block;
+                if (communicationCnt[2]) { pack_xedge_send(f, 0, 0, edge_send_bufs[4].data() + off); off += xedge_block; }
+                if (communicationCnt[3]) { pack_xedge_send(f, 0, 1, edge_send_bufs[4].data() + off); off += xedge_block; }
+            }
+            if (communicationCnt[5]) { // Z-HI xEdge
+                int off = f * (communicationCnt[2] + communicationCnt[3]) * xedge_block;
+                if (communicationCnt[2]) { pack_xedge_send(f, 1, 0, edge_send_bufs[5].data() + off); off += xedge_block; }
+                if (communicationCnt[3]) { pack_xedge_send(f, 1, 1, edge_send_bufs[5].data() + off); off += xedge_block; }
             }
         }
 
-        //? zEdge: Z-aligned line at (X, Y) corners. Cross-section = (gx, gy).
-        for (int gx = 0; gx < n_ghost_; gx++)
-        for (int gy = 0; gy < n_ghost_; gy++)
-        {
-            if (communicationCnt[2]) {
-                if (communicationCnt[0]) MPI_Irecv(&vector[gx][gy][1],            1, zEdgetype, left_neighborY,  tag_YR, comm, &reqList[recvcnt++]);
-                if (communicationCnt[1]) MPI_Irecv(&vector[nx-1-gx][gy][1],       1, zEdgetype, left_neighborY,  tag_YR, comm, &reqList[recvcnt++]);
-            }
-            if (communicationCnt[3]) {
-                if (communicationCnt[0]) MPI_Irecv(&vector[gx][ny-1-gy][1],       1, zEdgetype, right_neighborY, tag_YL, comm, &reqList[recvcnt++]);
-                if (communicationCnt[1]) MPI_Irecv(&vector[nx-1-gx][ny-1-gy][1],  1, zEdgetype, right_neighborY, tag_YL, comm, &reqList[recvcnt++]);
-            }
+        //* Post Irecv (into recv_bufs) + Isend (from send_bufs). One MPI
+        //* message per Cart direction carrying the active perp corners.
+        for (int d = 0; d < 6; ++d) {
+            if (edge_recv_bufs[d].empty()) continue;
+            MPI_Irecv(edge_recv_bufs[d].data(), (int)edge_recv_bufs[d].size(),
+                      MPI_DOUBLE, neighbours_arr[d], recv_tags[d], comm,
+                      &reqList[recvcnt++]);
         }
-
-        //? xEdge: X-aligned line at (Y, Z) corners. Cross-section = (gy, gz).
-        for (int gy = 0; gy < n_ghost_; gy++)
-        for (int gz = 0; gz < n_ghost_; gz++)
-        {
-            if (communicationCnt[4]) {
-                if (communicationCnt[2]) MPI_Irecv(&vector[1][gy][gz],             1, xEdgetype, left_neighborZ,  tag_ZR, comm, &reqList[recvcnt++]);
-                if (communicationCnt[3]) MPI_Irecv(&vector[1][ny-1-gy][gz],        1, xEdgetype, left_neighborZ,  tag_ZR, comm, &reqList[recvcnt++]);
-            }
-            if (communicationCnt[5]) {
-                if (communicationCnt[2]) MPI_Irecv(&vector[1][gy][nz-1-gz],        1, xEdgetype, right_neighborZ, tag_ZL, comm, &reqList[recvcnt++]);
-                if (communicationCnt[3]) MPI_Irecv(&vector[1][ny-1-gy][nz-1-gz],   1, xEdgetype, right_neighborZ, tag_ZL, comm, &reqList[recvcnt++]);
-            }
-        }
-
         sendcnt = recvcnt;
-
-        //? yEdge sends (mirror of recvs; source at interior depth n_ghost + offset + g_src(g))
-        //  Same g→(n_ghost-1-g) substitution as the FACE sends above so each
-        //  receiver ghost slot gets the matching depth from the sender.
-        for (int gx = 0; gx < n_ghost_; gx++)
-        for (int gz = 0; gz < n_ghost_; gz++)
-        {
-            const int sx = g_src(gx), sz = g_src(gz);
-            if (communicationCnt[0]) {
-                if (communicationCnt[4]) MPI_Isend(&vector[n_ghost_+offset+sx][1][n_ghost_+offset+sz],        1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-                if (communicationCnt[5]) MPI_Isend(&vector[n_ghost_+offset+sx][1][nz-1-n_ghost_-offset-sz],   1, yEdgetype, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-            }
-            if (communicationCnt[1]) {
-                if (communicationCnt[4]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][1][n_ghost_+offset+sz],       1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-                if (communicationCnt[5]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][1][nz-1-n_ghost_-offset-sz],  1, yEdgetype, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-            }
-        }
-
-        //? zEdge sends
-        for (int gx = 0; gx < n_ghost_; gx++)
-        for (int gy = 0; gy < n_ghost_; gy++)
-        {
-            const int sx = g_src(gx), sy = g_src(gy);
-            if (communicationCnt[2]) {
-                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+sx][n_ghost_+offset+sy][1],         1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
-                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][n_ghost_+offset+sy][1],    1, zEdgetype, left_neighborY,  tag_YL, comm, &reqList[sendcnt++]);
-            }
-            if (communicationCnt[3]) {
-                if (communicationCnt[0]) MPI_Isend(&vector[n_ghost_+offset+sx][ny-1-n_ghost_-offset-sy][1],        1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
-                if (communicationCnt[1]) MPI_Isend(&vector[nx-1-n_ghost_-offset-sx][ny-1-n_ghost_-offset-sy][1],   1, zEdgetype, right_neighborY, tag_YR, comm, &reqList[sendcnt++]);
-            }
-        }
-
-        //? xEdge sends
-        for (int gy = 0; gy < n_ghost_; gy++)
-        for (int gz = 0; gz < n_ghost_; gz++)
-        {
-            const int sy = g_src(gy), sz = g_src(gz);
-            if (communicationCnt[4]) {
-                if (communicationCnt[2]) MPI_Isend(&vector[1][n_ghost_+offset+sy][n_ghost_+offset+sz],         1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
-                if (communicationCnt[3]) MPI_Isend(&vector[1][ny-1-n_ghost_-offset-sy][n_ghost_+offset+sz],    1, xEdgetype, left_neighborZ,  tag_ZL, comm, &reqList[sendcnt++]);
-            }
-            if (communicationCnt[5]) {
-                if (communicationCnt[2]) MPI_Isend(&vector[1][n_ghost_+offset+sy][nz-1-n_ghost_-offset-sz],        1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
-                if (communicationCnt[3]) MPI_Isend(&vector[1][ny-1-n_ghost_-offset-sy][nz-1-n_ghost_-offset-sz],   1, xEdgetype, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
-            }
+        for (int d = 0; d < 6; ++d) {
+            if (edge_send_bufs[d].empty()) continue;
+            MPI_Isend(edge_send_bufs[d].data(), (int)edge_send_bufs[d].size(),
+                      MPI_DOUBLE, neighbours_arr[d], send_tags[d], comm,
+                      &reqList[sendcnt++]);
         }
 
         assert_eq(recvcnt, sendcnt - recvcnt);
         assert_le(sendcnt, MAX_REQS);
+
+        //* Unpack helper. Mirrors the pack-order convention so the same
+        //* (field, route-side, perp-side) corner reads from its block in recv_buf.
+        auto unpack_edge_recvs = [&]() {
+            for (int f = 0; f < n_fields; ++f) {
+                if (communicationCnt[0]) {
+                    int off = f * (communicationCnt[4] + communicationCnt[5]) * yedge_block;
+                    if (communicationCnt[4]) { unpack_yedge_copy(f, 0, 0, edge_recv_bufs[0].data() + off); off += yedge_block; }
+                    if (communicationCnt[5]) { unpack_yedge_copy(f, 0, 1, edge_recv_bufs[0].data() + off); off += yedge_block; }
+                }
+                if (communicationCnt[1]) {
+                    int off = f * (communicationCnt[4] + communicationCnt[5]) * yedge_block;
+                    if (communicationCnt[4]) { unpack_yedge_copy(f, 1, 0, edge_recv_bufs[1].data() + off); off += yedge_block; }
+                    if (communicationCnt[5]) { unpack_yedge_copy(f, 1, 1, edge_recv_bufs[1].data() + off); off += yedge_block; }
+                }
+                if (communicationCnt[2]) {
+                    int off = f * (communicationCnt[0] + communicationCnt[1]) * zedge_block;
+                    if (communicationCnt[0]) { unpack_zedge_copy(f, 0, 0, edge_recv_bufs[2].data() + off); off += zedge_block; }
+                    if (communicationCnt[1]) { unpack_zedge_copy(f, 0, 1, edge_recv_bufs[2].data() + off); off += zedge_block; }
+                }
+                if (communicationCnt[3]) {
+                    int off = f * (communicationCnt[0] + communicationCnt[1]) * zedge_block;
+                    if (communicationCnt[0]) { unpack_zedge_copy(f, 1, 0, edge_recv_bufs[3].data() + off); off += zedge_block; }
+                    if (communicationCnt[1]) { unpack_zedge_copy(f, 1, 1, edge_recv_bufs[3].data() + off); off += zedge_block; }
+                }
+                if (communicationCnt[4]) {
+                    int off = f * (communicationCnt[2] + communicationCnt[3]) * xedge_block;
+                    if (communicationCnt[2]) { unpack_xedge_copy(f, 0, 0, edge_recv_bufs[4].data() + off); off += xedge_block; }
+                    if (communicationCnt[3]) { unpack_xedge_copy(f, 0, 1, edge_recv_bufs[4].data() + off); off += xedge_block; }
+                }
+                if (communicationCnt[5]) {
+                    int off = f * (communicationCnt[2] + communicationCnt[3]) * xedge_block;
+                    if (communicationCnt[2]) { unpack_xedge_copy(f, 1, 0, edge_recv_bufs[5].data() + off); off += xedge_block; }
+                    if (communicationCnt[3]) { unpack_xedge_copy(f, 1, 1, edge_recv_bufs[5].data() + off); off += xedge_block; }
+                }
+            }
+        };
 
         //* Periodic single-rank edge self-copies.
         //  Generalized from legacy L308-386: for each self-periodic axis, copy
@@ -1411,92 +1765,94 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //  cover inner ghost rows, so only outermost (index 0 / n-1) edges need
         //  this pass. At n_ghost == 1 the g loop runs once and the indices
         //  reduce to the legacy literals.
-        if (right_neighborX == myrank && left_neighborX == myrank) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int sL = nx - 1 - n_ghost_ - offset - g_src(g);
-                const int sR = n_ghost_ + offset + g_src(g);
-                if (right_neighborZ != MPI_PROC_NULL) {
-                    for (int iy = 1; iy < ny - 1; iy++) {
-                        vector[g][iy][nz-1]         = vector[sL][iy][nz-1];
-                        vector[nx-1-g][iy][nz-1]    = vector[sR][iy][nz-1];
+        for (int f = 0; f < n_fields; ++f) {
+            if (right_neighborX == myrank && left_neighborX == myrank) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int sL = nx - 1 - n_ghost_ - offset - g_src(g);
+                    const int sR = n_ghost_ + offset + g_src(g);
+                    if (right_neighborZ != MPI_PROC_NULL) {
+                        for (int iy = 1; iy < ny - 1; iy++) {
+                            vectors[f][g][iy][nz-1]         = vectors[f][sL][iy][nz-1];
+                            vectors[f][nx-1-g][iy][nz-1]    = vectors[f][sR][iy][nz-1];
+                        }
                     }
-                }
-                if (left_neighborZ != MPI_PROC_NULL) {
-                    for (int iy = 1; iy < ny - 1; iy++) {
-                        vector[g][iy][0]         = vector[sL][iy][0];
-                        vector[nx-1-g][iy][0]    = vector[sR][iy][0];
+                    if (left_neighborZ != MPI_PROC_NULL) {
+                        for (int iy = 1; iy < ny - 1; iy++) {
+                            vectors[f][g][iy][0]         = vectors[f][sL][iy][0];
+                            vectors[f][nx-1-g][iy][0]    = vectors[f][sR][iy][0];
+                        }
                     }
-                }
-                if (right_neighborY != MPI_PROC_NULL) {
-                    for (int iz = 1; iz < nz - 1; iz++) {
-                        vector[g][ny-1][iz]         = vector[sL][ny-1][iz];
-                        vector[nx-1-g][ny-1][iz]    = vector[sR][ny-1][iz];
+                    if (right_neighborY != MPI_PROC_NULL) {
+                        for (int iz = 1; iz < nz - 1; iz++) {
+                            vectors[f][g][ny-1][iz]         = vectors[f][sL][ny-1][iz];
+                            vectors[f][nx-1-g][ny-1][iz]    = vectors[f][sR][ny-1][iz];
+                        }
                     }
-                }
-                if (left_neighborY != MPI_PROC_NULL) {
-                    for (int iz = 1; iz < nz - 1; iz++) {
-                        vector[g][0][iz]         = vector[sL][0][iz];
-                        vector[nx-1-g][0][iz]    = vector[sR][0][iz];
-                    }
-                }
-            }
-        }
-        if (right_neighborY == myrank && left_neighborY == myrank) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int sL = ny - 1 - n_ghost_ - offset - g_src(g);
-                const int sR = n_ghost_ + offset + g_src(g);
-                if (right_neighborX != MPI_PROC_NULL) {
-                    for (int iz = 1; iz < nz - 1; iz++) {
-                        vector[nx-1][g][iz]         = vector[nx-1][sL][iz];
-                        vector[nx-1][ny-1-g][iz]    = vector[nx-1][sR][iz];
-                    }
-                }
-                if (left_neighborX != MPI_PROC_NULL) {
-                    for (int iz = 1; iz < nz - 1; iz++) {
-                        vector[0][g][iz]         = vector[0][sL][iz];
-                        vector[0][ny-1-g][iz]    = vector[0][sR][iz];
-                    }
-                }
-                if (right_neighborZ != MPI_PROC_NULL) {
-                    for (int ix = 1; ix < nx - 1; ix++) {
-                        vector[ix][g][nz-1]         = vector[ix][sL][nz-1];
-                        vector[ix][ny-1-g][nz-1]    = vector[ix][sR][nz-1];
-                    }
-                }
-                if (left_neighborZ != MPI_PROC_NULL) {
-                    for (int ix = 1; ix < nx - 1; ix++) {
-                        vector[ix][g][0]         = vector[ix][sL][0];
-                        vector[ix][ny-1-g][0]    = vector[ix][sR][0];
+                    if (left_neighborY != MPI_PROC_NULL) {
+                        for (int iz = 1; iz < nz - 1; iz++) {
+                            vectors[f][g][0][iz]         = vectors[f][sL][0][iz];
+                            vectors[f][nx-1-g][0][iz]    = vectors[f][sR][0][iz];
+                        }
                     }
                 }
             }
-        }
-        if (right_neighborZ == myrank && left_neighborZ == myrank) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int sL = nz - 1 - n_ghost_ - offset - g_src(g);
-                const int sR = n_ghost_ + offset + g_src(g);
-                if (right_neighborY != MPI_PROC_NULL) {
-                    for (int ix = 1; ix < nx - 1; ix++) {
-                        vector[ix][ny-1][g]         = vector[ix][ny-1][sL];
-                        vector[ix][ny-1][nz-1-g]    = vector[ix][ny-1][sR];
+            if (right_neighborY == myrank && left_neighborY == myrank) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int sL = ny - 1 - n_ghost_ - offset - g_src(g);
+                    const int sR = n_ghost_ + offset + g_src(g);
+                    if (right_neighborX != MPI_PROC_NULL) {
+                        for (int iz = 1; iz < nz - 1; iz++) {
+                            vectors[f][nx-1][g][iz]         = vectors[f][nx-1][sL][iz];
+                            vectors[f][nx-1][ny-1-g][iz]    = vectors[f][nx-1][sR][iz];
+                        }
+                    }
+                    if (left_neighborX != MPI_PROC_NULL) {
+                        for (int iz = 1; iz < nz - 1; iz++) {
+                            vectors[f][0][g][iz]         = vectors[f][0][sL][iz];
+                            vectors[f][0][ny-1-g][iz]    = vectors[f][0][sR][iz];
+                        }
+                    }
+                    if (right_neighborZ != MPI_PROC_NULL) {
+                        for (int ix = 1; ix < nx - 1; ix++) {
+                            vectors[f][ix][g][nz-1]         = vectors[f][ix][sL][nz-1];
+                            vectors[f][ix][ny-1-g][nz-1]    = vectors[f][ix][sR][nz-1];
+                        }
+                    }
+                    if (left_neighborZ != MPI_PROC_NULL) {
+                        for (int ix = 1; ix < nx - 1; ix++) {
+                            vectors[f][ix][g][0]         = vectors[f][ix][sL][0];
+                            vectors[f][ix][ny-1-g][0]    = vectors[f][ix][sR][0];
+                        }
                     }
                 }
-                if (left_neighborY != MPI_PROC_NULL) {
-                    for (int ix = 1; ix < nx - 1; ix++) {
-                        vector[ix][0][g]         = vector[ix][0][sL];
-                        vector[ix][0][nz-1-g]    = vector[ix][0][sR];
+            }
+            if (right_neighborZ == myrank && left_neighborZ == myrank) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int sL = nz - 1 - n_ghost_ - offset - g_src(g);
+                    const int sR = n_ghost_ + offset + g_src(g);
+                    if (right_neighborY != MPI_PROC_NULL) {
+                        for (int ix = 1; ix < nx - 1; ix++) {
+                            vectors[f][ix][ny-1][g]         = vectors[f][ix][ny-1][sL];
+                            vectors[f][ix][ny-1][nz-1-g]    = vectors[f][ix][ny-1][sR];
+                        }
                     }
-                }
-                if (right_neighborX != MPI_PROC_NULL) {
-                    for (int iy = 1; iy < ny - 1; iy++) {
-                        vector[nx-1][iy][g]         = vector[nx-1][iy][sL];
-                        vector[nx-1][iy][nz-1-g]    = vector[nx-1][iy][sR];
+                    if (left_neighborY != MPI_PROC_NULL) {
+                        for (int ix = 1; ix < nx - 1; ix++) {
+                            vectors[f][ix][0][g]         = vectors[f][ix][0][sL];
+                            vectors[f][ix][0][nz-1-g]    = vectors[f][ix][0][sR];
+                        }
                     }
-                }
-                if (left_neighborX != MPI_PROC_NULL) {
-                    for (int iy = 1; iy < ny - 1; iy++) {
-                        vector[0][iy][g]         = vector[0][iy][sL];
-                        vector[0][iy][nz-1-g]    = vector[0][iy][sR];
+                    if (right_neighborX != MPI_PROC_NULL) {
+                        for (int iy = 1; iy < ny - 1; iy++) {
+                            vectors[f][nx-1][iy][g]         = vectors[f][nx-1][iy][sL];
+                            vectors[f][nx-1][iy][nz-1-g]    = vectors[f][nx-1][iy][sR];
+                        }
+                    }
+                    if (left_neighborX != MPI_PROC_NULL) {
+                        for (int iy = 1; iy < ny - 1; iy++) {
+                            vectors[f][0][iy][g]         = vectors[f][0][iy][sL];
+                            vectors[f][0][iy][nz-1-g]    = vectors[f][0][iy][sR];
+                        }
                     }
                 }
             }
@@ -1511,65 +1867,96 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             if (stopFlag) exit(EXIT_FAILURE);
         }
 
+        //* Unpack edge recv buffers AFTER edge self-copies — at cells where
+        //  self-copy and unpack target the same ghost-corner, unpack runs
+        //  second and wins, matching the legacy "in-flight Irecv overwrites
+        //  the self-copy write" end state.
+        unpack_edge_recvs();
+
         //! ============================================================
-        //  CORNER PHASE
-        //  Each of the 8 box corners is an n_ghost^3 cube of scalar nodes
-        //  for n_ghost > 1, exchanged as MPI_DOUBLE singletons. Aggregated
-        //  along the X direction in 2 messages (X-left, X-right) per
-        //  (gx, gy, gz) triple, like the cornertype does at n_ghost == 1.
+        //  CORNER PHASE — manual pack / unpack at N=1+.
+        //
+        //  Each X-LO/HI Cart side carries all 4 of its perp Y/Z corners
+        //  (Y-LO/HI × Z-LO/HI), each an n_ghost^3 cube, batched into
+        //  one MPI message of 4 × n_ghost^3 × n_fields doubles. Replaces
+        //  the legacy 32-scalar-MPI-message-per-side path.
+        //
+        //  Only fires when both Y and Z directions have at least one
+        //  cross-rank face neighbour — at np=1 along Y or Z, the corner
+        //  cube is filled by the periodic-self self-copies further down.
         //! ============================================================
         recvcnt = 0; sendcnt = 0;
+
+        std::vector<double> corner_send_bufs[2];
+        std::vector<double> corner_recv_bufs[2];
 
         if ((communicationCnt[2] == 1 || communicationCnt[3] == 1) &&
             (communicationCnt[4] == 1 || communicationCnt[5] == 1))
         {
-            for (int gx = 0; gx < n_ghost_; gx++)
-            for (int gy = 0; gy < n_ghost_; gy++)
-            for (int gz = 0; gz < n_ghost_; gz++)
-            {
-                if (communicationCnt[0]) {
-                    MPI_Irecv(&vector[gx][gy][gz],                      1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
-                    MPI_Irecv(&vector[gx][gy][nz-1-gz],                 1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
-                    MPI_Irecv(&vector[gx][ny-1-gy][gz],                 1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
-                    MPI_Irecv(&vector[gx][ny-1-gy][nz-1-gz],            1, MPI_DOUBLE, left_neighborX,  tag_XR, comm, &reqList[recvcnt++]);
-                }
-                if (communicationCnt[1]) {
-                    MPI_Irecv(&vector[nx-1-gx][gy][gz],                 1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
-                    MPI_Irecv(&vector[nx-1-gx][gy][nz-1-gz],            1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
-                    MPI_Irecv(&vector[nx-1-gx][ny-1-gy][gz],            1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
-                    MPI_Irecv(&vector[nx-1-gx][ny-1-gy][nz-1-gz],       1, MPI_DOUBLE, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+            const int corner_per_field = 4 * n_ghost_ * n_ghost_ * n_ghost_;
+            const int corner_total     = n_fields * corner_per_field;
+
+            for (int side = 0; side < 2; ++side) {
+                if (!communicationCnt[side]) continue;
+                corner_send_bufs[side].resize(corner_total);
+                corner_recv_bufs[side].resize(corner_total);
+            }
+
+            //* Pack send buffers. Source cells = strict-interior cube
+            //  at depth (n_ghost+offset+g_src) from the active X face.
+            //  For each (gx, gy, gz), the 4 perp Y/Z corners are packed
+            //  in canonical order: (Y-LO,Z-LO), (Y-LO,Z-HI), (Y-HI,Z-LO),
+            //  (Y-HI,Z-HI). Both ranks pack the same canonical order so
+            //  the receiver's unpack lands matching doubles in matching cells.
+            for (int f = 0; f < n_fields; ++f) {
+                for (int gx = 0; gx < n_ghost_; ++gx) {
+                    const int sx   = g_src(gx);
+                    const int xs_l = n_ghost_ + offset + sx;
+                    const int xs_r = nx - 1 - n_ghost_ - offset - sx;
+                    for (int gy = 0; gy < n_ghost_; ++gy) {
+                        const int sy   = g_src(gy);
+                        const int ys_l = n_ghost_ + offset + sy;
+                        const int ys_r = ny - 1 - n_ghost_ - offset - sy;
+                        for (int gz = 0; gz < n_ghost_; ++gz) {
+                            const int sz   = g_src(gz);
+                            const int zs_l = n_ghost_ + offset + sz;
+                            const int zs_r = nz - 1 - n_ghost_ - offset - sz;
+                            const int base = f * corner_per_field
+                                           + 4 * ((gx * n_ghost_ + gy) * n_ghost_ + gz);
+                            if (communicationCnt[0]) {
+                                corner_send_bufs[0][base + 0] = vectors[f][xs_l][ys_l][zs_l];
+                                corner_send_bufs[0][base + 1] = vectors[f][xs_l][ys_l][zs_r];
+                                corner_send_bufs[0][base + 2] = vectors[f][xs_l][ys_r][zs_l];
+                                corner_send_bufs[0][base + 3] = vectors[f][xs_l][ys_r][zs_r];
+                            }
+                            if (communicationCnt[1]) {
+                                corner_send_bufs[1][base + 0] = vectors[f][xs_r][ys_l][zs_l];
+                                corner_send_bufs[1][base + 1] = vectors[f][xs_r][ys_l][zs_r];
+                                corner_send_bufs[1][base + 2] = vectors[f][xs_r][ys_r][zs_l];
+                                corner_send_bufs[1][base + 3] = vectors[f][xs_r][ys_r][zs_r];
+                            }
+                        }
+                    }
                 }
             }
 
+            //* Post Irecv (into recv_buf) + Isend (from send_buf).
+            if (communicationCnt[0]) {
+                MPI_Irecv(corner_recv_bufs[0].data(), corner_total, MPI_DOUBLE,
+                          left_neighborX, tag_XR, comm, &reqList[recvcnt++]);
+            }
+            if (communicationCnt[1]) {
+                MPI_Irecv(corner_recv_bufs[1].data(), corner_total, MPI_DOUBLE,
+                          right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
+            }
             sendcnt = recvcnt;
-
-            for (int gx = 0; gx < n_ghost_; gx++)
-            for (int gy = 0; gy < n_ghost_; gy++)
-            for (int gz = 0; gz < n_ghost_; gz++)
-            {
-                //* g→(n_ghost-1-g) substitution applied to send sources so the
-                //  outermost-ghost RECV slot lines up with the deepest-interior
-                //  source — matches the FACE/EDGE phases above. No-op at n_ghost=1.
-                const int sx = g_src(gx), sy = g_src(gy), sz = g_src(gz);
-                const int xs_l = n_ghost_ + offset + sx;            //* X source index for left send
-                const int xs_r = nx - 1 - n_ghost_ - offset - sx;   //* X source index for right send
-                const int ys_l = n_ghost_ + offset + sy;
-                const int ys_r = ny - 1 - n_ghost_ - offset - sy;
-                const int zs_l = n_ghost_ + offset + sz;
-                const int zs_r = nz - 1 - n_ghost_ - offset - sz;
-
-                if (communicationCnt[0]) {
-                    MPI_Isend(&vector[xs_l][ys_l][zs_l],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-                    MPI_Isend(&vector[xs_l][ys_l][zs_r],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-                    MPI_Isend(&vector[xs_l][ys_r][zs_l],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-                    MPI_Isend(&vector[xs_l][ys_r][zs_r],   1, MPI_DOUBLE, left_neighborX,  tag_XL, comm, &reqList[sendcnt++]);
-                }
-                if (communicationCnt[1]) {
-                    MPI_Isend(&vector[xs_r][ys_l][zs_l],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-                    MPI_Isend(&vector[xs_r][ys_l][zs_r],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-                    MPI_Isend(&vector[xs_r][ys_r][zs_l],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-                    MPI_Isend(&vector[xs_r][ys_r][zs_r],   1, MPI_DOUBLE, right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-                }
+            if (communicationCnt[0]) {
+                MPI_Isend(corner_send_bufs[0].data(), corner_total, MPI_DOUBLE,
+                          left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+            }
+            if (communicationCnt[1]) {
+                MPI_Isend(corner_send_bufs[1].data(), corner_total, MPI_DOUBLE,
+                          right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
             }
         }
 
@@ -1583,6 +1970,34 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                 if (stat[si].MPI_ERROR != MPI_SUCCESS) { stopFlag = true; }
             }
             if (stopFlag) exit(EXIT_FAILURE);
+        }
+
+        //* Unpack received corner buffers into vector[gx][gy/ny-1-gy][gz/nz-1-gz]
+        //* ghost cells. Same canonical (Y-LO/HI × Z-LO/HI) order as pack.
+        if (!corner_recv_bufs[0].empty() || !corner_recv_bufs[1].empty()) {
+            const int corner_per_field = 4 * n_ghost_ * n_ghost_ * n_ghost_;
+            for (int f = 0; f < n_fields; ++f) {
+                for (int gx = 0; gx < n_ghost_; ++gx) {
+                    for (int gy = 0; gy < n_ghost_; ++gy) {
+                        for (int gz = 0; gz < n_ghost_; ++gz) {
+                            const int base = f * corner_per_field
+                                           + 4 * ((gx * n_ghost_ + gy) * n_ghost_ + gz);
+                            if (!corner_recv_bufs[0].empty()) {
+                                vectors[f][gx][gy][gz]                = corner_recv_bufs[0][base + 0];
+                                vectors[f][gx][gy][nz-1-gz]           = corner_recv_bufs[0][base + 1];
+                                vectors[f][gx][ny-1-gy][gz]           = corner_recv_bufs[0][base + 2];
+                                vectors[f][gx][ny-1-gy][nz-1-gz]      = corner_recv_bufs[0][base + 3];
+                            }
+                            if (!corner_recv_bufs[1].empty()) {
+                                vectors[f][nx-1-gx][gy][gz]           = corner_recv_bufs[1][base + 0];
+                                vectors[f][nx-1-gx][gy][nz-1-gz]      = corner_recv_bufs[1][base + 1];
+                                vectors[f][nx-1-gx][ny-1-gy][gz]      = corner_recv_bufs[1][base + 2];
+                                vectors[f][nx-1-gx][ny-1-gy][nz-1-gz] = corner_recv_bufs[1][base + 3];
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         //! ============================================================
@@ -1667,8 +2082,8 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                                               nbr, {}, {}});
                             DSlot &s = dslots.back();
                             const int slab = n_ghost_ * n_ghost_ * len_c;
-                            s.send.resize(slab);
-                            s.recv.resize(slab);
+                            s.send.resize(n_fields * slab);
+                            s.recv.resize(n_fields * slab);
 
                             //* Pack: at (sa, sb) strict-near-bdry of self.
                             //* For sa=+1: ijk[a] = nax-1-ng-offset-(ng-1-ga).
@@ -1676,22 +2091,24 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                             //* g_src(ga) = ng-1-ga. So ijk[a] = (sa==+1)
                             //* ? nax-1-ng-offset-g_src(ga) : ng+offset+g_src(ga).
                             int ijk[3];
-                            for (int ga = 0; ga < n_ghost_; ++ga) {
-                                ijk[a] = (sa == +1)
-                                         ? (nax_e18[a] - 1 - n_ghost_ - offset
-                                            - (n_ghost_ - 1 - ga))
-                                         : (n_ghost_ + offset
-                                            + (n_ghost_ - 1 - ga));
-                                for (int gb = 0; gb < n_ghost_; ++gb) {
-                                    ijk[b] = (sb == +1)
-                                             ? (nax_e18[b] - 1 - n_ghost_ - offset
-                                                - (n_ghost_ - 1 - gb))
+                            for (int f = 0; f < n_fields; ++f) {
+                                for (int ga = 0; ga < n_ghost_; ++ga) {
+                                    ijk[a] = (sa == +1)
+                                             ? (nax_e18[a] - 1 - n_ghost_ - offset
+                                                - (n_ghost_ - 1 - ga))
                                              : (n_ghost_ + offset
-                                                + (n_ghost_ - 1 - gb));
-                                    for (int hc = 0; hc < len_c; ++hc) {
-                                        ijk[c] = c_lo + hc;
-                                        s.send[(ga * n_ghost_ + gb) * len_c + hc] =
-                                            vector[ijk[0]][ijk[1]][ijk[2]];
+                                                + (n_ghost_ - 1 - ga));
+                                    for (int gb = 0; gb < n_ghost_; ++gb) {
+                                        ijk[b] = (sb == +1)
+                                                 ? (nax_e18[b] - 1 - n_ghost_ - offset
+                                                    - (n_ghost_ - 1 - gb))
+                                                 : (n_ghost_ + offset
+                                                    + (n_ghost_ - 1 - gb));
+                                        for (int hc = 0; hc < len_c; ++hc) {
+                                            ijk[c] = c_lo + hc;
+                                            s.send[f * slab + (ga * n_ghost_ + gb) * len_c + hc] =
+                                                vectors[f][ijk[0]][ijk[1]][ijk[2]];
+                                        }
                                     }
                                 }
                             }
@@ -1703,14 +2120,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             std::vector<MPI_Request> drqs;
             drqs.reserve(2 * dslots.size());
             for (DSlot &s : dslots) {
-                const int slab = n_ghost_ * n_ghost_ * s.len_c;
+                const int n = n_fields * n_ghost_ * n_ghost_ * s.len_c;
                 const int tag_send = detag(s.axis_a, s.axis_b,  s.sa,  s.sb);
                 const int tag_recv = detag(s.axis_a, s.axis_b, -s.sa, -s.sb);
                 drqs.emplace_back();
-                MPI_Irecv(s.recv.data(), slab, MPI_DOUBLE, s.nbr,
+                MPI_Irecv(s.recv.data(), n, MPI_DOUBLE, s.nbr,
                           tag_recv, comm, &drqs.back());
                 drqs.emplace_back();
-                MPI_Isend(s.send.data(), slab, MPI_DOUBLE, s.nbr,
+                MPI_Isend(s.send.data(), n, MPI_DOUBLE, s.nbr,
                           tag_send, comm, &drqs.back());
             }
             if (!drqs.empty())
@@ -1719,15 +2136,18 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             //* Apply: COPY (=) into (sa, sb) ghost corner. Override the
             //* wrong value written by the standard EDGE PHASE.
             for (const DSlot &s : dslots) {
+                const int slab = n_ghost_ * n_ghost_ * s.len_c;
                 int ijk[3];
-                for (int ga = 0; ga < n_ghost_; ++ga) {
-                    ijk[s.axis_a] = (s.sa == -1) ? ga : (nax_e18[s.axis_a] - 1 - ga);
-                    for (int gb = 0; gb < n_ghost_; ++gb) {
-                        ijk[s.axis_b] = (s.sb == -1) ? gb : (nax_e18[s.axis_b] - 1 - gb);
-                        for (int hc = 0; hc < s.len_c; ++hc) {
-                            ijk[s.axis_c] = s.c_lo + hc;
-                            vector[ijk[0]][ijk[1]][ijk[2]] =
-                                s.recv[(ga * n_ghost_ + gb) * s.len_c + hc];
+                for (int f = 0; f < n_fields; ++f) {
+                    for (int ga = 0; ga < n_ghost_; ++ga) {
+                        ijk[s.axis_a] = (s.sa == -1) ? ga : (nax_e18[s.axis_a] - 1 - ga);
+                        for (int gb = 0; gb < n_ghost_; ++gb) {
+                            ijk[s.axis_b] = (s.sb == -1) ? gb : (nax_e18[s.axis_b] - 1 - gb);
+                            for (int hc = 0; hc < s.len_c; ++hc) {
+                                ijk[s.axis_c] = s.c_lo + hc;
+                                vectors[f][ijk[0]][ijk[1]][ijk[2]] =
+                                    s.recv[f * slab + (ga * n_ghost_ + gb) * s.len_c + hc];
+                            }
                         }
                     }
                 }
@@ -1738,77 +2158,79 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //  Generalized from legacy L437-494. Uses else-if like legacy: for np=1
         //  (all periodic) the first branch handles all 8 corner cubes via the
         //  cascade face->edge->corner. Source cells were filled by edge self-copies.
-        if (left_neighborX == myrank && right_neighborX == myrank) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int sL = nx - 1 - n_ghost_ - offset - g_src(g);
-                const int sR = n_ghost_ + offset + g_src(g);
-                for (int gy = 0; gy < n_ghost_; gy++)
-                for (int gz = 0; gz < n_ghost_; gz++) {
-                    if (left_neighborY != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
-                        vector[g][gy][gz]                   = vector[sL][gy][gz];
-                        vector[nx-1-g][gy][gz]              = vector[sR][gy][gz];
-                    }
-                    if (left_neighborY != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
-                        vector[g][gy][nz-1-gz]              = vector[sL][gy][nz-1-gz];
-                        vector[nx-1-g][gy][nz-1-gz]         = vector[sR][gy][nz-1-gz];
-                    }
-                    if (right_neighborY != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
-                        vector[g][ny-1-gy][gz]              = vector[sL][ny-1-gy][gz];
-                        vector[nx-1-g][ny-1-gy][gz]         = vector[sR][ny-1-gy][gz];
-                    }
-                    if (right_neighborY != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
-                        vector[g][ny-1-gy][nz-1-gz]         = vector[sL][ny-1-gy][nz-1-gz];
-                        vector[nx-1-g][ny-1-gy][nz-1-gz]    = vector[sR][ny-1-gy][nz-1-gz];
-                    }
-                }
-            }
-        }
-        else if (left_neighborY == myrank && right_neighborY == myrank) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int sL = ny - 1 - n_ghost_ - offset - g_src(g);
-                const int sR = n_ghost_ + offset + g_src(g);
-                for (int gx = 0; gx < n_ghost_; gx++)
-                for (int gz = 0; gz < n_ghost_; gz++) {
-                    if (left_neighborX != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
-                        vector[gx][g][gz]                   = vector[gx][sL][gz];
-                        vector[gx][ny-1-g][gz]              = vector[gx][sR][gz];
-                    }
-                    if (left_neighborX != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
-                        vector[gx][g][nz-1-gz]              = vector[gx][sL][nz-1-gz];
-                        vector[gx][ny-1-g][nz-1-gz]         = vector[gx][sR][nz-1-gz];
-                    }
-                    if (right_neighborX != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
-                        vector[nx-1-gx][g][gz]              = vector[nx-1-gx][sL][gz];
-                        vector[nx-1-gx][ny-1-g][gz]         = vector[nx-1-gx][sR][gz];
-                    }
-                    if (right_neighborX != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
-                        vector[nx-1-gx][g][nz-1-gz]         = vector[nx-1-gx][sL][nz-1-gz];
-                        vector[nx-1-gx][ny-1-g][nz-1-gz]    = vector[nx-1-gx][sR][nz-1-gz];
+        for (int f = 0; f < n_fields; ++f) {
+            if (left_neighborX == myrank && right_neighborX == myrank) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int sL = nx - 1 - n_ghost_ - offset - g_src(g);
+                    const int sR = n_ghost_ + offset + g_src(g);
+                    for (int gy = 0; gy < n_ghost_; gy++)
+                    for (int gz = 0; gz < n_ghost_; gz++) {
+                        if (left_neighborY != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][g][gy][gz]                   = vectors[f][sL][gy][gz];
+                            vectors[f][nx-1-g][gy][gz]              = vectors[f][sR][gy][gz];
+                        }
+                        if (left_neighborY != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][g][gy][nz-1-gz]              = vectors[f][sL][gy][nz-1-gz];
+                            vectors[f][nx-1-g][gy][nz-1-gz]         = vectors[f][sR][gy][nz-1-gz];
+                        }
+                        if (right_neighborY != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][g][ny-1-gy][gz]              = vectors[f][sL][ny-1-gy][gz];
+                            vectors[f][nx-1-g][ny-1-gy][gz]         = vectors[f][sR][ny-1-gy][gz];
+                        }
+                        if (right_neighborY != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][g][ny-1-gy][nz-1-gz]         = vectors[f][sL][ny-1-gy][nz-1-gz];
+                            vectors[f][nx-1-g][ny-1-gy][nz-1-gz]    = vectors[f][sR][ny-1-gy][nz-1-gz];
+                        }
                     }
                 }
             }
-        }
-        else if (left_neighborZ == myrank && right_neighborZ == myrank) {
-            for (int g = 0; g < n_ghost_; g++) {
-                const int sL = nz - 1 - n_ghost_ - offset - g_src(g);
-                const int sR = n_ghost_ + offset + g_src(g);
-                for (int gx = 0; gx < n_ghost_; gx++)
-                for (int gy = 0; gy < n_ghost_; gy++) {
-                    if (left_neighborX != MPI_PROC_NULL && left_neighborY != MPI_PROC_NULL) {
-                        vector[gx][gy][g]                   = vector[gx][gy][sL];
-                        vector[gx][gy][nz-1-g]              = vector[gx][gy][sR];
+            else if (left_neighborY == myrank && right_neighborY == myrank) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int sL = ny - 1 - n_ghost_ - offset - g_src(g);
+                    const int sR = n_ghost_ + offset + g_src(g);
+                    for (int gx = 0; gx < n_ghost_; gx++)
+                    for (int gz = 0; gz < n_ghost_; gz++) {
+                        if (left_neighborX != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][gx][g][gz]                   = vectors[f][gx][sL][gz];
+                            vectors[f][gx][ny-1-g][gz]              = vectors[f][gx][sR][gz];
+                        }
+                        if (left_neighborX != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][gx][g][nz-1-gz]              = vectors[f][gx][sL][nz-1-gz];
+                            vectors[f][gx][ny-1-g][nz-1-gz]         = vectors[f][gx][sR][nz-1-gz];
+                        }
+                        if (right_neighborX != MPI_PROC_NULL && left_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][nx-1-gx][g][gz]              = vectors[f][nx-1-gx][sL][gz];
+                            vectors[f][nx-1-gx][ny-1-g][gz]         = vectors[f][nx-1-gx][sR][gz];
+                        }
+                        if (right_neighborX != MPI_PROC_NULL && right_neighborZ != MPI_PROC_NULL) {
+                            vectors[f][nx-1-gx][g][nz-1-gz]         = vectors[f][nx-1-gx][sL][nz-1-gz];
+                            vectors[f][nx-1-gx][ny-1-g][nz-1-gz]    = vectors[f][nx-1-gx][sR][nz-1-gz];
+                        }
                     }
-                    if (left_neighborX != MPI_PROC_NULL && right_neighborY != MPI_PROC_NULL) {
-                        vector[gx][ny-1-gy][g]              = vector[gx][ny-1-gy][sL];
-                        vector[gx][ny-1-gy][nz-1-g]         = vector[gx][ny-1-gy][sR];
-                    }
-                    if (right_neighborX != MPI_PROC_NULL && left_neighborY != MPI_PROC_NULL) {
-                        vector[nx-1-gx][gy][g]              = vector[nx-1-gx][gy][sL];
-                        vector[nx-1-gx][gy][nz-1-g]         = vector[nx-1-gx][gy][sR];
-                    }
-                    if (right_neighborX != MPI_PROC_NULL && right_neighborY != MPI_PROC_NULL) {
-                        vector[nx-1-gx][ny-1-gy][g]         = vector[nx-1-gx][ny-1-gy][sL];
-                        vector[nx-1-gx][ny-1-gy][nz-1-g]    = vector[nx-1-gx][ny-1-gy][sR];
+                }
+            }
+            else if (left_neighborZ == myrank && right_neighborZ == myrank) {
+                for (int g = 0; g < n_ghost_; g++) {
+                    const int sL = nz - 1 - n_ghost_ - offset - g_src(g);
+                    const int sR = n_ghost_ + offset + g_src(g);
+                    for (int gx = 0; gx < n_ghost_; gx++)
+                    for (int gy = 0; gy < n_ghost_; gy++) {
+                        if (left_neighborX != MPI_PROC_NULL && left_neighborY != MPI_PROC_NULL) {
+                            vectors[f][gx][gy][g]                   = vectors[f][gx][gy][sL];
+                            vectors[f][gx][gy][nz-1-g]              = vectors[f][gx][gy][sR];
+                        }
+                        if (left_neighborX != MPI_PROC_NULL && right_neighborY != MPI_PROC_NULL) {
+                            vectors[f][gx][ny-1-gy][g]              = vectors[f][gx][ny-1-gy][sL];
+                            vectors[f][gx][ny-1-gy][nz-1-g]         = vectors[f][gx][ny-1-gy][sR];
+                        }
+                        if (right_neighborX != MPI_PROC_NULL && left_neighborY != MPI_PROC_NULL) {
+                            vectors[f][nx-1-gx][gy][g]              = vectors[f][nx-1-gx][gy][sL];
+                            vectors[f][nx-1-gx][gy][nz-1-g]         = vectors[f][nx-1-gx][gy][sR];
+                        }
+                        if (right_neighborX != MPI_PROC_NULL && right_neighborY != MPI_PROC_NULL) {
+                            vectors[f][nx-1-gx][ny-1-gy][g]         = vectors[f][nx-1-gx][ny-1-gy][sL];
+                            vectors[f][nx-1-gx][ny-1-gy][nz-1-g]    = vectors[f][nx-1-gx][ny-1-gy][sR];
+                        }
                     }
                 }
             }
@@ -1831,18 +2253,20 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //* re-summing periodic-self ghosts that the periodic-self fold/copy
     //* above already handled.
     if (needInterp && n_ghost_ == 1) {
-        if (vector_c != nullptr) {
-            addFace_kahan  (nx, ny, nz, vector, vector_c, vct, n_ghost_);
-            addEdgeZ_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
-            addEdgeY_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
-            addEdgeX_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
-            addCorner_kahan(nx, ny, nz, vector, vector_c, vct, n_ghost_);
-        } else {
-            addFace  (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
-            addEdgeZ (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
-            addEdgeY (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
-            addEdgeX (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
-            addCorner(nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
+        for (int f = 0; f < n_fields; ++f) {
+            if (vectors_c != nullptr) {
+                addFace_kahan  (nx, ny, nz, vectors[f], vectors_c[f], vct, n_ghost_);
+                addEdgeZ_kahan (nx, ny, nz, vectors[f], vectors_c[f], vct, n_ghost_);
+                addEdgeY_kahan (nx, ny, nz, vectors[f], vectors_c[f], vct, n_ghost_);
+                addEdgeX_kahan (nx, ny, nz, vectors[f], vectors_c[f], vct, n_ghost_);
+                addCorner_kahan(nx, ny, nz, vectors[f], vectors_c[f], vct, n_ghost_);
+            } else {
+                addFace  (nx, ny, nz, vectors[f], vct, n_ghost_, /*skip_self*/ true);
+                addEdgeZ (nx, ny, nz, vectors[f], vct, n_ghost_, /*skip_self*/ true);
+                addEdgeY (nx, ny, nz, vectors[f], vct, n_ghost_, /*skip_self*/ true);
+                addEdgeX (nx, ny, nz, vectors[f], vct, n_ghost_, /*skip_self*/ true);
+                addCorner(nx, ny, nz, vectors[f], vct, n_ghost_, /*skip_self*/ true);
+            }
         }
     }
 }
@@ -2476,6 +2900,70 @@ void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const Virtua
 {
     double ***vector=_vector.fetch_arr3();
 	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, true);
+}
+
+//* ================================================================================
+//  Multi-field dispatcher and call-site wrappers.
+//
+//  Batches N ≥ 1 fields sharing the same (nx, ny, nz) extents and the same
+//  MPI Cartesian topology into one halo exchange per direction. At the
+//  EMfields3D mass-matrix call sites, replacing N sequential single-field
+//  calls with one batched call cuts MPI message count by N× and amortises
+//  per-message latency over an N×-larger payload.
+//
+//  Path selection mirrors the single-field NBDerivedHaloComm:
+//   - n_ghost > 1 (TSC moments path): forward to the multi-field
+//     NBDerivedHaloCommN. One MPI message per direction carries
+//     n_fields × slab_size doubles.
+//   - n_ghost == 1 (CIC fast path): the legacy merged-MPI-types fast path
+//     in NBDerivedHaloComm hard-codes single-field strided datatypes.
+//     Multi-field at this width just loops, calling the legacy function
+//     N times. Halo cost is small at CIC (1 layer) so per-message latency
+//     doesn't dominate.
+//* ================================================================================
+static void NBDerivedHaloComm_multi(int nx, int ny, int nz,
+                                     int n_fields, double ****vectors,
+                                     const VirtualTopology3D *vct, EMfields3D *EMf,
+                                     bool isCenterFlag, bool isFaceOnlyFlag,
+                                     bool needInterp, bool isParticle,
+                                     double ****vectors_c = nullptr)
+{
+    if (EMf->getNGhost() > 1) {
+        NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
+                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vectors_c);
+        return;
+    }
+    //* CIC fallback: loop N times through the legacy single-field fast path.
+    for (int f = 0; f < n_fields; ++f) {
+        double ***vc = (vectors_c != nullptr) ? vectors_c[f] : nullptr;
+        NBDerivedHaloComm(nx, ny, nz, vectors[f], vct, EMf,
+                          isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vc);
+    }
+}
+
+void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
+                              const VirtualTopology3D *vct, EMfields3D *EMf)
+{
+    NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
+                            /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,
+                            /*needInterp=*/true, /*isParticle=*/true);
+}
+
+void communicateInterp_multi_kahan(int nx, int ny, int nz, int n_fields,
+                                    double ****vectors, double ****vectors_c,
+                                    const VirtualTopology3D *vct, EMfields3D *EMf)
+{
+    NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
+                            /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,
+                            /*needInterp=*/true, /*isParticle=*/true, vectors_c);
+}
+
+void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
+                              const VirtualTopology3D *vct, EMfields3D *EMf)
+{
+    NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
+                            /*isCenterFlag=*/false, /*isFaceOnlyFlag=*/false,
+                            /*needInterp=*/false, /*isParticle=*/true);
 }
 
 //? Old functions used for communicating 4D vectors (each species of particles in moments)
