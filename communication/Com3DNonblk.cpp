@@ -1178,38 +1178,17 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //    HI ghost vector[nx-1-g] → vector[(2*n_ghost - 1 + offset) - g]
     //  Verified for nodes (offset=1) and cells (offset=0). For n_ghost=1 this
     //  loop also adds zero on Linear because Linear never deposits to ghosts.
-    //
-    //* CompletePeriodicSelfFold (TSC edge + corner fold). The legacy face-fold
-    //  cascades: x-fold places into x-HI rows including y/z ghost cells, then
-    //  y-fold reads those and propagates further. Edge ghost cells (two axes
-    //  in ghost range simultaneously) get misplaced because each axis fold
-    //  treats them as if they were strict-perpendicular face cells. With the
-    //  flag on AND all three axes periodic-self, restrict each face fold's
-    //  perpendicular range to strict-axis-interior so cascade is suppressed,
-    //  then add explicit edge (12 cases) and corner (8 cases) folds — each
-    //  ghost cell folds exactly once to its multi-axis periodic image.
     const bool ps_x_self = (right_neighborX == myrank && left_neighborX == myrank);
     const bool ps_y_self = (right_neighborY == myrank && left_neighborY == myrank);
     const bool ps_z_self = (right_neighborZ == myrank && left_neighborZ == myrank);
-    const bool full_fold = needInterp && EMf->get_col().getCompletePeriodicSelfFold()
-                            && ps_x_self && ps_y_self && ps_z_self;
-    //* For the strict-perpendicular range used by face fold under full_fold:
-    //  iy ∈ [n_ghost, ny - 1 - n_ghost]. At ng=2 this is [2, ny-3], i.e. it
-    //  excludes the inner ghost rows iy=1 and iy=ny-2 (which are edge cells).
-    const int fp_iy_lo = full_fold ? n_ghost_ : 1;
-    const int fp_iy_hi = full_fold ? (ny - 1 - n_ghost_) : (ny - 2);
-    const int fp_ix_lo = full_fold ? n_ghost_ : 1;
-    const int fp_ix_hi = full_fold ? (nx - 1 - n_ghost_) : (nx - 2);
-    const int fp_iz_lo = full_fold ? n_ghost_ : 1;
-    const int fp_iz_hi = full_fold ? (nz - 1 - n_ghost_) : (nz - 2);
 
     if (needInterp) {
         if (ps_x_self) {
             for (int g = 0; g < n_ghost_; g++) {
                 const int dst_lo = g + nx - 2 * n_ghost_ - offset;
                 const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
-                for (int iy = fp_iy_lo; iy <= fp_iy_hi; iy++)
-                    for (int iz = fp_iz_lo; iz <= fp_iz_hi; iz++) {
+                for (int iy = 1; iy <= ny - 2; iy++)
+                    for (int iz = 1; iz <= nz - 2; iz++) {
                         vector[dst_lo][iy][iz] += vector[g][iy][iz];
                         vector[dst_hi][iy][iz] += vector[nx - 1 - g][iy][iz];
                     }
@@ -1219,8 +1198,8 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             for (int g = 0; g < n_ghost_; g++) {
                 const int dst_lo = g + ny - 2 * n_ghost_ - offset;
                 const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
-                for (int ix = fp_ix_lo; ix <= fp_ix_hi; ix++)
-                    for (int iz = fp_iz_lo; iz <= fp_iz_hi; iz++) {
+                for (int ix = 1; ix <= nx - 2; ix++)
+                    for (int iz = 1; iz <= nz - 2; iz++) {
                         vector[ix][dst_lo][iz] += vector[ix][g][iz];
                         vector[ix][dst_hi][iz] += vector[ix][ny - 1 - g][iz];
                     }
@@ -1230,80 +1209,11 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
             for (int g = 0; g < n_ghost_; g++) {
                 const int dst_lo = g + nz - 2 * n_ghost_ - offset;
                 const int dst_hi = (2 * n_ghost_ - 1 + offset) - g;
-                for (int ix = fp_ix_lo; ix <= fp_ix_hi; ix++)
-                    for (int iy = fp_iy_lo; iy <= fp_iy_hi; iy++) {
+                for (int ix = 1; ix <= nx - 2; ix++)
+                    for (int iy = 1; iy <= ny - 2; iy++) {
                         vector[ix][iy][dst_lo] += vector[ix][iy][g];
                         vector[ix][iy][dst_hi] += vector[ix][iy][nz - 1 - g];
                     }
-            }
-        }
-
-        //* Explicit edge fold (12 cases, 4 per axis pair) — each (gx, gy)-
-        //* corner ghost block folds to (dst_x, dst_y, strict-z) in the cross
-        //* section. dst_lo/hi mirror the face-fold formulas.
-        if (full_fold) {
-            //* X-Y edges, strict z range.
-            for (int gx = 0; gx < n_ghost_; gx++)
-            for (int gy = 0; gy < n_ghost_; gy++) {
-                const int dx_lo = gx + nx - 2 * n_ghost_ - offset;
-                const int dx_hi = (2 * n_ghost_ - 1 + offset) - gx;
-                const int dy_lo = gy + ny - 2 * n_ghost_ - offset;
-                const int dy_hi = (2 * n_ghost_ - 1 + offset) - gy;
-                for (int iz = fp_iz_lo; iz <= fp_iz_hi; iz++) {
-                    vector[dx_lo][dy_lo][iz] += vector[gx][gy][iz];
-                    vector[dx_lo][dy_hi][iz] += vector[gx][ny - 1 - gy][iz];
-                    vector[dx_hi][dy_lo][iz] += vector[nx - 1 - gx][gy][iz];
-                    vector[dx_hi][dy_hi][iz] += vector[nx - 1 - gx][ny - 1 - gy][iz];
-                }
-            }
-            //* X-Z edges, strict y range.
-            for (int gx = 0; gx < n_ghost_; gx++)
-            for (int gz = 0; gz < n_ghost_; gz++) {
-                const int dx_lo = gx + nx - 2 * n_ghost_ - offset;
-                const int dx_hi = (2 * n_ghost_ - 1 + offset) - gx;
-                const int dz_lo = gz + nz - 2 * n_ghost_ - offset;
-                const int dz_hi = (2 * n_ghost_ - 1 + offset) - gz;
-                for (int iy = fp_iy_lo; iy <= fp_iy_hi; iy++) {
-                    vector[dx_lo][iy][dz_lo] += vector[gx][iy][gz];
-                    vector[dx_lo][iy][dz_hi] += vector[gx][iy][nz - 1 - gz];
-                    vector[dx_hi][iy][dz_lo] += vector[nx - 1 - gx][iy][gz];
-                    vector[dx_hi][iy][dz_hi] += vector[nx - 1 - gx][iy][nz - 1 - gz];
-                }
-            }
-            //* Y-Z edges, strict x range.
-            for (int gy = 0; gy < n_ghost_; gy++)
-            for (int gz = 0; gz < n_ghost_; gz++) {
-                const int dy_lo = gy + ny - 2 * n_ghost_ - offset;
-                const int dy_hi = (2 * n_ghost_ - 1 + offset) - gy;
-                const int dz_lo = gz + nz - 2 * n_ghost_ - offset;
-                const int dz_hi = (2 * n_ghost_ - 1 + offset) - gz;
-                for (int ix = fp_ix_lo; ix <= fp_ix_hi; ix++) {
-                    vector[ix][dy_lo][dz_lo] += vector[ix][gy][gz];
-                    vector[ix][dy_lo][dz_hi] += vector[ix][gy][nz - 1 - gz];
-                    vector[ix][dy_hi][dz_lo] += vector[ix][ny - 1 - gy][gz];
-                    vector[ix][dy_hi][dz_hi] += vector[ix][ny - 1 - gy][nz - 1 - gz];
-                }
-            }
-
-            //* Explicit corner fold (8 cases) — each (gx, gy, gz)-corner
-            //* ghost block folds to (dst_x, dst_y, dst_z).
-            for (int gx = 0; gx < n_ghost_; gx++)
-            for (int gy = 0; gy < n_ghost_; gy++)
-            for (int gz = 0; gz < n_ghost_; gz++) {
-                const int dx_lo = gx + nx - 2 * n_ghost_ - offset;
-                const int dx_hi = (2 * n_ghost_ - 1 + offset) - gx;
-                const int dy_lo = gy + ny - 2 * n_ghost_ - offset;
-                const int dy_hi = (2 * n_ghost_ - 1 + offset) - gy;
-                const int dz_lo = gz + nz - 2 * n_ghost_ - offset;
-                const int dz_hi = (2 * n_ghost_ - 1 + offset) - gz;
-                vector[dx_lo][dy_lo][dz_lo] += vector[gx][gy][gz];
-                vector[dx_lo][dy_lo][dz_hi] += vector[gx][gy][nz - 1 - gz];
-                vector[dx_lo][dy_hi][dz_lo] += vector[gx][ny - 1 - gy][gz];
-                vector[dx_lo][dy_hi][dz_hi] += vector[gx][ny - 1 - gy][nz - 1 - gz];
-                vector[dx_hi][dy_lo][dz_lo] += vector[nx - 1 - gx][gy][gz];
-                vector[dx_hi][dy_lo][dz_hi] += vector[nx - 1 - gx][gy][nz - 1 - gz];
-                vector[dx_hi][dy_hi][dz_lo] += vector[nx - 1 - gx][ny - 1 - gy][gz];
-                vector[dx_hi][dy_hi][dz_hi] += vector[nx - 1 - gx][ny - 1 - gy][nz - 1 - gz];
             }
         }
     }
