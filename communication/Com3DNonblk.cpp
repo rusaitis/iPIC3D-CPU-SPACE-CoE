@@ -694,25 +694,40 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  Strict no-op at n_ghost=1
     //  and at periodic-self axes (Cartesian neighbour wraps to self).
     //! ============================================================
-    if (needInterp && n_ghost_ > 1) {
-        //* Resolve Cartesian topology + neighbour-at(s) helper. periods[]
-        //* and dims[] make the wrap explicit so periodic-self axes reduce
-        //* to "neighbour == myrank" and get filtered out cleanly.
-        int my_coords[3], dims[3], periods[3];
-        MPI_Cart_get(comm, 3, dims, periods, my_coords);
+    //* Resolve Cartesian topology + neighbour-at helper. Loaded once per
+    //* call (was being re-done by both the SOR pre-pass and the
+    //* XrankDiagonalEdgeCopy block). periods[] and dims[] make the wrap
+    //* explicit so periodic-self axes reduce to "neighbour == myrank"
+    //* and get filtered out cleanly.
+    int my_coords[3], dims[3], periods[3];
+    MPI_Cart_get(comm, 3, dims, periods, my_coords);
 
-        auto neighbour_at = [&](int sx, int sy, int sz) -> int {
-            int nbr[3] = {my_coords[0] + sx, my_coords[1] + sy, my_coords[2] + sz};
-            for (int d = 0; d < 3; ++d) {
-                if (nbr[d] < 0 || nbr[d] >= dims[d]) {
-                    if (!periods[d]) return MPI_PROC_NULL;
-                    nbr[d] = (nbr[d] % dims[d] + dims[d]) % dims[d];
-                }
+    //* Cart-neighbour lookup. Declared at function scope so the SOR
+    //* pre-pass AND the XrankDiagonalEdgeCopy block both call the same
+    //* lambda.
+    auto neighbour_at = [&](int sx, int sy, int sz) -> int {
+        int nbr[3] = {my_coords[0] + sx, my_coords[1] + sy, my_coords[2] + sz};
+        for (int d = 0; d < 3; ++d) {
+            if (nbr[d] < 0 || nbr[d] >= dims[d]) {
+                if (!periods[d]) return MPI_PROC_NULL;
+                nbr[d] = (nbr[d] % dims[d] + dims[d]) % dims[d];
             }
-            int r;
-            MPI_Cart_rank(comm, nbr, &r);
-            return r;
-        };
+        }
+        int r;
+        MPI_Cart_rank(comm, nbr, &r);
+        return r;
+    };
+
+    //* Cross-rank periodic axis check: SOR pre-pass + multi-axis completion
+    //* passes are pure no-ops at np=1 (neighbours all == myrank) and at
+    //* configs with no cross-rank periodic axis. Skip the bookkeeping when
+    //* none exists so 1000+ halo calls per cycle don't pay the iterate-
+    //* then-skip cost on small / single-axis decompositions.
+    const bool any_xrank_periodic =
+        (periods[0] && dims[0] > 1) || (periods[1] && dims[1] > 1)
+                                    || (periods[2] && dims[2] > 1);
+
+    if (needInterp && n_ghost_ > 1 && any_xrank_periodic) {
 
         //* Per-axis (n, s) → source index, and (n, s) → destination index.
         //* h is the layer counter:
@@ -1594,29 +1609,12 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //  3-axis (X+Y+Z all cross-rank) 8-rank corners are NOT closed by
         //  this pass — would need an additional 3-axis CORNER override.
         //! ============================================================
-        {
-            int my_coords_e18[3], dims_e18[3], periods_e18[3];
-            MPI_Cart_get(comm, 3, dims_e18, periods_e18, my_coords_e18);
-
-            auto neighbour_at_e18 = [&](int sx, int sy, int sz) -> int {
-                int nbr[3] = {my_coords_e18[0] + sx,
-                              my_coords_e18[1] + sy,
-                              my_coords_e18[2] + sz};
-                for (int d = 0; d < 3; ++d) {
-                    if (nbr[d] < 0 || nbr[d] >= dims_e18[d]) {
-                        if (!periods_e18[d]) return MPI_PROC_NULL;
-                        nbr[d] = (nbr[d] % dims_e18[d] + dims_e18[d]) % dims_e18[d];
-                    }
-                }
-                int r;
-                MPI_Cart_rank(comm, nbr, &r);
-                return r;
-            };
-
+        if (any_xrank_periodic) {
+            //* Reuse the topology + neighbour_at lambda from function scope.
             const bool xrank_e18[3] = {
-                periods_e18[0] && dims_e18[0] > 1,
-                periods_e18[1] && dims_e18[1] > 1,
-                periods_e18[2] && dims_e18[2] > 1
+                periods[0] && dims[0] > 1,
+                periods[1] && dims[1] > 1,
+                periods[2] && dims[2] > 1
             };
             const int  nax_e18[3]    = {nx, ny, nz};
 
@@ -1662,7 +1660,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
                             int sxyz[3] = {0, 0, 0};
                             sxyz[a] = sa;
                             sxyz[b] = sb;
-                            const int nbr = neighbour_at_e18(sxyz[0], sxyz[1], sxyz[2]);
+                            const int nbr = neighbour_at(sxyz[0], sxyz[1], sxyz[2]);
                             if (nbr == MPI_PROC_NULL || nbr == myrank) continue;
 
                             dslots.push_back({a, b, c, sa, sb, len_c, c_lo,
