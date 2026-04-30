@@ -652,23 +652,18 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     if (left_neighborZ  != MPI_PROC_NULL && left_neighborZ  != myrank) communicationCnt[4] = 1;
     if (right_neighborZ != MPI_PROC_NULL && right_neighborZ != myrank) communicationCnt[5] = 1;
 
-    //* Interior/boundary offset: centers use offset = 0 (no shared node); nodes
-    //  use offset = 1 (ghost receives "one node deeper" than the boundary-shared
-    //  node, so the send source is one step further into the interior).
-    //* FixNodeInterpOffset: the moment-interp call is (isCenterFlag=true,
-    //  needInterp=true) but the data actually lives on nodes (node MPI
-    //  datatypes are selected via isCenterDim = isCenterFlag && !needInterp).
-    //  With the fix flag on, take offset from isCenterDim instead so the
-    //  fold/copy below see offset=1 (node convention) for the moment path.
-    const bool fix_node_offset = EMf->get_col().getFixNodeInterpOffset();
-    const int offset = fix_node_offset ? (isCenterDim ? 0 : 1)
-                                       : (isCenterFlag ? 0 : 1);
+    //* Interior/boundary offset: centers use offset = 0 (no shared node);
+    //  nodes use offset = 1 (ghost receives "one node deeper" than the
+    //  boundary-shared node, so the send source is one step further into
+    //  the interior). The moment-interp path (isCenterFlag=true,
+    //  needInterp=true) actually carries node data, so we take offset
+    //  from isCenterDim — which already filters needInterp out.
+    const int offset = isCenterDim ? 0 : 1;
 
-    //* Periodic-self ghost-source remap. When enabled, substitute g → (n_ghost-1-g)
-    //  in source-index expressions so the OUTERMOST ghost (g=0) holds the value
-    //  FURTHEST from the active interior. No-op at n_ghost=1.
-    const bool fix_self_ghost = EMf->get_col().getFixPeriodicSelfGhostOrder();
-    auto g_src = [&](int g) { return fix_self_ghost ? (n_ghost_ - 1 - g) : g; };
+    //* Periodic-self ghost-source remap: substitute g → (n_ghost-1-g) so
+    //  the OUTERMOST ghost (g=0) holds the value FURTHEST from the active
+    //  interior. No-op at n_ghost=1.
+    auto g_src = [&](int g) { return n_ghost_ - 1 - g; };
 
     //! ============================================================
     //* CROSS-RANK MOMENT SOR PRE-PASS (faces + edges + corners)
@@ -696,10 +691,10 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  overwrite our ghost cells before they could be sent, so this
     //  pre-pass runs first.
     //
-    //  Default off (`CrossRankMomentSOR=false`); strict no-op at n_ghost=1
+    //  Strict no-op at n_ghost=1
     //  and at periodic-self axes (Cartesian neighbour wraps to self).
     //! ============================================================
-    if (needInterp && EMf->get_col().getCrossRankMomentSOR() && n_ghost_ > 1) {
+    if (needInterp && n_ghost_ > 1) {
         //* Resolve Cartesian topology + neighbour-at(s) helper. periods[]
         //* and dims[] make the wrap explicit so periodic-self axes reduce
         //* to "neighbour == myrank" and get filtered out cleanly.
@@ -845,10 +840,9 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //
         //  3-axis (8-rank) corners are NOT closed here — would need an
         //  additional pass restricted to all three dups. Out of scope
-        //  until a config exercises it. Default off; gated under
-        //  MultiAxisCornerSOR; runs only when CrossRankMomentSOR is on.
+        //  until a config exercises it.
         //! ============================================================
-        if (EMf->get_col().getMultiAxisCornerSOR()) {
+        {
             const bool xrank[3] = {
                 periods[0] && dims[0] > 1,
                 periods[1] && dims[1] > 1,
@@ -1005,10 +999,9 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //
         //  3-axis (X+Y+Z all cross-rank) is OUT OF SCOPE: at 8-rank cells
         //  the 6 ordered pairs combined with E.11's 4 routings would total
-        //  10, over-counting. v1 is correct for ≤ 2 cross-rank axes; gate
-        //  on flag, default off.
+        //  10, over-counting. Correct only for ≤ 2 cross-rank axes.
         //! ============================================================
-        if (EMf->get_col().getXrankFaceCellCompletion()) {
+        {
             const bool xrank[3] = {
                 periods[0] && dims[0] > 1,
                 periods[1] && dims[1] > 1,
@@ -1600,9 +1593,8 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
         //
         //  3-axis (X+Y+Z all cross-rank) 8-rank corners are NOT closed by
         //  this pass — would need an additional 3-axis CORNER override.
-        //  Default off; gated under `XrankDiagonalEdgeCopy`.
         //! ============================================================
-        if (EMf->get_col().getXrankDiagonalEdgeCopy()) {
+        {
             int my_coords_e18[3], dims_e18[3], periods_e18[3];
             MPI_Cart_get(comm, 3, dims_e18, periods_e18, my_coords_e18);
 
@@ -1834,40 +1826,25 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz, double ***vector,
     //  be fixed by clamping addFace alone — the whole discretization (field
     //  copy, stencils, moments) is self-consistently calibrated. Require
     //  nxc_r >= 2*n_ghost - 1 per rank for each self-periodic axis.
-    if (needInterp) {
-        //* TSC periodic-self double-count fix. The periodic-self fold + copy
-        //* above already produced the correct sum on each periodic-self axis;
-        //* running the trailing addFace family there re-sums ghost cells (now
-        //* holding interior copies) into the LO/HI duplicates, tripling them.
-        //* Pass `skip_self_periodic` to addFace*/addCorner so they skip
-        //* periodic-self axes per-axis. Cross-rank axes still flow through.
-        const bool skip_self = EMf->get_col().getSkipPeriodicSelfAddFace();
-        //* When CrossRankMomentSOR pre-pass ran, it ALREADY summed ghost
-        //* partials AND LO/HI dup natives into the proper strict-interior
-        //* destinations for cross-rank axes — so the trailing addFace block
-        //* (whose `vector[ng+g] += vector[g]` formula targets the wrong
-        //* phys-node at TSC cross-rank) must also be skipped on those axes.
-        //* Skip the entire trailing block when both fixes are on at ng > 1.
-        const bool skip_all_for_xrank_sor = needInterp && n_ghost_ > 1
-            && EMf->get_col().getCrossRankMomentSOR();
-
-        //* Kahan-aware sum-on-receive, n_ghost > 1 variant. Also skipped
-        //* when CrossRankMomentSOR is on — the unified 26-direction
-        //* pre-pass already accumulated ghost natives into receivers'
-        //* strict + dup, so running the Kahan addFace family on top
-        //* would double-count.
-        if (vector_c != nullptr && !skip_all_for_xrank_sor) {
+    //* CIC (n_ghost=1) only — at TSC the cross-rank SOR pre-pass above
+    //* already accumulated ghost natives into receivers' strict + dup, so
+    //* running the trailing addFace family on top would double-count. The
+    //* `skip_self_periodic=true` argument keeps the legacy CIC path from
+    //* re-summing periodic-self ghosts that the periodic-self fold/copy
+    //* above already handled.
+    if (needInterp && n_ghost_ == 1) {
+        if (vector_c != nullptr) {
             addFace_kahan  (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeZ_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeY_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addEdgeX_kahan (nx, ny, nz, vector, vector_c, vct, n_ghost_);
             addCorner_kahan(nx, ny, nz, vector, vector_c, vct, n_ghost_);
-        } else if (vector_c == nullptr && !skip_all_for_xrank_sor) {
-            addFace  (nx, ny, nz, vector, vct, n_ghost_, skip_self);
-            addEdgeZ (nx, ny, nz, vector, vct, n_ghost_, skip_self);
-            addEdgeY (nx, ny, nz, vector, vct, n_ghost_, skip_self);
-            addEdgeX (nx, ny, nz, vector, vct, n_ghost_, skip_self);
-            addCorner(nx, ny, nz, vector, vct, n_ghost_, skip_self);
+        } else {
+            addFace  (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
+            addEdgeZ (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
+            addEdgeY (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
+            addEdgeX (nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
+            addCorner(nx, ny, nz, vector, vct, n_ghost_, /*skip_self*/ true);
         }
     }
 }

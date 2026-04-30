@@ -72,11 +72,6 @@ PERIODICX                      = 1
 PERIODICY                      = 1
 PERIODICZ                      = 1
 
-SkipPeriodicSelfAddFace        = 1
-MassMatrixSumUnify             = 1
-FixNodeInterpOffset            = 1
-CrossRankMomentSOR             = 1
-UnifyCrossRankDuplicates       = 1
 
 DumpMaxwellImageStages         = 1
 DumpMaxwellImageStagesCycle    = 1

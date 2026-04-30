@@ -219,22 +219,11 @@ class Collective
     int    getDumpMaxwellImageStagesCycle() const { return DumpMaxwellImageStagesCycle; }
     bool   getDumpParticlesInit()       const { return DumpParticlesInit; }
     bool   getDumpMassMatrixDiag()      const { return DumpMassMatrixDiag; }
-    bool   getFixPeriodicSelfGhostOrder() const { return FixPeriodicSelfGhostOrder; }
-    bool   getUnifyMassMatrixPeriodicDup() const { return UnifyMassMatrixPeriodicDup; }
     bool   getDisableMassMatrixInImage() const { return DisableMassMatrixInImage; }
     bool   getDisableCurl2InImage()      const { return DisableCurl2InImage; }
-    bool   getUnifyJhPeriodicDup()       const { return UnifyJhPeriodicDup; }
     bool   getEigenmodeProbe()           const { return EigenmodeProbe; }
     bool   getRestrictMassMatrix3Cube()  const { return RestrictMassMatrix3Cube; }
-    bool   getMassMatrixSumUnify()       const { return MassMatrixSumUnify; }
     bool   getDumpMassMatrixStages()     const { return DumpMassMatrixStages; }
-    bool   getSkipPeriodicSelfAddFace()  const { return SkipPeriodicSelfAddFace; }
-    bool   getFixNodeInterpOffset()      const { return FixNodeInterpOffset; }
-    bool   getCrossRankMomentSOR()       const { return CrossRankMomentSOR; }
-    bool   getMultiAxisCornerSOR()       const { return MultiAxisCornerSOR; }
-    bool   getXrankFaceCellCompletion()  const { return XrankFaceCellCompletion; }
-    bool   getXrankDiagonalEdgeCopy()    const { return XrankDiagonalEdgeCopy; }
-    bool   getUnifyCrossRankDuplicates() const { return UnifyCrossRankDuplicates; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -315,22 +304,6 @@ class Collective
     //* of M at LO vs HI nodes. Default off.
     bool   DumpMassMatrixDiag;
 
-    //* NBDerivedHaloCommN periodic-self ghost-source index correction. The
-    //* loop iterates g=0..n_ghost-1 with sL/sR walking in the wrong direction;
-    //* g=0 is the outermost ghost and should hold the value furthest from the
-    //* active interior. Substitutes g → (n_ghost - 1 - g) in source formulas.
-    //* No-op at n_ghost=1 (Linear); swaps the two ghost layers at n_ghost=2.
-    bool   FixPeriodicSelfGhostOrder;
-
-    //* Average-unify M's periodic-duplicate LO and HI nodes after the
-    //* mass-matrix gather + halo refresh, then re-run the copy halo so ghost
-    //* cells pick up the unified values. Linear has LO == HI bit-exact by
-    //* construction (CIC corner deposit doesn't reach ghosts), so average is
-    //* a no-op. TSC has LO != HI by 3-5% because the 27-node deposit hits
-    //* ghost cells and those contributions are then overwritten by the copy
-    //* halo, asymmetrically losing deposits to LO vs HI.
-    bool   UnifyMassMatrixPeriodicDup;
-
     //* Diagnostic-only: zero the M·E (S·M·S) contribution to MaxwellImage so
     //* A becomes (I + curl²·factor) only. Bisects whether the TSC uniform
     //* explosion lives in the M-side or the curl²-side. Default false.
@@ -339,16 +312,8 @@ class Collective
     //* becomes (I + S·M·S·factor) only. Default false.
     bool   DisableCurl2InImage;
 
-    //* Average-unify Jxh/Jyh/Jzh (and per-species Jxhs/Jyhs/Jzhs and rhons)
-    //* periodic-duplicate LO and HI nodes after the gather + halo refresh,
-    //* analogous to UnifyMassMatrixPeriodicDup. Linear's CIC deposit doesn't
-    //* reach ghost cells so LO == HI bit-exact; TSC's 27-node deposit reaches
-    //* ghosts that get overwritten by the copy halo, asymmetrically losing
-    //* contributions. Default false.
-    bool   UnifyJhPeriodicDup;
     bool   EigenmodeProbe;
     bool   RestrictMassMatrix3Cube;
-    bool   MassMatrixSumUnify;
 
     //* Stage-by-stage M dump inside communicateGhostP2G_mass_matrix at cycle 1.
     //* Writes Mxx[0]/Myy[0]/Mzz[0] slabs at four pipeline points:
@@ -358,88 +323,6 @@ class Collective
     //*   stage3_post_unify  — after periodic-duplicate unify + final halo
     //* Localizes which step introduces the 1.83× boundary band. Default off.
     bool   DumpMassMatrixStages;
-
-    //* TSC periodic-self halo fix. NBDerivedHaloCommN's trailing
-    //* addFace/addEdge*/addCorner block double-counts on periodic-self axes
-    //* at n_ghost=2: the periodic-self fold (lines ~720) sums ghost into the
-    //* periodic-image interior, the periodic-self copy (lines ~760) refills
-    //* ghost with interior, then addFace sums those copies back into LO/HI
-    //* duplicates — yielding ~3× over-count. When this flag is on, the
-    //* trailing addFace family skips axes that are periodic-self (left/right
-    //* neighbor == myrank). Cross-rank axes still go through addFace as
-    //* before. At n_ghost=1 (Linear/CIC) ghost cells carry no deposit so
-    //* both paths are no-ops; flag is a strict no-op there. Default off.
-    bool   SkipPeriodicSelfAddFace;
-
-    //* TSC moment-halo offset fix. The fold/copy formulas in NBDerivedHaloCommN
-    //* use `offset = isCenterFlag ? 0 : 1`, so the moment-interp path
-    //* (isCenterFlag=true, needInterp=true — but data lives on nodes via
-    //* node MPI datatypes) gets offset=0 even though it should use the node
-    //* convention offset=1. With this flag on, offset is taken from
-    //* `isCenterDim = isCenterFlag && !needInterp` instead, so node-moment
-    //* halos pick offset=1 and the periodic-self fold/copy land in the
-    //* correct destination cells. Default off.
-    bool   FixNodeInterpOffset;
-
-    //* TSC cross-rank moment SOR. The standard MPI face exchange in
-    //* NBDerivedHaloCommN sends sender's near-LO interior to receiver's LO
-    //* ghost (COPY semantic for stencil reads). At n_ghost=2 (TSC) this
-    //* OVERWRITES the receiver's locally-deposited partials in its ghost
-    //* layers — particles whose stencil reached past the rank boundary
-    //* never get their partial deposit folded into the neighbour's strict
-    //* interior. With this flag on AND n_ghost > 1 AND needInterp=true,
-    //* a pre-pass MPI exchange sends each rank's ghost cells (= partial
-    //* deposits at neighbour's domain) to the neighbour, which SORs them
-    //* into its strict interior using the same dst-formulas as the
-    //* periodic-self fold. Default off; no-op at n_ghost=1.
-    bool   CrossRankMomentSOR;
-
-    //* Multi-axis corner completion for the moment SOR. Phase E.11's diagonal
-    //* slots produce 2-rank pairwise sums at multi-rank corner cells (cells at
-    //* the intersection of two cross-rank periodic axes), where 4-rank consensus
-    //* is required. With this flag on, after the 26-slot SOR a per-axis-pair
-    //* completion pass exchanges the corner cells (a-dup ∩ b-dup, c-strict)
-    //* across the a-direction neighbour, summing the cross-rank deficit. No-op
-    //* unless n_ghost > 1 AND at least two axes are cross-rank periodic. 8-rank
-    //* corners (3 cross-rank axes meeting) are NOT closed by this pass — they
-    //* would need an additional 3-axis completion. Default off.
-    bool   MultiAxisCornerSOR;
-
-    //* Face-cell completion for the moment SOR. Phase E.11's 26-slot partition
-    //* routes only 3 of 4 contributing ranks to face cells (a-dup ∩ b-strict-near-
-    //* boundary ∩ c) where the TSC stencil reaches across two cross-rank axes.
-    //* The missing diagonal contribution comes from rank (sb=±1 along axis b).
-    //* This flag adds a per-ordered-axis-pair pass that packs raw pre-SOR values
-    //* on the (i_a = a-dup) plane at b-ghost rows and forwards them to the b-axis
-    //* neighbour, who applies them additively at its mirrored b-strict-near-boundary
-    //* rows. Pre-SOR pack timing matches Phase E.11; apply runs LAST so cells
-    //* already received their Phase E.11 + E.14 sums. Default off; v1 valid for
-    //* configurations with at most 2 cross-rank periodic axes.
-    bool   XrankFaceCellCompletion;
-
-    //* Diagonal Cart EDGE-corner halo copy for multi-axis cross-rank
-    //* (Phase E.18). The standard EDGE PHASE in `NBDerivedHaloCommN` routes
-    //* through a SINGLE-axis Cart neighbour (e.g., zEdge uses
-    //* left_neighborY/right_neighborY only). At a 2-axis cross-rank rank,
-    //* the diagonal-corner ghost cell physically lives in the (sa, sb)
-    //* DIAGONAL Cart neighbour's strict — NOT in the single-axis neighbour.
-    //* The standard write puts the wrong physical cell there, causing M·E
-    //* divergence at face dup pairs (max ~1e-3 at Mxx[0]) because the
-    //* mass-matrix kernel reads from these edge ghosts when the |offset|=2
-    //* TSC stencil reaches them. With this flag on, an additional pass
-    //* exchanges with each diagonal Cart neighbour and OVERRIDES the
-    //* standard EDGE PHASE write with the correct physical cell. Default
-    //* off; v1 covers the 2-axis cross-rank case (X+Y, X+Z, Y+Z).
-    bool   XrankDiagonalEdgeCopy;
-
-    //* Cross-rank duplicate unification at MaxwellImage / unify_periodic_duplicates.
-    //* On a periodic axis with multiple ranks (XLEN>1, etc.), the LO duplicate
-    //* on rank A and the HI duplicate on rank A's LEFT neighbour represent the
-    //* SAME physical node but live in independent memory and aren't unified by
-    //* `unify_periodic_duplicates` (which only handles XLEN==1). This flag
-    //* triggers an MPI_Sendrecv between matching dup pairs and averages them,
-    //* mirroring the local-averaging done at periodic-self. Default off.
-    bool   UnifyCrossRankDuplicates;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

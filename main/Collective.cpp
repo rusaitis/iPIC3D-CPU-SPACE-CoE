@@ -146,24 +146,9 @@ void Collective::ReadInput(string inputfile)
         //* Mass-matrix diagonal dump (default off).
         DumpMassMatrixDiag          = config.read<bool>("DumpMassMatrixDiag", false);
 
-        //* Average-unify M's LO/HI duplicates after gather + halo. No-op on
-        //* Linear (CIC deposit doesn't reach ghosts → LO == HI bit-exact); at
-        //* TSC width it makes the matvec see consistent boundary mass. Default on.
-        UnifyMassMatrixPeriodicDup  = config.read<bool>("UnifyMassMatrixPeriodicDup", true);
-
-        //* Periodic-self ghost-source index correction. No-op at n_ghost=1
-        //* (Linear/CIC); required at n_ghost=2 (TSC) for the self-copy to
-        //* match the MPI face/edge/corner sends. Default on.
-        FixPeriodicSelfGhostOrder   = config.read<bool>("FixPeriodicSelfGhostOrder", true);
-
         //* Diagnostic: zero M·E or curl² contribution to MaxwellImage. Default off.
         DisableMassMatrixInImage    = config.read<bool>("DisableMassMatrixInImage", false);
         DisableCurl2InImage         = config.read<bool>("DisableCurl2InImage", false);
-
-        //* Average-unify Jxh/Jyh/Jzh + per-species LO/HI duplicates. Same TSC
-        //* boundary-consistency rationale as UnifyMassMatrixPeriodicDup; bit-
-        //* identical no-op on Linear. Default on.
-        UnifyJhPeriodicDup          = config.read<bool>("UnifyJhPeriodicDup", true);
 
         //* Eigenmode probe: sweep plane-wave test fields through MaxwellImage at
         //* cycle 1, dump CSV of (mode, k, real, imag) per axis, then exit. Used
@@ -175,46 +160,11 @@ void Collective::ReadInput(string inputfile)
         //* couplings). Default off.
         RestrictMassMatrix3Cube     = config.read<bool>("RestrictMassMatrix3Cube", false);
 
-        //* Boundary-aware unify: UnifyMassMatrix / UnifyJh add LO and HI
-        //* duplicate native values (each carries a partial periodic-image
-        //* deposit at TSC width) instead of averaging. Default on; bit-identical
-        //* no-op on Linear/CIC at n_ghost=1 (ghosts carry no deposit).
-        MassMatrixSumUnify          = config.read<bool>("MassMatrixSumUnify", true);
-
         //* Stage-by-stage M dump inside the mass-matrix halo pipeline. Writes
         //* Mxx[0]/Myy[0]/Mzz[0] at four points (pre-halo, post-addFace,
         //* post-self-copy, post-unify) at cycle 1 to localise where the boundary
         //* band is introduced.
         DumpMassMatrixStages        = config.read<bool>("DumpMassMatrixStages", false);
-
-        //* TSC periodic-self double-count fix. Default on; no-op at n_ghost=1.
-        SkipPeriodicSelfAddFace     = config.read<bool>("SkipPeriodicSelfAddFace", true);
-
-        //* TSC moment-halo offset fix. Default on; no-op at n_ghost=1.
-        FixNodeInterpOffset         = config.read<bool>("FixNodeInterpOffset", true);
-
-        //* TSC cross-rank moment SOR. 26-slot face/edge/corner completion in
-        //* NBDerivedHaloCommN. Required at TSC for both np=1 (periodic-self
-        //* fold) and np>1 (cross-rank moment exchange). Default on; no-op at
-        //* n_ghost=1 (CIC).
-        CrossRankMomentSOR          = config.read<bool>("CrossRankMomentSOR", true);
-
-        //* Multi-axis corner completion pass on top of CrossRankMomentSOR.
-        //* Default on; no-op at <2 cross-rank axes and at n_ghost=1.
-        MultiAxisCornerSOR          = config.read<bool>("MultiAxisCornerSOR", true);
-
-        //* Face-cell completion pass on top of CrossRankMomentSOR. Default on;
-        //* no-op at <2 cross-rank axes and at n_ghost=1.
-        XrankFaceCellCompletion     = config.read<bool>("XrankFaceCellCompletion", true);
-
-        //* Diagonal Cart EDGE-corner copy. Default on; no-op when no axis
-        //* pair is simultaneously cross-rank, and at n_ghost=1.
-        XrankDiagonalEdgeCopy       = config.read<bool>("XrankDiagonalEdgeCopy", true);
-
-        //* Cross-rank dup unification (Eth + Bxn/Byn/Bzn averaging across
-        //* periodic-image dup pairs). Default on; no-op when no cross-rank
-        //* periodic axis exists.
-        UnifyCrossRankDuplicates    = config.read<bool>("UnifyCrossRankDuplicates", true);
 
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);

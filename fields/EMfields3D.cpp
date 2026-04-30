@@ -2465,21 +2465,15 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     //* the CIC deposit doesn't reach ghosts so LO == HI bit-exact and the
     //* average is a no-op. Followed by a fresh copy halo so ghosts pick up
     //* the unified LO=HI values.
-    if (_col.getUnifyJhPeriodicDup())
     {
         const bool ps_x = _col.getPERIODICX() && vct->getXLEN() == 1;
         const bool ps_y = _col.getPERIODICY() && vct->getYLEN() == 1;
         const bool ps_z = _col.getPERIODICZ() && vct->getZLEN() == 1;
 
-        //* Boundary-aware unify (see communicateGhostP2G_mass_matrix). Default
-        //* averages; when MassMatrixSumUnify is on, sums to recover the full
-        //* periodic deposit at the LO/HI duplicate slot.
-        //* Sum-unify is only correct at n_ghost > 1 (TSC), where each LO/HI
-        //* duplicate carries half the physical-node deposit. At n_ghost = 1
-        //* (Linear/CIC) the duplicates already hold the full value (CIC stencil
-        //* never reaches ghosts), so summing would double-count. Gate on
-        //* n_ghost_ > 1 so the flag is a strict no-op at Linear width.
-        const bool unify_sum = _col.getMassMatrixSumUnify() && n_ghost_ > 1;
+        //* SUM the LO/HI duplicate natives at TSC (each carries a partial
+        //* periodic-image slice); average at n_ghost=1 (CIC: dups hold full
+        //* value, summing would double-count).
+        const bool unify_sum = (n_ghost_ > 1);
 
         double ***slabs[7] = { Jxh.fetch_arr3(), Jyh.fetch_arr3(), Jzh.fetch_arr3(),
                                 moment_Jxhs, moment_Jyhs, moment_Jzhs, moment_rhons };
@@ -2642,24 +2636,15 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     //* by a fresh copy halo so ghosts pick up the unified LO=HI values (otherwise
     //* mass_matrix_times_vector reads stale ghost values when stencils touch
     //* ghost layers).
-    if (_col.getUnifyMassMatrixPeriodicDup())
     {
         const VirtualTopology3D *vctp = vct;
         const bool ps_x = _col.getPERIODICX() && vctp->getXLEN() == 1;
         const bool ps_y = _col.getPERIODICY() && vctp->getYLEN() == 1;
         const bool ps_z = _col.getPERIODICZ() && vctp->getZLEN() == 1;
 
-        //* Boundary-aware unify: SUM the LO/HI duplicate natives (each carries
-        //* a partial periodic-image slice) instead of averaging. For uniform
-        //* plasma the sum reproduces the interior value, restoring translational
-        //* invariance of the M·E operator at the periodic boundary. Verified
-        //* empirically by the eigenmode probe (cos-component projection).
-        //* Sum-unify is only correct at n_ghost > 1 (TSC), where each LO/HI
-        //* duplicate carries half the physical-node deposit. At n_ghost = 1
-        //* (Linear/CIC) the duplicates already hold the full value (CIC stencil
-        //* never reaches ghosts), so summing would double-count. Gate on
-        //* n_ghost_ > 1 so the flag is a strict no-op at Linear width.
-        const bool unify_sum = _col.getMassMatrixSumUnify() && n_ghost_ > 1;
+        //* SUM at TSC (each LO/HI dup carries half the physical-node deposit);
+        //* average at n_ghost=1 (CIC dups hold full value already).
+        const bool unify_sum = (n_ghost_ > 1);
 
         array4_double *Mall[9] = { &Mxx, &Mxy, &Mxz, &Myx, &Myy, &Myz, &Mzx, &Mzy, &Mzz };
 
@@ -3115,11 +3100,9 @@ void EMfields3D::calculateE()
     //* the cross-rank dup pair (A's HI dup ↔ B's LO dup, same physical node
     //* but on different ranks) drifts apart by ULPs over a cycle, feeding
     //* the moment gather and curl² of the next matvec with inconsistent
-    //* boundary values. Runs only when UnifyCrossRankDuplicates is on; at
-    //* periodic-self the local LO==HI is already enforced via solver2phys.
-    if (col->getUnifyCrossRankDuplicates()) {
-        unify_periodic_duplicates(Exth, Eyth, Ezth, nxn, nyn, nzn);
-    }
+    //* boundary values. At periodic-self the local LO==HI is already
+    //* enforced via solver2phys.
+    unify_periodic_duplicates(Exth, Eyth, Ezth, nxn, nyn, nzn);
 
     #ifdef __PROFILE_FIELDS__
     time_com.stop();
@@ -3612,9 +3595,7 @@ void EMfields3D::C2NB()
     //* halo can leave A's HI dup and B's LO dup ULP-different; fold the
     //* drift into the average so the mover's `fieldForPcls` reads
     //* consistent B at the rank-boundary node on both sides.
-    if (col->getUnifyCrossRankDuplicates()) {
-        unify_periodic_duplicates(Bxn, Byn, Bzn, nxn, nyn, nzn);
-    }
+    unify_periodic_duplicates(Bxn, Byn, Bzn, nxn, nyn, nzn);
 }
 
 //? Populate the field data used to push particles
@@ -3943,10 +3924,10 @@ void EMfields3D::post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field,
 //* On a periodic axis d, the LO duplicate at index `n_ghost_` and the HI
 //* duplicate at `nx_d - n_ghost_ - 1` carry the same physical position. At
 //* periodic-self (XLEN==1) both live on the same rank and are averaged
-//* locally. With UnifyCrossRankDuplicates and XLEN>1, the dup pair lives on
-//* TWO ranks (our LO dup ↔ X-LO neighbour's HI dup; our HI dup ↔ X-RIGHT
-//* neighbour's LO dup); we MPI_Sendrecv with the matching neighbour and
-//* average locally so both endpoints land at the same value.
+//* locally. At cross-rank (XLEN>1), the dup pair lives on TWO ranks (our
+//* LO dup ↔ X-LO neighbour's HI dup; our HI dup ↔ X-RIGHT neighbour's LO
+//* dup); we MPI_Sendrecv with the matching neighbour and average locally
+//* so both endpoints land at the same value.
 void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz)
 {
     const VirtualTopology3D *vct = &get_vct();
@@ -3956,11 +3937,11 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
     const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
     const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
 
-    //* Cross-rank dup pairs (XLEN>1 etc.) when the flag is on.
-    const bool xrank_unify = col->getUnifyCrossRankDuplicates();
-    const bool periodicX_xrank = xrank_unify && col->getPERIODICX() && vct->getXLEN() > 1;
-    const bool periodicY_xrank = xrank_unify && col->getPERIODICY() && vct->getYLEN() > 1;
-    const bool periodicZ_xrank = xrank_unify && col->getPERIODICZ() && vct->getZLEN() > 1;
+    //* Cross-rank dup pairs (XLEN>1 etc.) — average HI of one rank with LO
+    //* of its periodic-image neighbour so they don't drift apart by ULPs.
+    const bool periodicX_xrank = col->getPERIODICX() && vct->getXLEN() > 1;
+    const bool periodicY_xrank = col->getPERIODICY() && vct->getYLEN() > 1;
+    const bool periodicZ_xrank = col->getPERIODICZ() && vct->getZLEN() > 1;
 
     arr3_double *flds[3] = { &Exf, &Eyf, &Ezf };
 
