@@ -2550,56 +2550,71 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         dump_maxwell_stage("Mstage0_pre_halo", a_xx, a_yy, a_zz);
     }
 
-    for (int m = 0; m < ne_mass_; m++)
+    //* PR-B: pack all 9 components × ne_mass_ stencil groups into one flat
+    //* array and post a single batched halo per phase. Reduces mass-matrix
+    //* halo calls from 2 × ne_mass_ (PR-A: ~126 at TSC) to 2 (interp +
+    //* node_P), each carrying 9 × ne_mass_ field slabs in one MPI message
+    //* per direction. Layout: comps_all[m * 9 + idx], idx ∈ [xx, xy, xz,
+    //* yx, yy, yz, zx, zy, zz].
+    const int n_total = 9 * ne_mass_;
+    std::vector<double***> comps_all(n_total);
+    for (int m = 0; m < ne_mass_; ++m) {
+        comps_all[m * 9 + 0] = convert_to_arr3(Mxx[m]);
+        comps_all[m * 9 + 1] = convert_to_arr3(Mxy[m]);
+        comps_all[m * 9 + 2] = convert_to_arr3(Mxz[m]);
+        comps_all[m * 9 + 3] = convert_to_arr3(Myx[m]);
+        comps_all[m * 9 + 4] = convert_to_arr3(Myy[m]);
+        comps_all[m * 9 + 5] = convert_to_arr3(Myz[m]);
+        comps_all[m * 9 + 6] = convert_to_arr3(Mzx[m]);
+        comps_all[m * 9 + 7] = convert_to_arr3(Mzy[m]);
+        comps_all[m * 9 + 8] = convert_to_arr3(Mzz[m]);
+    }
+
+    //* Halo sum (interpolation pattern: face/edge/corner addFace into the
+    //  matching interior nodes).
+    if (kahan_halo) {
+        std::vector<double***> comps_c_all(n_total);
+        for (int m = 0; m < ne_mass_; ++m) {
+            comps_c_all[m * 9 + 0] = convert_to_arr3(Mxx_c[m]);
+            comps_c_all[m * 9 + 1] = convert_to_arr3(Mxy_c[m]);
+            comps_c_all[m * 9 + 2] = convert_to_arr3(Mxz_c[m]);
+            comps_c_all[m * 9 + 3] = convert_to_arr3(Myx_c[m]);
+            comps_c_all[m * 9 + 4] = convert_to_arr3(Myy_c[m]);
+            comps_c_all[m * 9 + 5] = convert_to_arr3(Myz_c[m]);
+            comps_c_all[m * 9 + 6] = convert_to_arr3(Mzx_c[m]);
+            comps_c_all[m * 9 + 7] = convert_to_arr3(Mzy_c[m]);
+            comps_c_all[m * 9 + 8] = convert_to_arr3(Mzz_c[m]);
+        }
+        communicateInterp_multi_kahan(nxn, nyn, nzn, n_total, comps_all.data(),
+                                       comps_c_all.data(), vct, this);
+    } else {
+        communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
+    }
+
+    //* Stage 1 — after communicateInterp (addFace sum-on-receive merged
+    //* periodic-image partial deposits into the natives). Ghost layers
+    //* still hold raw deposit values; copy halo not yet run. Captures m=0
+    //* (first 9 entries of comps_all).
+    if (dump_stages)
     {
-        //* The 9 mass-matrix components share (nxn, nyn, nzn) and are
-        //* batched into one halo call per phase. PR-A scope: per-g batching
-        //* (N=9). Cuts mass-matrix halo calls 9× — the m loop still posts
-        //* one batched halo per iteration; PR-B (N=9*ne_mass_) is a future
-        //* refinement.
-        double ***comps[9] = {
-            convert_to_arr3(Mxx[m]), convert_to_arr3(Mxy[m]), convert_to_arr3(Mxz[m]),
-            convert_to_arr3(Myx[m]), convert_to_arr3(Myy[m]), convert_to_arr3(Myz[m]),
-            convert_to_arr3(Mzx[m]), convert_to_arr3(Mzy[m]), convert_to_arr3(Mzz[m])
-        };
+        arr3_double a_xx(comps_all[0], nxn, nyn, nzn);
+        arr3_double a_yy(comps_all[4], nxn, nyn, nzn);
+        arr3_double a_zz(comps_all[8], nxn, nyn, nzn);
+        dump_maxwell_stage("Mstage1_post_addFace", a_xx, a_yy, a_zz);
+    }
 
-        //* Halo sum (interpolation pattern: face/edge/corner addFace into the
-        //  matching interior nodes).
-        if (kahan_halo) {
-            double ***comps_c[9] = {
-                convert_to_arr3(Mxx_c[m]), convert_to_arr3(Mxy_c[m]), convert_to_arr3(Mxz_c[m]),
-                convert_to_arr3(Myx_c[m]), convert_to_arr3(Myy_c[m]), convert_to_arr3(Myz_c[m]),
-                convert_to_arr3(Mzx_c[m]), convert_to_arr3(Mzy_c[m]), convert_to_arr3(Mzz_c[m])
-            };
-            communicateInterp_multi_kahan(nxn, nyn, nzn, 9, comps, comps_c, vct, this);
-        } else {
-            communicateInterp_multi(nxn, nyn, nzn, 9, comps, vct, this);
-        }
+    //* Populate the ghost layers (no sum-on-receive, just copy from interior).
+    communicateNode_P_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
 
-        //* Stage 1 — after communicateInterp (addFace sum-on-receive merged
-        //* periodic-image partial deposits into the natives). Ghost layers
-        //* still hold raw deposit values; copy halo not yet run.
-        if (dump_stages && m == 0)
-        {
-            arr3_double a_xx(comps[0], nxn, nyn, nzn);
-            arr3_double a_yy(comps[4], nxn, nyn, nzn);
-            arr3_double a_zz(comps[8], nxn, nyn, nzn);
-            dump_maxwell_stage("Mstage1_post_addFace", a_xx, a_yy, a_zz);
-        }
-
-        //* Populate the ghost layers (no sum-on-receive, just copy from interior).
-        communicateNode_P_multi(nxn, nyn, nzn, 9, comps, vct, this);
-
-        //* Stage 2 — after communicateNode_P (ghost layers copied from interior).
-        //* Pre-unify: LO and HI duplicates may differ if gather scatter went
-        //* asymmetrically.
-        if (dump_stages && m == 0)
-        {
-            arr3_double a_xx(comps[0], nxn, nyn, nzn);
-            arr3_double a_yy(comps[4], nxn, nyn, nzn);
-            arr3_double a_zz(comps[8], nxn, nyn, nzn);
-            dump_maxwell_stage("Mstage2_post_selfcopy", a_xx, a_yy, a_zz);
-        }
+    //* Stage 2 — after communicateNode_P (ghost layers copied from interior).
+    //* Pre-unify: LO and HI duplicates may differ if gather scatter went
+    //* asymmetrically.
+    if (dump_stages)
+    {
+        arr3_double a_xx(comps_all[0], nxn, nyn, nzn);
+        arr3_double a_yy(comps_all[4], nxn, nyn, nzn);
+        arr3_double a_zz(comps_all[8], nxn, nyn, nzn);
+        dump_maxwell_stage("Mstage2_post_selfcopy", a_xx, a_yy, a_zz);
     }
 
     //* Average-unify M's periodic-duplicate LO and HI nodes on each periodic-self
@@ -2666,13 +2681,9 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         //* Re-run the copy halo after unify so ghost cells pick up the new
         //* unified LO=HI values (otherwise mass_matrix_times_vector reads
         //* stale pre-unify ghost values when stencils touch ghost layers).
-        for (int g = 0; g < ne_mass_; g++)
-        for (int idx = 0; idx < 9; idx++)
-        {
-            array4_double &Marr = *Mall[idx];
-            double ***slab = convert_to_arr3(Marr[g]);
-            communicateNode_P(nxn, nyn, nzn, slab, vct, this);
-        }
+        //* PR-B: batch the 9 × ne_mass_ slabs into one halo call (reuses
+        //* the same pointer pack as the pre-unify path).
+        communicateNode_P_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
     }
 
     //* Diagnostic — dump M's diagonal slabs (g=0 stencil group, the "self"
