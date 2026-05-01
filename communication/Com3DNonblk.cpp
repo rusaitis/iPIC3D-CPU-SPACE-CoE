@@ -1868,18 +1868,24 @@ static void do_face_phase(int nx, int ny, int nz,
         }
     };
 
-    //* needInterp=true: self-copies first, vector[sL] reads pre-Irecv state.
-    if (needInterp) periodic_self_copies();
-
     //* Waitall (unconditional — manual pack/unpack closes the E.20 race).
     if (snd > 0) MPI_Waitall(snd, reqs, MPI_STATUSES_IGNORE);
 
     //* Unpack neighbour values into ghost slabs.
     unpack_face_recvs();
 
-    //* !needInterp: self-copies after unpack, matching legacy E.20-conditional
-    //  Waitall-then-self-copy ordering.
-    if (!needInterp) periodic_self_copies();
+    //* Periodic-self self-copies AFTER cross-rank unpack for both needInterp
+    //* and !needInterp paths. With manual pack/unpack into separate
+    //* face_recv_bufs (E.20 race fix), vectors[sL] is decoupled from Irecv —
+    //* safe to read post-unpack. Running self-copy AFTER unpack ensures the
+    //* periodic-self ghost cells inherit the post-cross-rank-exchange strict
+    //* values; otherwise, ghost cells at (cross-rank-axis ghost) ∩
+    //* (periodic-self-axis ghost) — i.e., k=0/12 and k=nz-1/nz-2 columns
+    //* sitting in X- or Y-ghost — hold pre-exchange-strict data that
+    //* face_phase X/Y unpack cannot reach (it only writes k ∈ [1, nz-2]).
+    //* Required for mass-matrix's |offset|=2 stencil correctness when
+    //* unify_ps_dups=true and no trailing Node_P_multi runs.
+    periodic_self_copies();
 }
 
 //* ============================================================================

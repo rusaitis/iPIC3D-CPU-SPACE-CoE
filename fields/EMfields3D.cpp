@@ -2485,13 +2485,10 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     }
 
     //* Halo sum (interpolation pattern: face/edge/corner addFace into the
-    //* matching interior nodes). NOTE: unify_ps_dups halo-internal fold (the
-    //* same path ECSIM uses successfully) breaks for mass-matrix's 567-field
-    //* batch at TSC np>1 cross-rank with any periodic-self axis (np=2 X-only
-    //* dE/E=1.1e-6, np=4 X+Y dE/E=8.7e-8 at cycle 1; np=1 works fine).
-    //* Reverting to inline unify + Node_P_multi pending root-cause analysis —
-    //* bisect indicates the issue is mass-matrix-specific (not config) and
-    //* not present at ECSIM's 7-field batch with same flags / configs.
+    //* matching interior nodes). unify_ps_dups=true folds the periodic-self
+    //* LO=HI strict unify into the halo before cross-rank pack so cross-rank
+    //* ghosts inherit post-unify strict and no trailing Node_P refresh is
+    //* needed. Same path as ECSIM's communicateGhostP2G_ecsim.
     if (kahan_halo) {
         std::vector<double***> comps_c_all(n_total);
         for (int m = 0; m < ne_mass_; ++m) {
@@ -2506,81 +2503,21 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
             comps_c_all[m * 9 + 8] = convert_to_arr3(Mzz_c[m]);
         }
         communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(),
-                                 vct, this, comps_c_all.data());
+                                 vct, this, comps_c_all.data(), /*unify_ps_dups=*/true);
     } else {
-        communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
+        communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this,
+                                 /*vectors_c=*/nullptr, /*unify_ps_dups=*/true);
     }
 
     //* Stage 1 — after communicateInterp (face/edge/corner pack/unpack +
-    //* periodic-self sum-on-receive folded BEFORE pack inside do_face_phase,
-    //* so cross-rank ghosts already carry post-fold strict). Captures m=0
-    //* (first 9 entries of comps_all).
+    //* periodic-self fold + in-halo unify_ps_dups + periodic-self ghost copies
+    //* run AFTER cross-rank unpack inside do_face_phase). Captures m=0.
     if (dump_stages)
     {
         arr3_double a_xx(comps_all[0], nxn, nyn, nzn);
         arr3_double a_yy(comps_all[4], nxn, nyn, nzn);
         arr3_double a_zz(comps_all[8], nxn, nyn, nzn);
         dump_maxwell_stage("Mstage1_post_addFace", a_xx, a_yy, a_zz);
-    }
-
-    //* Average-unify M's periodic-duplicate LO and HI nodes on each periodic-self
-    //* axis. At Linear LO == HI bit-exact already, so the average is a no-op.
-    //* At TSC the gather scatters partial sums to LO and HI separately; averaging
-    //* makes them consistent so M·E at LO and HI produce equal output.
-    {
-        const VirtualTopology3D *vctp = vct;
-        const bool ps_x = _col.getPERIODICX() && vctp->getXLEN() == 1;
-        const bool ps_y = _col.getPERIODICY() && vctp->getYLEN() == 1;
-        const bool ps_z = _col.getPERIODICZ() && vctp->getZLEN() == 1;
-        const bool unify_sum = (n_ghost_ > 1);
-
-        array4_double *Mall[9] = { &Mxx, &Mxy, &Mxz, &Myx, &Myy, &Myz, &Mzx, &Mzy, &Mzz };
-
-        for (int g = 0; g < ne_mass_; g++)
-        for (int idx = 0; idx < 9; idx++)
-        {
-            array4_double &Marr = *Mall[idx];
-            if (ps_x) {
-                const int ilo = n_ghost_;
-                const int ihi = nxn - n_ghost_ - 1;
-                if (ihi > ilo)
-                    for (int j = 0; j < nyn; ++j)
-                        for (int k = 0; k < nzn; ++k) {
-                            const double s = Marr[g][ilo][j][k] + Marr[g][ihi][j][k];
-                            const double v = unify_sum ? s : 0.5 * s;
-                            Marr[g][ilo][j][k] = v;
-                            Marr[g][ihi][j][k] = v;
-                        }
-            }
-            if (ps_y) {
-                const int jlo = n_ghost_;
-                const int jhi = nyn - n_ghost_ - 1;
-                if (jhi > jlo)
-                    for (int i = 0; i < nxn; ++i)
-                        for (int k = 0; k < nzn; ++k) {
-                            const double s = Marr[g][i][jlo][k] + Marr[g][i][jhi][k];
-                            const double v = unify_sum ? s : 0.5 * s;
-                            Marr[g][i][jlo][k] = v;
-                            Marr[g][i][jhi][k] = v;
-                        }
-            }
-            if (ps_z) {
-                const int klo = n_ghost_;
-                const int khi = nzn - n_ghost_ - 1;
-                if (khi > klo)
-                    for (int i = 0; i < nxn; ++i)
-                        for (int j = 0; j < nyn; ++j) {
-                            const double s = Marr[g][i][j][klo] + Marr[g][i][j][khi];
-                            const double v = unify_sum ? s : 0.5 * s;
-                            Marr[g][i][j][klo] = v;
-                            Marr[g][i][j][khi] = v;
-                        }
-            }
-        }
-
-        //* Re-run the copy halo after unify so ghost cells pick up the new
-        //* unified LO=HI values.
-        communicateNode_P_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
     }
 
     //* Diagnostic — dump M's diagonal slabs (g=0 stencil group, the "self"
@@ -2598,9 +2535,9 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         dump_maxwell_stage("Mdiag_g0", a_xx, a_yy, a_zz);
     }
 
-    //* Stage 3 — final M after unify + post-unify halo refresh. Mirrors the
-    //* DumpMassMatrixDiag location but lives under the staged-dump flag so all
-    //* four stages can be requested with a single switch.
+    //* Stage 3 — kept for parity with the DumpMassMatrixDiag location; now
+    //* bit-identical to Stage 1 since unify and self-copies are folded into
+    //* communicateInterp_multi.
     if (dump_stages)
     {
         arr3_double a_xx(convert_to_arr3(Mxx[0]), nxn, nyn, nzn);
