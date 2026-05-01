@@ -2412,9 +2412,8 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     const VirtualTopology3D *vct = &get_vct();
     int rank = vct->getCartesian_rank();
 
-    //* Per-species moment halo via the modern 3D path (NBDerivedHaloCommN
-    //* handles n_ghost > 1; the legacy 4D ComParser3D helpers hard-code n_ghost==1
-    //* and silently corrupt the result otherwise).
+    //* Per-species moment halo via the modern 3D path. NBDerivedHaloCommN
+    //* handles n_ghost > 1.
     //
     //  Jxh/Jyh/Jzh aggregates are still 0 here (sumOverSpecies runs later), so
     //  these calls are no-ops; kept for parity with the legacy structure.
@@ -2529,9 +2528,7 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     const VirtualTopology3D * vct = &get_vct();
 
     //* Per-stencil-group mass-matrix halo via the modern 3D path (mirrors
-    //* communicateGhostP2G_ecsim). NBDerivedHaloCommN handles n_ghost > 1;
-    //* the legacy 4D ComParser3D path hard-codes n_ghost==1 and corrupts M
-    //* at MPI faces otherwise.
+    //* communicateGhostP2G_ecsim). NBDerivedHaloCommN handles n_ghost > 1.
     //
     //  Each Mxx[m] is a contiguous (nxn x nyn x nzn) slab of the underlying
     //  array4_double, so convert_to_arr3 yields a valid 3D view per stencil
@@ -2714,72 +2711,45 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
 }
 
 //! Communicate ghost data for ECSIM/RelSIM (output only) moments
-void EMfields3D::communicateGhostP2G_supplementary_moments(int is) 
+void EMfields3D::communicateGhostP2G_supplementary_moments(int is)
 {
     const VirtualTopology3D *vct = &get_vct();
-    int rank = vct->getCartesian_rank();
 
-    communicateInterp_old(nxn, nyn, nzn, is, rhons, 0, 0, 0, 0, 0, 0, vct, this);
-    
-    communicateInterp_old(nxn, nyn, nzn, is, Jxs,  0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, Jys,  0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, Jzs,  0, 0, 0, 0, 0, 0, vct, this);
-
-    communicateInterp_old(nxn, nyn, nzn, is, E_flux_xs,  0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, E_flux_ys,  0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, E_flux_zs,  0, 0, 0, 0, 0, 0, vct, this);
-
-    if (SaveHeatFluxTensor) 
-    {
-        communicateInterp_old(nxn, nyn, nzn, is, Qxxxs, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qxxys, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qxyys, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qxzzs, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qyyys, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qyzzs, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qzzzs, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qxyzs, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qxxzs, 0, 0, 0, 0, 0, 0, vct, this);
-        communicateInterp_old(nxn, nyn, nzn, is, Qyyzs, 0, 0, 0, 0, 0, 0, vct, this);
+    //* Pack all per-species supplementary moments into one multi-field
+    //* halo: 13 base moments (rhons + 3 J + 3 E_flux + 6 p) plus 10 heat-
+    //* flux components when SaveHeatFluxTensor is on. Same physical halo
+    //* (interp sum-on-receive then copy) as the legacy per-moment loop.
+    std::vector<double***> comps;
+    comps.reserve(23);
+    comps.push_back(convert_to_arr3(rhons[is]));
+    comps.push_back(convert_to_arr3(Jxs  [is]));
+    comps.push_back(convert_to_arr3(Jys  [is]));
+    comps.push_back(convert_to_arr3(Jzs  [is]));
+    comps.push_back(convert_to_arr3(E_flux_xs[is]));
+    comps.push_back(convert_to_arr3(E_flux_ys[is]));
+    comps.push_back(convert_to_arr3(E_flux_zs[is]));
+    if (SaveHeatFluxTensor) {
+        comps.push_back(convert_to_arr3(Qxxxs[is]));
+        comps.push_back(convert_to_arr3(Qxxys[is]));
+        comps.push_back(convert_to_arr3(Qxyys[is]));
+        comps.push_back(convert_to_arr3(Qxzzs[is]));
+        comps.push_back(convert_to_arr3(Qyyys[is]));
+        comps.push_back(convert_to_arr3(Qyzzs[is]));
+        comps.push_back(convert_to_arr3(Qzzzs[is]));
+        comps.push_back(convert_to_arr3(Qxyzs[is]));
+        comps.push_back(convert_to_arr3(Qxxzs[is]));
+        comps.push_back(convert_to_arr3(Qyyzs[is]));
     }
+    comps.push_back(convert_to_arr3(pXXsn[is]));
+    comps.push_back(convert_to_arr3(pXYsn[is]));
+    comps.push_back(convert_to_arr3(pXZsn[is]));
+    comps.push_back(convert_to_arr3(pYYsn[is]));
+    comps.push_back(convert_to_arr3(pYZsn[is]));
+    comps.push_back(convert_to_arr3(pZZsn[is]));
 
-    communicateInterp_old(nxn, nyn, nzn, is, pXXsn, 0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, pXYsn, 0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, pXZsn, 0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, pYYsn, 0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, pYZsn, 0, 0, 0, 0, 0, 0, vct, this);
-    communicateInterp_old(nxn, nyn, nzn, is, pZZsn, 0, 0, 0, 0, 0, 0, vct, this);
-
-    communicateNode_P_old(nxn, nyn, nzn, is, rhons, vct, this);
-
-    communicateNode_P_old(nxn, nyn, nzn, is, Jxs, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, Jys, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, Jzs, vct, this);
-
-    communicateNode_P_old(nxn, nyn, nzn, is, E_flux_xs, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, E_flux_ys, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, E_flux_zs, vct, this);
-
-    if (SaveHeatFluxTensor)
-    {
-        communicateNode_P_old(nxn, nyn, nzn, is, Qxxxs, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qxxys, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qxyys, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qxzzs, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qyyys, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qyzzs, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qzzzs, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qxyzs, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qxxzs, vct, this);
-        communicateNode_P_old(nxn, nyn, nzn, is, Qyyzs, vct, this);
-    }
-
-    communicateNode_P_old(nxn, nyn, nzn, is, pXXsn, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, pXYsn, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, pXZsn, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, pYYsn, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, pYZsn, vct, this);
-    communicateNode_P_old(nxn, nyn, nzn, is, pZZsn, vct, this);
+    const int n = static_cast<int>(comps.size());
+    communicateInterp_multi(nxn, nyn, nzn, n, comps.data(), vct, this);
+    communicateNode_P_multi(nxn, nyn, nzn, n, comps.data(), vct, this);
 }
 
 //! ===================================== Compute Fields ===================================== !//
@@ -3420,7 +3390,7 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     //? Move from Krylov space to physical space
     solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
-    //* n_ghost-aware halo (legacy ComParser3D path was n_ghost==1 only).
+    //* n_ghost-aware halo refresh (face/edge/corner exchange + apply BCs).
     communicateNodeBC(nxn, nyn, nzn, tempX, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
@@ -5000,14 +4970,14 @@ void EMfields3D::init()
             // grid->interpC2N(Bzn, Bzc);
 
             //* Communicate ghost data for B on nodes
-            communicateNodeBC_old(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
-            communicateNodeBC_old(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
-            communicateNodeBC_old(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
+            communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
+            communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
+            communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
 
             //* Communicate ghost data for E on nodes
-            communicateNodeBC_old(nxn, nyn, nzn, Ex, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
-            communicateNodeBC_old(nxn, nyn, nzn, Ey, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
-            communicateNodeBC_old(nxn, nyn, nzn, Ez, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
+            communicateNodeBC(nxn, nyn, nzn, Ex, col->bcEx[0],col->bcEx[1],col->bcEx[2],col->bcEx[3],col->bcEx[4],col->bcEx[5], vct, this);
+            communicateNodeBC(nxn, nyn, nzn, Ey, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
+            communicateNodeBC(nxn, nyn, nzn, Ez, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
 
             //* Initialise rho at cell centers
             // for (int is = 0; is < ns; is++)

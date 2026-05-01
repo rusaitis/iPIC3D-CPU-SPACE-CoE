@@ -39,7 +39,6 @@ developers           : Stefano Markidis, Ivy Bo Peng
 #include "Alloc.h"
 #include "debug.h"
 #include "EMfields3D.h"
-#include "ComParser3D.h"
 
 //* Communicate ghost cells (nodes)
 void communicateNodeBC( int nx, int ny, int nz, arr3_double vector,
@@ -50,11 +49,7 @@ void communicateNodeBC( int nx, int ny, int nz, double ***vector,
                         int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
                         const VirtualTopology3D * vct, EMfields3D *EMf);
 
-void communicateNodeBC_old( int nx, int ny, int nz, double ***vector,
-                            int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
-                            const VirtualTopology3D *vct, EMfields3D *EMf);
-
-void communicateNodeBoxStencilBC(int nx, int ny, int nz, arr3_double vector, 
+void communicateNodeBoxStencilBC(int nx, int ny, int nz, arr3_double vector,
                                 int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft, 
                                 const VirtualTopology3D * vct, EMfields3D *EMf);
 
@@ -118,24 +113,19 @@ void communicateInterp_multi_kahan(int nx, int ny, int nz, int n_fields,
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf);
 
-void communicateNode_P_old(int nx, int ny, int nz, int ns, double ****vector, const VirtualTopology3D *vct, EMfields3D *EMf);
-// void communicateInterp(int nx, int ny, int nz, double ****vector, int ns, const VirtualTopology3D * vct);
-void communicateInterp_old(int nx, int ny, int nz, int ns, double ****vector, 
-                           int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft, 
-                           const VirtualTopology3D *vct, EMfields3D *EMf);
-
-//* The optional n_ghost parameter wraps the legacy 1-layer add in an outer
-//  loop over ghost layers. n_ghost = 1 (default) preserves the original
-//  byte-identical behaviour; n_ghost > 1 sums each of the wider ghost layers
-//  back into the corresponding inner interior nodes.
-//* `skip_self_periodic`: when true, axes whose left/right neighbours are myrank
-//* (periodic-self) are SKIPPED. Used by the TSC moment-halo fix where the
-//* periodic-self fold + copy upstream already produced the correct sum.
-//* Default false preserves legacy behaviour for all existing callers.
-void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
-void addEdgeX (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
-void addEdgeY (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
-void addEdgeZ (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
-void addFace  (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false);
+//* `n_ghost` (default 1) wraps the legacy 1-layer add in an outer loop over
+//  ghost layers; n_ghost > 1 sums each wider ghost layer back into the
+//  matching inner interior node.
+//* `skip_self_periodic` (default false): when true, axes whose left/right
+//* neighbours are myrank are SKIPPED — used by the TSC moment-halo fix where
+//* the periodic-self fold + copy upstream already produced the correct sum.
+//* `vector_c` (default nullptr): optional Kahan-compensation companion. Plain
+//* `+=` when null (legacy, byte-identical); Neumaier-compensated update with
+//* residual lands in `vector_c` when supplied.
+void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);
+void addEdgeX (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);
+void addEdgeY (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);
+void addEdgeZ (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);
+void addFace  (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);
 
 #endif
