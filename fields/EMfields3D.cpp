@@ -2485,13 +2485,13 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     }
 
     //* Halo sum (interpolation pattern: face/edge/corner addFace into the
-    //* matching interior nodes). NOTE: unify_ps_dups halo-internal fold
-    //* tested but produced cycle-1 |dE/E|=8.7e-8 regression at TSC np=4 X+Y
-    //* with mass matrix's 567-field batch (root cause unidentified — likely
-    //* an interaction between the in-halo unify_z and one of the EDGE /
-    //* CORNER / diag-edge-copy / corner-periodic-self phases that read
-    //* strict-Z at HI/LO cells unify modified). Keeping inline unify +
-    //* post-unify Node_P_multi for mass matrix until root cause is found.
+    //* matching interior nodes). NOTE: unify_ps_dups halo-internal fold (the
+    //* same path ECSIM uses successfully) breaks for mass-matrix's 567-field
+    //* batch at TSC np>1 cross-rank with any periodic-self axis (np=2 X-only
+    //* dE/E=1.1e-6, np=4 X+Y dE/E=8.7e-8 at cycle 1; np=1 works fine).
+    //* Reverting to inline unify + Node_P_multi pending root-cause analysis —
+    //* bisect indicates the issue is mass-matrix-specific (not config) and
+    //* not present at ECSIM's 7-field batch with same flags / configs.
     if (kahan_halo) {
         std::vector<double***> comps_c_all(n_total);
         for (int m = 0; m < ne_mass_; ++m) {
