@@ -35,7 +35,8 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
                                 bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
-                                double ****vectors_c = nullptr);
+                                double ****vectors_c = nullptr,
+                                bool unify_ps_dups = false);
 
 //! isCenterFlag: 1 = communicateCenter; 0 = communicateNode
 //! `vector_c` is the optional Kahan-compensation companion array. `= nullptr`
@@ -1569,6 +1570,131 @@ static void do_edge_phase(int nx, int ny, int nz,
 //*                        reads see post-Irecv neighbour values, matching
 //*                        legacy E.20-conditional Waitall-then-self-copy.
 //* ============================================================================
+
+//* ============================================================================
+//* PERIODIC-SELF FOLD — ghost → strict sum at periodic-self axes
+//*
+//* TSC gather deposits into ghost cells at periodic-self axes; this helper
+//* sums those ghost contributions into the matching strict-interior cells
+//* (n_ghost layers deep) so cross-rank packs that follow carry post-fold
+//* strict. No-op outside periodic-self (cnt[d] for cross-rank is handled by
+//* the FACE phase below). Caller gates on needInterp.
+//* ============================================================================
+static void do_periodic_self_fold(int nx, int ny, int nz,
+                                   int n_fields, double ****vectors,
+                                   const HaloContext &ctx)
+{
+    const int n_ghost = ctx.n_ghost;
+    const int offset  = ctx.offset;
+    const bool ps_x   = ctx.ps_x_self;
+    const bool ps_y   = ctx.ps_y_self;
+    const bool ps_z   = ctx.ps_z_self;
+
+    if (!(ps_x || ps_y || ps_z)) return;
+
+    for (int f = 0; f < n_fields; ++f) {
+        if (ps_x) {
+            for (int g = 0; g < n_ghost; g++) {
+                const int dst_lo = g + nx - 2 * n_ghost - offset;
+                const int dst_hi = (2 * n_ghost - 1 + offset) - g;
+                for (int iy = 1; iy <= ny - 2; iy++)
+                    for (int iz = 1; iz <= nz - 2; iz++) {
+                        vectors[f][dst_lo][iy][iz] += vectors[f][g][iy][iz];
+                        vectors[f][dst_hi][iy][iz] += vectors[f][nx - 1 - g][iy][iz];
+                    }
+            }
+        }
+        if (ps_y) {
+            for (int g = 0; g < n_ghost; g++) {
+                const int dst_lo = g + ny - 2 * n_ghost - offset;
+                const int dst_hi = (2 * n_ghost - 1 + offset) - g;
+                for (int ix = 1; ix <= nx - 2; ix++)
+                    for (int iz = 1; iz <= nz - 2; iz++) {
+                        vectors[f][ix][dst_lo][iz] += vectors[f][ix][g][iz];
+                        vectors[f][ix][dst_hi][iz] += vectors[f][ix][ny - 1 - g][iz];
+                    }
+            }
+        }
+        if (ps_z) {
+            for (int g = 0; g < n_ghost; g++) {
+                const int dst_lo = g + nz - 2 * n_ghost - offset;
+                const int dst_hi = (2 * n_ghost - 1 + offset) - g;
+                for (int ix = 1; ix <= nx - 2; ix++)
+                    for (int iy = 1; iy <= ny - 2; iy++) {
+                        vectors[f][ix][iy][dst_lo] += vectors[f][ix][iy][g];
+                        vectors[f][ix][iy][dst_hi] += vectors[f][ix][iy][nz - 1 - g];
+                    }
+            }
+        }
+    }
+}
+
+//* ============================================================================
+//* UNIFY PERIODIC-SELF DUPLICATES — average/sum LO=HI strict dup pair
+//*
+//* At periodic-self axes (np=1 + periodic), LO dup at i=n_ghost and HI dup
+//* at i=nx-n_ghost-1 are duplicates of the same physical node. Gather may
+//* scatter the deposit asymmetrically. Unify makes them equal:
+//*   - n_ghost > 1 (TSC): SUM (each carries half the physical-node deposit)
+//*   - n_ghost = 1 (CIC): AVG (each holds the full deposit; avg is no-op
+//*                              when LO == HI bit-exact)
+//* Run before the cross-rank pack so neighbours' ghosts inherit post-unify
+//* strict. Replaces the legacy in-place unify_periodic_duplicates + post-
+//* unify communicateNode_P refresh that lived at the call site.
+//* ============================================================================
+static void do_unify_ps_dups(int nx, int ny, int nz,
+                              int n_fields, double ****vectors,
+                              const HaloContext &ctx)
+{
+    const int  n_ghost   = ctx.n_ghost;
+    const bool ps_x      = ctx.ps_x_self;
+    const bool ps_y      = ctx.ps_y_self;
+    const bool ps_z      = ctx.ps_z_self;
+    const bool unify_sum = (n_ghost > 1);
+
+    if (!(ps_x || ps_y || ps_z)) return;
+
+    for (int f = 0; f < n_fields; ++f) {
+        if (ps_x) {
+            const int ilo = n_ghost;
+            const int ihi = nx - n_ghost - 1;
+            if (ihi > ilo)
+                for (int j = 0; j < ny; ++j)
+                    for (int k = 0; k < nz; ++k) {
+                        const double s = vectors[f][ilo][j][k] + vectors[f][ihi][j][k];
+                        const double v = unify_sum ? s : 0.5 * s;
+                        vectors[f][ilo][j][k] = v;
+                        vectors[f][ihi][j][k] = v;
+                    }
+        }
+        if (ps_y) {
+            const int jlo = n_ghost;
+            const int jhi = ny - n_ghost - 1;
+            if (jhi > jlo)
+                for (int i = 0; i < nx; ++i)
+                    for (int k = 0; k < nz; ++k) {
+                        const double s = vectors[f][i][jlo][k] + vectors[f][i][jhi][k];
+                        const double v = unify_sum ? s : 0.5 * s;
+                        vectors[f][i][jlo][k] = v;
+                        vectors[f][i][jhi][k] = v;
+                    }
+        }
+        if (ps_z) {
+            const int klo = n_ghost;
+            const int khi = nz - n_ghost - 1;
+            if (khi > klo)
+                for (int i = 0; i < nx; ++i)
+                    for (int j = 0; j < ny; ++j) {
+                        const double s = vectors[f][i][j][klo] + vectors[f][i][j][khi];
+                        const double v = unify_sum ? s : 0.5 * s;
+                        vectors[f][i][j][klo] = v;
+                        vectors[f][i][j][khi] = v;
+                    }
+        }
+    }
+}
+
+//* ============================================================================
 static void do_face_phase(int nx, int ny, int nz,
                            int n_fields, double ****vectors,
                            const HaloContext &ctx, bool needInterp)
@@ -1645,7 +1771,9 @@ static void do_face_phase(int nx, int ny, int nz,
                 vectors[f][i][j][iz] = buf[idx++];
     };
 
-    //* Pack send buffers from strict-interior cells. g_src(g) = (n_ghost-1-g)
+    //* Pack send buffers from strict-interior cells (post-fold; periodic-self
+    //* sum-on-receive ran in do_periodic_self_fold before this phase, and
+    //* unify ran in do_unify_ps_dups when requested). g_src(g) = (n_ghost-1-g)
     //* source-depth swap matches the legacy MPI-types path.
     for (int f = 0; f < n_fields; ++f) {
         for (int g = 0; g < n_ghost; ++g) {
@@ -1689,52 +1817,6 @@ static void do_face_phase(int nx, int ny, int nz,
             }
         }
     };
-
-    //* Sum-on-receive at periodic-self for needInterp=true (moments path).
-    //  At TSC width the gather deposits to ghost cells; periodic-image sums
-    //  recover those contributions before the overwrite below clobbers them.
-    //  Reads vector[g] which is untouched by Irecv (recv goes to recv_bufs).
-    const bool ps_x_self = (rnX == myrank && lnX == myrank);
-    const bool ps_y_self = (rnY == myrank && lnY == myrank);
-    const bool ps_z_self = (rnZ == myrank && lnZ == myrank);
-
-    if (needInterp) {
-        for (int f = 0; f < n_fields; ++f) {
-            if (ps_x_self) {
-                for (int g = 0; g < n_ghost; g++) {
-                    const int dst_lo = g + nx - 2 * n_ghost - offset;
-                    const int dst_hi = (2 * n_ghost - 1 + offset) - g;
-                    for (int iy = 1; iy <= ny - 2; iy++)
-                        for (int iz = 1; iz <= nz - 2; iz++) {
-                            vectors[f][dst_lo][iy][iz] += vectors[f][g][iy][iz];
-                            vectors[f][dst_hi][iy][iz] += vectors[f][nx - 1 - g][iy][iz];
-                        }
-                }
-            }
-            if (ps_y_self) {
-                for (int g = 0; g < n_ghost; g++) {
-                    const int dst_lo = g + ny - 2 * n_ghost - offset;
-                    const int dst_hi = (2 * n_ghost - 1 + offset) - g;
-                    for (int ix = 1; ix <= nx - 2; ix++)
-                        for (int iz = 1; iz <= nz - 2; iz++) {
-                            vectors[f][ix][dst_lo][iz] += vectors[f][ix][g][iz];
-                            vectors[f][ix][dst_hi][iz] += vectors[f][ix][ny - 1 - g][iz];
-                        }
-                }
-            }
-            if (ps_z_self) {
-                for (int g = 0; g < n_ghost; g++) {
-                    const int dst_lo = g + nz - 2 * n_ghost - offset;
-                    const int dst_hi = (2 * n_ghost - 1 + offset) - g;
-                    for (int ix = 1; ix <= nx - 2; ix++)
-                        for (int iy = 1; iy <= ny - 2; iy++) {
-                            vectors[f][ix][iy][dst_lo] += vectors[f][ix][iy][g];
-                            vectors[f][ix][iy][dst_hi] += vectors[f][ix][iy][nz - 1 - g];
-                        }
-                }
-            }
-        }
-    }
 
     //* Periodic single-rank self-copies (X/Y/Z). Source indices match the
     //  (n_ghost + offset + g) depth convention used by the MPI sends, with
@@ -2008,7 +2090,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
                                 bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
-                                double ****vectors_c)
+                                double ****vectors_c, bool unify_ps_dups)
 {
     //* Single-source-of-truth halo state shared across all phase helpers.
     const HaloContext ctx = make_halo_context(EMf, vct, isCenterFlag, needInterp, isParticle);
@@ -2023,12 +2105,20 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
     //      any_xrank_periodic). Must precede the FACE PHASE since its
     //      COPY semantics would overwrite the ghost values the SOR
     //      pre-pass needs to send.
-    //   2. FACE phase (manual pack/unpack at N=1+).
-    //   3. EDGE / CORNER / E.18 diagonal Cart edge-copy / corner periodic-
+    //   2. Periodic-self fold (ghost → strict sum at periodic-self axes).
+    //      Only when needInterp. Must precede unify and FACE pack so the
+    //      pack carries post-fold strict.
+    //   3. Periodic-self LO=HI dup unify (sum at TSC, avg at CIC). Only
+    //      when caller opts in via unify_ps_dups (mass-matrix / ECSIM).
+    //      Must precede FACE pack so cross-rank ghosts inherit post-unify.
+    //   4. FACE phase (manual pack/unpack at N=1+).
+    //   5. EDGE / CORNER / E.18 diagonal Cart edge-copy / corner periodic-
     //      self self-copies — only when !isFaceOnlyFlag.
-    //   4. Trailing addFace family at n_ghost==1 (CIC moments interp).
+    //   6. Trailing addFace family at n_ghost==1 (CIC moments interp).
     //! ============================================================
     do_xrank_completion(nx, ny, nz, n_fields, vectors, ctx, needInterp);
+    if (needInterp)    do_periodic_self_fold(nx, ny, nz, n_fields, vectors, ctx);
+    if (unify_ps_dups) do_unify_ps_dups     (nx, ny, nz, n_fields, vectors, ctx);
     do_face_phase      (nx, ny, nz, n_fields, vectors, ctx, needInterp);
     if (!isFaceOnlyFlag) {
         do_edge_phase           (nx, ny, nz, n_fields, vectors, ctx);
@@ -2468,31 +2558,49 @@ static void NBDerivedHaloComm_multi(int nx, int ny, int nz,
                                      const VirtualTopology3D *vct, EMfields3D *EMf,
                                      bool isCenterFlag, bool isFaceOnlyFlag,
                                      bool needInterp, bool isParticle,
-                                     double ****vectors_c = nullptr)
+                                     double ****vectors_c = nullptr,
+                                     bool unify_ps_dups = false)
 {
     if (EMf->getNGhost() > 1) {
         NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
-                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vectors_c);
+                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle,
+                           vectors_c, unify_ps_dups);
         return;
     }
-    //* CIC fallback: loop N times through the legacy single-field fast path.
+    //* CIC fallback: loop the legacy single-field fast path. NBDerivedHaloComm's
+    //* trailing addFace family (with skip_self=false) deposits periodic-self
+    //* ghosts into LO and HI strict separately, leaving them asymmetric — so
+    //* unify is meaningful at CIC and must run after the interp pass. A copy
+    //* halo refresh follows so cross-rank ghosts pick up the post-unify strict.
     for (int f = 0; f < n_fields; ++f) {
         double ***vc = (vectors_c != nullptr) ? vectors_c[f] : nullptr;
         NBDerivedHaloComm(nx, ny, nz, vectors[f], vct, EMf,
                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vc);
     }
+    if (unify_ps_dups) {
+        const HaloContext ctx = make_halo_context(EMf, vct, isCenterFlag, needInterp, isParticle);
+        do_unify_ps_dups(nx, ny, nz, n_fields, vectors, ctx);
+        //* Refresh ghosts with post-unify strict via the standard Node_P
+        //* path — matches the pre-fold semantics (isCenterFlag=false,
+        //* needInterp=false) the call site previously used post-unify.
+        communicateNode_P_multi(nx, ny, nz, n_fields, vectors, vct, EMf);
+    }
 }
 
 //* Multi-field interpolation halo. Optional `vectors_c` companion array
 //* (parallel layout to `vectors`) routes the receive through Neumaier
-//* compensation per field.
+//* compensation per field. When `unify_ps_dups=true` the halo also performs
+//* the periodic-self LO=HI strict unify before the cross-rank pack — so
+//* cross-rank ghosts inherit post-unify strict and no trailing Node_P call
+//* is needed at the call site.
 void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf,
-                              double ****vectors_c)
+                              double ****vectors_c, bool unify_ps_dups)
 {
     NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
                             /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,
-                            /*needInterp=*/true, /*isParticle=*/true, vectors_c);
+                            /*needInterp=*/true, /*isParticle=*/true,
+                            vectors_c, unify_ps_dups);
 }
 
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,

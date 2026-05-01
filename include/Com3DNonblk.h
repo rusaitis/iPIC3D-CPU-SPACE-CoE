@@ -102,10 +102,14 @@ void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const Virtua
 //* topology. At n_ghost > 1 (TSC) all fields exchange in one batched MPI
 //* message per direction; at n_ghost == 1 (CIC) the wrappers fall back to
 //* looping the single-field legacy path. Optional `vectors_c` companion
-//* (default nullptr) enables Neumaier compensation per field.
+//* (default nullptr) enables Neumaier compensation per field. Optional
+//* `unify_ps_dups` (default false) performs periodic-self LO=HI strict
+//* unify before the cross-rank pack so callers can drop the trailing
+//* Node_P refresh — used by the mass-matrix and ECSIM moment paths.
 void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf,
-                              double ****vectors_c = nullptr);
+                              double ****vectors_c = nullptr,
+                              bool unify_ps_dups = false);
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf);
 

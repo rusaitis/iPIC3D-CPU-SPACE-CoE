@@ -2377,32 +2377,21 @@ void EMfields3D::communicateGhostP2G(int ns)
     double ***moment9 = convert_to_arr3(pZZsn[ns]);
     // add the values for the shared nodes
 
-    //* NonBlocking Halo Exchange for Interpolation
-    communicateInterp(nxn, nyn, nzn, moment0, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment1, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment2, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment3, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment4, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment5, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment6, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment7, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment8, vct, this);
-    communicateInterp(nxn, nyn, nzn, moment9, vct, this);
-    
+    //* Batched halo: 10 single-field calls collapsed into one multi message
+    //* per direction. adjustNonPeriodicDensities modifies strict at non-
+    //* periodic boundary cells between interp and copy halo, so a second
+    //* batched copy halo is needed (only at non-periodic configs — at fully
+    //* periodic configs adjustNonPeriodicDensities is a no-op and the second
+    //* halo is also a no-op via the periodic-self-fold-before-pack reorder).
+    double ***moments[10] = { moment0, moment1, moment2, moment3, moment4,
+                              moment5, moment6, moment7, moment8, moment9 };
+    communicateInterp_multi(nxn, nyn, nzn, 10, moments, vct, this);
+
     //* Calculate correct densities on the boundaries
     adjustNonPeriodicDensities(ns);
 
-    //* Populate the ghost nodes - Nonblocking Halo Exchange
-    communicateNode_P(nxn, nyn, nzn, moment0, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment1, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment2, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment3, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment4, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment5, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment6, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment7, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment8, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment9, vct, this);
+    //* Populate the ghost nodes after adjustNonPeriodicDensities mutated strict.
+    communicateNode_P_multi(nxn, nyn, nzn, 10, moments, vct, this);
 }
 
 //! Communicate ghost data for ECSIM/RelSIM (computation) moments
@@ -2425,101 +2414,29 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     //* Kahan-aware halo sum (companions zeroed before halo exchange).
     const bool kahan_halo = _col.getKahanHalo();
 
-    //* Halo sum (interpolation pattern: face/edge/corner addFace into the
-    //  matching interior nodes). Jxh / Jyh / Jzh aggregates are still 0 at
-    //  this point (sumOverSpecies runs later), so the Kahan route is
-    //  equivalent to legacy for those three calls — keep them on the
-    //  legacy path to save the companion-array bookkeeping.
-    communicateInterp(nxn, nyn, nzn, Jxh,         vct, this);
-    communicateInterp(nxn, nyn, nzn, Jyh,         vct, this);
-    communicateInterp(nxn, nyn, nzn, Jzh,         vct, this);
+    //* Batched halo: all 7 fields (3 Jh aggregates + 4 per-species Jhs/rhons)
+    //* in one multi call with unify_ps_dups=true so the periodic-self LO=HI
+    //* strict unify happens inside the halo before the cross-rank pack —
+    //* cross-rank ghosts inherit post-unify strict and no trailing copy
+    //* refresh is needed. Jxh/Jyh/Jzh aggregates are still 0 here
+    //* (sumOverSpecies runs later) — kept for parity with legacy structure.
+    //* At kahan_halo=true the per-species fields get companion arrays; the
+    //* three aggregate Jh slots use nullptr companion (Kahan equivalent to
+    //* legacy on zero-valued data).
+    double ***moments[7] = { Jxh.fetch_arr3(), Jyh.fetch_arr3(), Jzh.fetch_arr3(),
+                              moment_Jxhs, moment_Jyhs, moment_Jzhs, moment_rhons };
     if (kahan_halo) {
         double ***moment_rhons_c = convert_to_arr3(rhons_c[is]);
         double ***moment_Jxhs_c  = convert_to_arr3(Jxhs_c[is]);
         double ***moment_Jyhs_c  = convert_to_arr3(Jyhs_c[is]);
         double ***moment_Jzhs_c  = convert_to_arr3(Jzhs_c[is]);
-        communicateInterp(nxn, nyn, nzn, moment_Jxhs,  vct, this, moment_Jxhs_c);
-        communicateInterp(nxn, nyn, nzn, moment_Jyhs,  vct, this, moment_Jyhs_c);
-        communicateInterp(nxn, nyn, nzn, moment_Jzhs,  vct, this, moment_Jzhs_c);
-        communicateInterp(nxn, nyn, nzn, moment_rhons, vct, this, moment_rhons_c);
+        double ***moments_c[7] = { nullptr, nullptr, nullptr,
+                                    moment_Jxhs_c, moment_Jyhs_c, moment_Jzhs_c, moment_rhons_c };
+        communicateInterp_multi(nxn, nyn, nzn, 7, moments, vct, this,
+                                 moments_c, /*unify_ps_dups=*/true);
     } else {
-        communicateInterp(nxn, nyn, nzn, moment_Jxhs, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Jyhs, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_Jzhs, vct, this);
-        communicateInterp(nxn, nyn, nzn, moment_rhons, vct, this);
-    }
-
-    //* Populate the ghost layers (no sum-on-receive, just copy from interior).
-    communicateNode_P(nxn, nyn, nzn, Jxh,         vct, this);
-    communicateNode_P(nxn, nyn, nzn, Jyh,         vct, this);
-    communicateNode_P(nxn, nyn, nzn, Jzh,         vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment_Jxhs, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment_Jyhs, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment_Jzhs, vct, this);
-    communicateNode_P(nxn, nyn, nzn, moment_rhons, vct, this);
-
-    //* Average-unify Jh and rho periodic-duplicate LO/HI nodes — TSC's 27-node
-    //* gather deposits to ghost cells which then get overwritten by the copy
-    //* halo above, asymmetrically losing contributions to LO vs HI. At Linear
-    //* the CIC deposit doesn't reach ghosts so LO == HI bit-exact and the
-    //* average is a no-op. Followed by a fresh copy halo so ghosts pick up
-    //* the unified LO=HI values.
-    {
-        const bool ps_x = _col.getPERIODICX() && vct->getXLEN() == 1;
-        const bool ps_y = _col.getPERIODICY() && vct->getYLEN() == 1;
-        const bool ps_z = _col.getPERIODICZ() && vct->getZLEN() == 1;
-
-        //* SUM the LO/HI duplicate natives at TSC (each carries a partial
-        //* periodic-image slice); average at n_ghost=1 (CIC: dups hold full
-        //* value, summing would double-count).
-        const bool unify_sum = (n_ghost_ > 1);
-
-        double ***slabs[7] = { Jxh.fetch_arr3(), Jyh.fetch_arr3(), Jzh.fetch_arr3(),
-                                moment_Jxhs, moment_Jyhs, moment_Jzhs, moment_rhons };
-
-        for (int s = 0; s < 7; ++s)
-        {
-            double ***v = slabs[s];
-            if (ps_x) {
-                const int ilo = n_ghost_;
-                const int ihi = nxn - n_ghost_ - 1;
-                if (ihi > ilo)
-                    for (int j = 0; j < nyn; ++j)
-                        for (int k = 0; k < nzn; ++k) {
-                            const double sum = v[ilo][j][k] + v[ihi][j][k];
-                            const double val = unify_sum ? sum : 0.5 * sum;
-                            v[ilo][j][k] = val;
-                            v[ihi][j][k] = val;
-                        }
-            }
-            if (ps_y) {
-                const int jlo = n_ghost_;
-                const int jhi = nyn - n_ghost_ - 1;
-                if (jhi > jlo)
-                    for (int i = 0; i < nxn; ++i)
-                        for (int k = 0; k < nzn; ++k) {
-                            const double sum = v[i][jlo][k] + v[i][jhi][k];
-                            const double val = unify_sum ? sum : 0.5 * sum;
-                            v[i][jlo][k] = val;
-                            v[i][jhi][k] = val;
-                        }
-            }
-            if (ps_z) {
-                const int klo = n_ghost_;
-                const int khi = nzn - n_ghost_ - 1;
-                if (khi > klo)
-                    for (int i = 0; i < nxn; ++i)
-                        for (int j = 0; j < nyn; ++j) {
-                            const double sum = v[i][j][klo] + v[i][j][khi];
-                            const double val = unify_sum ? sum : 0.5 * sum;
-                            v[i][j][klo] = val;
-                            v[i][j][khi] = val;
-                        }
-            }
-            //* Re-run the copy halo so ghost cells pick up the new unified
-            //* LO=HI values (otherwise downstream stencils read stale ghosts).
-            communicateNode_P(nxn, nyn, nzn, v, vct, this);
-        }
+        communicateInterp_multi(nxn, nyn, nzn, 7, moments, vct, this,
+                                 /*vectors_c=*/nullptr, /*unify_ps_dups=*/true);
     }
 }
 
@@ -2568,7 +2485,13 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     }
 
     //* Halo sum (interpolation pattern: face/edge/corner addFace into the
-    //  matching interior nodes).
+    //* matching interior nodes). NOTE: unify_ps_dups halo-internal fold
+    //* tested but produced cycle-1 |dE/E|=8.7e-8 regression at TSC np=4 X+Y
+    //* with mass matrix's 567-field batch (root cause unidentified — likely
+    //* an interaction between the in-halo unify_z and one of the EDGE /
+    //* CORNER / diag-edge-copy / corner-periodic-self phases that read
+    //* strict-Z at HI/LO cells unify modified). Keeping inline unify +
+    //* post-unify Node_P_multi for mass matrix until root cause is found.
     if (kahan_halo) {
         std::vector<double***> comps_c_all(n_total);
         for (int m = 0; m < ne_mass_; ++m) {
@@ -2588,9 +2511,9 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
     }
 
-    //* Stage 1 — after communicateInterp (addFace sum-on-receive merged
-    //* periodic-image partial deposits into the natives). Ghost layers
-    //* still hold raw deposit values; copy halo not yet run. Captures m=0
+    //* Stage 1 — after communicateInterp (face/edge/corner pack/unpack +
+    //* periodic-self sum-on-receive folded BEFORE pack inside do_face_phase,
+    //* so cross-rank ghosts already carry post-fold strict). Captures m=0
     //* (first 9 entries of comps_all).
     if (dump_stages)
     {
@@ -2600,35 +2523,15 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         dump_maxwell_stage("Mstage1_post_addFace", a_xx, a_yy, a_zz);
     }
 
-    //* Populate the ghost layers (no sum-on-receive, just copy from interior).
-    communicateNode_P_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
-
-    //* Stage 2 — after communicateNode_P (ghost layers copied from interior).
-    //* Pre-unify: LO and HI duplicates may differ if gather scatter went
-    //* asymmetrically.
-    if (dump_stages)
-    {
-        arr3_double a_xx(comps_all[0], nxn, nyn, nzn);
-        arr3_double a_yy(comps_all[4], nxn, nyn, nzn);
-        arr3_double a_zz(comps_all[8], nxn, nyn, nzn);
-        dump_maxwell_stage("Mstage2_post_selfcopy", a_xx, a_yy, a_zz);
-    }
-
     //* Average-unify M's periodic-duplicate LO and HI nodes on each periodic-self
     //* axis. At Linear LO == HI bit-exact already, so the average is a no-op.
     //* At TSC the gather scatters partial sums to LO and HI separately; averaging
-    //* makes them consistent so M·E at LO and HI produce equal output. Followed
-    //* by a fresh copy halo so ghosts pick up the unified LO=HI values (otherwise
-    //* mass_matrix_times_vector reads stale ghost values when stencils touch
-    //* ghost layers).
+    //* makes them consistent so M·E at LO and HI produce equal output.
     {
         const VirtualTopology3D *vctp = vct;
         const bool ps_x = _col.getPERIODICX() && vctp->getXLEN() == 1;
         const bool ps_y = _col.getPERIODICY() && vctp->getYLEN() == 1;
         const bool ps_z = _col.getPERIODICZ() && vctp->getZLEN() == 1;
-
-        //* SUM at TSC (each LO/HI dup carries half the physical-node deposit);
-        //* average at n_ghost=1 (CIC dups hold full value already).
         const bool unify_sum = (n_ghost_ > 1);
 
         array4_double *Mall[9] = { &Mxx, &Mxy, &Mxz, &Myx, &Myy, &Myz, &Mzx, &Mzy, &Mzz };
@@ -2676,10 +2579,7 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
         }
 
         //* Re-run the copy halo after unify so ghost cells pick up the new
-        //* unified LO=HI values (otherwise mass_matrix_times_vector reads
-        //* stale pre-unify ghost values when stencils touch ghost layers).
-        //* PR-B: batch the 9 × ne_mass_ slabs into one halo call (reuses
-        //* the same pointer pack as the pre-unify path).
+        //* unified LO=HI values.
         communicateNode_P_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
     }
 
@@ -2748,8 +2648,10 @@ void EMfields3D::communicateGhostP2G_supplementary_moments(int is)
     comps.push_back(convert_to_arr3(pZZsn[is]));
 
     const int n = static_cast<int>(comps.size());
+    //* Single batched halo: do_face_phase folds periodic-self sum-on-receive
+    //* before pack, so cross-rank ghosts already carry post-fold strict —
+    //* no trailing communicateNode_P_multi refresh needed.
     communicateInterp_multi(nxn, nyn, nzn, n, comps.data(), vct, this);
-    communicateNode_P_multi(nxn, nyn, nzn, n, comps.data(), vct, this);
 }
 
 //! ===================================== Compute Fields ===================================== !//
