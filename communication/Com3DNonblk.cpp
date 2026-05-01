@@ -2250,37 +2250,38 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
 }
 
 
-void communicateNodeBC(int nx, int ny, int nz, arr3_double _vector,
-                        int bcFaceXrght, int bcFaceXleft,
-                        int bcFaceYrght, int bcFaceYleft,
-                        int bcFaceZrght, int bcFaceZleft,
-                        const VirtualTopology3D * vct, EMfields3D *EMf)
-{
-	double ***vector=_vector.fetch_arr3();
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false,false,false,false);
-	BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
-}
-
-//* double*** overload — same body as the arr3_double version, used by code paths
-//  that hold a raw triple pointer (e.g. energy_conserve_smooth_direction).
+//* communicate*BC* wrappers all follow the same shape: NBDerivedHaloComm
+//* with one of four (isCenter, faceOnly) × (P / non-P) flag bits, then
+//* a BCface (or BCface_P) finalisation. The double*** overload carries the
+//* logic; the arr3_double overload just unpacks via fetch_arr3().
 void communicateNodeBC(int nx, int ny, int nz, double*** vector,
                         int bcFaceXrght, int bcFaceXleft,
                         int bcFaceYrght, int bcFaceYleft,
                         int bcFaceZrght, int bcFaceZleft,
                         const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false,false,false,false);
-	BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, false);
+    BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
-void communicateNodeBoxStencilBC( int nx, int ny, int nz, arr3_double _vector,
-								  int bcFaceXrght, int bcFaceXleft,
-								  int bcFaceYrght, int bcFaceYleft,
-								  int bcFaceZrght, int bcFaceZleft,
-								  const VirtualTopology3D * vct, EMfields3D *EMf)
+void communicateNodeBC(int nx, int ny, int nz, arr3_double _vector,
+                        int bcFaceXrght, int bcFaceXleft,
+                        int bcFaceYrght, int bcFaceYleft,
+                        int bcFaceZrght, int bcFaceZleft,
+                        const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double ***vector=_vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false,true,false,false);
+    communicateNodeBC(nx, ny, nz, _vector.fetch_arr3(),
+                       bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct, EMf);
+}
+
+void communicateNodeBoxStencilBC(int nx, int ny, int nz, arr3_double _vector,
+                                  int bcFaceXrght, int bcFaceXleft,
+                                  int bcFaceYrght, int bcFaceYleft,
+                                  int bcFaceZrght, int bcFaceZleft,
+                                  const VirtualTopology3D * vct, EMfields3D *EMf)
+{
+    double ***vector = _vector.fetch_arr3();
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, true, false, false);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -2290,74 +2291,72 @@ void communicateNodeBoxStencilBC_P(int nx, int ny, int nz, arr3_double _vector,
                                     int bcFaceZrght, int bcFaceZleft,
                                     const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double ***vector=_vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false,true,false,true);
+    double ***vector = _vector.fetch_arr3();
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, true, false, true);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
 void communicateNodeBC_P(int nx, int ny, int nz, arr3_double _vector,
-                        int bcFaceXrght, int bcFaceXleft,
-                        int bcFaceYrght, int bcFaceYleft,
-                        int bcFaceZrght, int bcFaceZleft,
-                        const VirtualTopology3D * vct, EMfields3D *EMf)
+                          int bcFaceXrght, int bcFaceXleft,
+                          int bcFaceYrght, int bcFaceYleft,
+                          int bcFaceZrght, int bcFaceZleft,
+                          const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-	double ***vector=_vector.fetch_arr3();
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false,false,false,true);
-	BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
-}
-
-
-void communicateCenterBC(int nx, int ny, int nz, arr3_double _vector,
-                        int bcFaceXrght, int bcFaceXleft,
-                        int bcFaceYrght, int bcFaceYleft,
-                        int bcFaceZrght, int bcFaceZleft,
-                        const VirtualTopology3D * vct, EMfields3D *EMf)
-{
-	double ***vector=_vector.fetch_arr3();
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false,false,false);
-    BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
+    double ***vector = _vector.fetch_arr3();
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, true);
+    BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
 void communicateCenterBC(int nx, int ny, int nz, double*** vector,
-                        int bcFaceXrght, int bcFaceXleft,
-                        int bcFaceYrght, int bcFaceYleft,
-                        int bcFaceZrght, int bcFaceZleft,
-                        const VirtualTopology3D * vct, EMfields3D *EMf)
+                          int bcFaceXrght, int bcFaceXleft,
+                          int bcFaceYrght, int bcFaceYleft,
+                          int bcFaceZrght, int bcFaceZleft,
+                          const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, false, false);
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, false, false);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
-void communicateCenterBC_P( int nx, int ny, int nz, arr3_double _vector,
+void communicateCenterBC(int nx, int ny, int nz, arr3_double _vector,
+                          int bcFaceXrght, int bcFaceXleft,
+                          int bcFaceYrght, int bcFaceYleft,
+                          int bcFaceZrght, int bcFaceZleft,
+                          const VirtualTopology3D * vct, EMfields3D *EMf)
+{
+    communicateCenterBC(nx, ny, nz, _vector.fetch_arr3(),
+                         bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct, EMf);
+}
+
+void communicateCenterBC_P(int nx, int ny, int nz, arr3_double _vector,
                             int bcFaceXrght, int bcFaceXleft,
                             int bcFaceYrght, int bcFaceYleft,
                             int bcFaceZrght, int bcFaceZleft,
                             const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double ***vector=_vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false,false,true);
+    double ***vector = _vector.fetch_arr3();
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, false, true);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
-void communicateCenterBoxStencilBC( int nx, int ny, int nz, arr3_double _vector,
+void communicateCenterBoxStencilBC(int nx, int ny, int nz, arr3_double _vector,
                                     int bcFaceXrght, int bcFaceXleft,
                                     int bcFaceYrght, int bcFaceYleft,
                                     int bcFaceZrght, int bcFaceZleft,
                                     const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double ***vector=_vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true,true,false,false);
+    double ***vector = _vector.fetch_arr3();
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, true, false, false);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
-void communicateCenterBoxStencilBC_P( int nx, int ny, int nz, arr3_double _vector,
-									  int bcFaceXrght, int bcFaceXleft,
-									  int bcFaceYrght, int bcFaceYleft,
-									  int bcFaceZrght, int bcFaceZleft,
-									  const VirtualTopology3D * vct, EMfields3D *EMf)
+void communicateCenterBoxStencilBC_P(int nx, int ny, int nz, arr3_double _vector,
+                                      int bcFaceXrght, int bcFaceXleft,
+                                      int bcFaceYrght, int bcFaceYleft,
+                                      int bcFaceZrght, int bcFaceZleft,
+                                      const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double ***vector=_vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true,true,false,true);
+    double ***vector = _vector.fetch_arr3();
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, true, false, true);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -2614,42 +2613,32 @@ void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D
 /** communicate and sum shared ghost cells */
 
 //? Used for communicating moments
-void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf)
+//* Moment interpolation halo (sum-on-receive). Optional `vector_c`
+//* companion routes the receive through Neumaier-compensated adds —
+//* same idiom as the unified `addFace`/`addEdge*`/`addCorner` helpers.
+void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf, double*** vector_c)
 {
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true);
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true, vector_c);
 }
 
 void communicateInterp(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double ***vector=_vector.fetch_arr3();
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true);
+    communicateInterp(nx, ny, nz, _vector.fetch_arr3(), vct, EMf);
 }
 
-//* Kahan-compensated variants. Forward the companion array into
-//* NBDerivedHaloComm so the sum-on-receive goes through `addFace_kahan` etc.
-void communicateInterp_kahan(int nx, int ny, int nz, double*** vector, double*** vector_c,
-                             const VirtualTopology3D * vct, EMfields3D *EMf)
+void communicateInterp(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true, vector_c);
-}
-
-void communicateInterp_kahan(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c,
-                             const VirtualTopology3D * vct, EMfields3D *EMf)
-{
-    double ***vector   = _vector.fetch_arr3();
-    double ***vector_c = _vector_c.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true, vector_c);
+    communicateInterp(nx, ny, nz, _vector.fetch_arr3(), vct, EMf, _vector_c.fetch_arr3());
 }
 
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, true);
+    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, true);
 }
 
 void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double ***vector=_vector.fetch_arr3();
-	NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, true);
+    communicateNode_P(nx, ny, nz, _vector.fetch_arr3(), vct, EMf);
 }
 
 //* ================================================================================
@@ -2691,17 +2680,12 @@ static void NBDerivedHaloComm_multi(int nx, int ny, int nz,
     }
 }
 
+//* Multi-field interpolation halo. Optional `vectors_c` companion array
+//* (parallel layout to `vectors`) routes the receive through Neumaier
+//* compensation per field.
 void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
-                              const VirtualTopology3D *vct, EMfields3D *EMf)
-{
-    NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
-                            /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,
-                            /*needInterp=*/true, /*isParticle=*/true);
-}
-
-void communicateInterp_multi_kahan(int nx, int ny, int nz, int n_fields,
-                                    double ****vectors, double ****vectors_c,
-                                    const VirtualTopology3D *vct, EMfields3D *EMf)
+                              const VirtualTopology3D *vct, EMfields3D *EMf,
+                              double ****vectors_c)
 {
     NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
                             /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,

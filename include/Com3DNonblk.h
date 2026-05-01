@@ -38,7 +38,6 @@ developers           : Stefano Markidis, Ivy Bo Peng
 #include "ipicdefs.h"
 #include "Alloc.h"
 #include "debug.h"
-#include "EMfields3D.h"
 
 //* Communicate ghost cells (nodes)
 void communicateNodeBC( int nx, int ny, int nz, arr3_double vector,
@@ -86,30 +85,27 @@ void communicateCenterBoxStencilBC_P(int nx, int ny, int nz, arr3_double vector,
                                     int bcFaceXright, int bcFaceXleft, int bcFaceYright, int bcFaceYleft, int bcFaceZright, int bcFaceZleft, 
                                     const VirtualTopology3D * vct, EMfields3D *EMf);
 
-//* This communication is used in interpolating from particle to grid
-void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf);
+//* Particle-to-grid interpolation halo (sum-on-receive). Optional
+//* `vector_c` companion (default nullptr) routes the receive through
+//* Neumaier compensation; companion is zero on entry, holds the halo-add
+//* residual on exit, caller folds it back into `vector`.
+void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf, double*** vector_c = nullptr);
 void communicateInterp(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf);
+void communicateInterp(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c, const VirtualTopology3D * vct, EMfields3D *EMf);
+
+//* Copy halo (no sum-on-receive).
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf);
 void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf);
-
-//* Kahan-compensated halo sum-on-receive for the moment
-//* interpolation. Companion `vector_c` must be zero on entry and is returned
-//* holding the halo-add residual; caller folds it into `vector` afterward.
-void communicateInterp_kahan(int nx, int ny, int nz, double*** vector, double*** vector_c,
-                             const VirtualTopology3D * vct, EMfields3D *EMf);
-void communicateInterp_kahan(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c,
-                             const VirtualTopology3D * vct, EMfields3D *EMf);
 
 //* Multi-field batched halo wrappers. `vectors` is an array of `n_fields`
 //* pointers to 3D arrays sharing the same (nx, ny, nz) extents and Cart
 //* topology. At n_ghost > 1 (TSC) all fields exchange in one batched MPI
 //* message per direction; at n_ghost == 1 (CIC) the wrappers fall back to
-//* looping the single-field legacy path.
+//* looping the single-field legacy path. Optional `vectors_c` companion
+//* (default nullptr) enables Neumaier compensation per field.
 void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
-                              const VirtualTopology3D *vct, EMfields3D *EMf);
-void communicateInterp_multi_kahan(int nx, int ny, int nz, int n_fields,
-                                    double ****vectors, double ****vectors_c,
-                                    const VirtualTopology3D *vct, EMfields3D *EMf);
+                              const VirtualTopology3D *vct, EMfields3D *EMf,
+                              double ****vectors_c = nullptr);
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf);
 

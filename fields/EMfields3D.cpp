@@ -2438,10 +2438,10 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
         double ***moment_Jxhs_c  = convert_to_arr3(Jxhs_c[is]);
         double ***moment_Jyhs_c  = convert_to_arr3(Jyhs_c[is]);
         double ***moment_Jzhs_c  = convert_to_arr3(Jzhs_c[is]);
-        communicateInterp_kahan(nxn, nyn, nzn, moment_Jxhs,  moment_Jxhs_c,  vct, this);
-        communicateInterp_kahan(nxn, nyn, nzn, moment_Jyhs,  moment_Jyhs_c,  vct, this);
-        communicateInterp_kahan(nxn, nyn, nzn, moment_Jzhs,  moment_Jzhs_c,  vct, this);
-        communicateInterp_kahan(nxn, nyn, nzn, moment_rhons, moment_rhons_c, vct, this);
+        communicateInterp(nxn, nyn, nzn, moment_Jxhs,  vct, this, moment_Jxhs_c);
+        communicateInterp(nxn, nyn, nzn, moment_Jyhs,  vct, this, moment_Jyhs_c);
+        communicateInterp(nxn, nyn, nzn, moment_Jzhs,  vct, this, moment_Jzhs_c);
+        communicateInterp(nxn, nyn, nzn, moment_rhons, vct, this, moment_rhons_c);
     } else {
         communicateInterp(nxn, nyn, nzn, moment_Jxhs, vct, this);
         communicateInterp(nxn, nyn, nzn, moment_Jyhs, vct, this);
@@ -2582,8 +2582,8 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
             comps_c_all[m * 9 + 7] = convert_to_arr3(Mzy_c[m]);
             comps_c_all[m * 9 + 8] = convert_to_arr3(Mzz_c[m]);
         }
-        communicateInterp_multi_kahan(nxn, nyn, nzn, n_total, comps_all.data(),
-                                       comps_c_all.data(), vct, this);
+        communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(),
+                                 vct, this, comps_c_all.data());
     } else {
         communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this);
     }
