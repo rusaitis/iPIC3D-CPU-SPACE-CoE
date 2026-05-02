@@ -179,8 +179,12 @@ void Collective::ReadInput(string inputfile)
         const bool eps_repro = config.read<bool>("EpsilonReproducibility", false);
 
         //* Bit-determinism knobs. Default off (legacy perf) unless eps_repro flips them.
+        //* Note: DeterministicThreadMoments is NOT lifted by eps_repro — KahanGather
+        //* alone gives multi-thread bit-identity (compensated accumulation is order-
+        //* independent), preserving threading speed. DTM remains opt-in for the
+        //* legacy single-thread reproducibility path.
         DeterministicMPIReductions = config.read<bool>("DeterministicMPIReductions", eps_repro);
-        DeterministicThreadMoments = config.read<bool>("DeterministicThreadMoments", eps_repro);
+        DeterministicThreadMoments = config.read<bool>("DeterministicThreadMoments", false);
         DeterministicParticleComm  = config.read<bool>("DeterministicParticleComm", eps_repro);
         KahanParticleSums   = config.read<bool>("KahanParticleSums",   eps_repro);
         KahanGather         = config.read<bool>("KahanGather",         eps_repro);

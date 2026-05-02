@@ -119,27 +119,29 @@ MaxwellOperator                = lap_graddiv                                   #
 # %                       EPSILON REPRODUCIBILITY (CI)                         %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # `EpsilonReproducibility=1` is a composite meta-flag that lifts the defaults
-# of the seven Kahan + determinism knobs below. Enabling it produces a run
-# where np=1 and np=4 match each other to ~2 ULPs on conserved quantities,
-# and each matches ECSIM's ε_mach energy-conservation class. NOT strict byte
+# of six Kahan + determinism knobs below. Enabling it produces a run where
+# np=1 and np=4 match each other to ~2 ULPs on conserved quantities, and
+# each matches ECSIM's ε_mach energy-conservation class. NOT strict byte
 # reproducibility — residuals ~1-2 ULPs remain from MPI_Allreduce tree
 # ordering. Recommended use: dedicated CI reproducibility job, reference-run
 # generation, and regression detection below FP noise.
 #
-# Cost when enabled: gather single-threaded (loses OMP gather speedup), +2x
-# companion-array memory for deposited fields, ~10-20% wall-clock. Default
-# OFF so production runs keep legacy performance.
+# Cost when enabled: +2x companion-array memory for deposited fields,
+# ~10-20% wall-clock. Default OFF so production runs keep legacy performance.
+# (Threading speed preserved — KahanGather gives multi-thread bit-identity
+# without forcing single-thread gather.)
 #
 # Individual flags can still be overridden below. Uncomment to enable:
 # EpsilonReproducibility         = 1
 # Sub-flags (all default = EpsilonReproducibility; set explicitly to override):
 #   DeterministicMPIReductions   = 1                                           # Rank-ordered Gather+sum+Bcast
-#   DeterministicThreadMoments   = 1                                           # Force num_threads=1 in computeMoments
 #   DeterministicParticleComm    = 1                                           # Fixed-direction MPI_Wait (no MPI_Waitany)
 #   KahanParticleSums            = 1                                           # Neumaier in get_{kinetic_energy,total_charge,momentum}
 #   KahanGather                  = 1                                           # Kahan deposit in computeMoments
 #   KahanFieldEnergy             = 1                                           # Kahan in get_{E,B,Bext,bulk}_field_energy
 #   KahanHalo                    = 1                                           # Kahan sum-on-receive in communicateInterp
+# Opt-in only (NOT lifted by EpsilonReproducibility):
+#   DeterministicThreadMoments   = 1                                           # Force num_threads=1 in computeMoments (legacy reproducibility path)
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                    BOX SIZE                                %

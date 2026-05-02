@@ -3726,65 +3726,15 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
     const VirtualTopology3D *vct = &get_vct();
     const Collective *col = &get_col();
 
-    const bool periodicX_global = col->getPERIODICX() && vct->getXLEN() == 1;
-    const bool periodicY_global = col->getPERIODICY() && vct->getYLEN() == 1;
-    const bool periodicZ_global = col->getPERIODICZ() && vct->getZLEN() == 1;
-
-    //* Cross-rank dup pairs (XLEN>1 etc.) — average HI of one rank with LO
-    //* of its periodic-image neighbour so they don't drift apart by ULPs.
+    //* Cross-rank dup pair averaging only. Periodic-self LO==HI is enforced
+    //* upstream (Eth: solver2phys `ps_x/y/z` projection; Bxn/Byn/Bzn: by the
+    //* per-call-site communicateNodeBC routing through NBDerivedHaloCommN —
+    //* face_phase periodic-self copies after cross-rank unpack since E.20+).
     const bool periodicX_xrank = col->getPERIODICX() && vct->getXLEN() > 1;
     const bool periodicY_xrank = col->getPERIODICY() && vct->getYLEN() > 1;
     const bool periodicZ_xrank = col->getPERIODICZ() && vct->getZLEN() > 1;
 
     arr3_double *flds[3] = { &Exf, &Eyf, &Ezf };
-
-    if (periodicX_global) {
-        const int ilo = n_ghost_;
-        const int ihi = nx - n_ghost_ - 1;
-        if (ihi > ilo) {
-            for (int f = 0; f < 3; ++f) {
-                arr3_double &F = *flds[f];
-                for (int j = 0; j < ny; ++j)
-                    for (int k = 0; k < nz; ++k) {
-                        const double avg = 0.5 * (F[ilo][j][k] + F[ihi][j][k]);
-                        F[ilo][j][k] = avg;
-                        F[ihi][j][k] = avg;
-                    }
-            }
-        }
-    }
-
-    if (periodicY_global) {
-        const int jlo = n_ghost_;
-        const int jhi = ny - n_ghost_ - 1;
-        if (jhi > jlo) {
-            for (int f = 0; f < 3; ++f) {
-                arr3_double &F = *flds[f];
-                for (int i = 0; i < nx; ++i)
-                    for (int k = 0; k < nz; ++k) {
-                        const double avg = 0.5 * (F[i][jlo][k] + F[i][jhi][k]);
-                        F[i][jlo][k] = avg;
-                        F[i][jhi][k] = avg;
-                    }
-            }
-        }
-    }
-
-    if (periodicZ_global) {
-        const int klo = n_ghost_;
-        const int khi = nz - n_ghost_ - 1;
-        if (khi > klo) {
-            for (int f = 0; f < 3; ++f) {
-                arr3_double &F = *flds[f];
-                for (int i = 0; i < nx; ++i)
-                    for (int j = 0; j < ny; ++j) {
-                        const double avg = 0.5 * (F[i][j][klo] + F[i][j][khi]);
-                        F[i][j][klo] = avg;
-                        F[i][j][khi] = avg;
-                    }
-            }
-        }
-    }
 
     //* Cross-rank dup pair averaging via MPI_Sendrecv. For each periodic axis
     //* with multiple ranks: pack our LO dup slab + HI dup slab, exchange with
