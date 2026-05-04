@@ -638,6 +638,12 @@ struct HaloContext {
     //* Periodic-self flags: axis is periodic and decomposition along axis = 1.
     bool ps_x_self, ps_y_self, ps_z_self;
 
+    //* WIP — Phase 2 of CIC/TSC unification. When true (sourced from
+    //* `Collective::UnifiedHaloPath`), `do_xrank_completion` runs at
+    //* n_ghost==1 too. Default false → SOR runs only at TSC, preserving
+    //* current bit-identical behavior at CIC.
+    bool use_xrank_completion_at_cic;
+
     //* Periodic-self ghost-source remap, no-op at n_ghost=1.
     int g_src(int g) const { return n_ghost - 1 - g; }
 
@@ -692,6 +698,8 @@ static HaloContext make_halo_context(EMfields3D *EMf,
     ctx.ps_x_self = (ctx.neighbours[0] == ctx.myrank && ctx.neighbours[1] == ctx.myrank);
     ctx.ps_y_self = (ctx.neighbours[2] == ctx.myrank && ctx.neighbours[3] == ctx.myrank);
     ctx.ps_z_self = (ctx.neighbours[4] == ctx.myrank && ctx.neighbours[5] == ctx.myrank);
+
+    ctx.use_xrank_completion_at_cic = EMf->get_col().getUnifiedHaloPath();
 
     return ctx;
 }
@@ -885,7 +893,13 @@ static void do_xrank_completion(int nx, int ny, int nz,
                                  int n_fields, double ****vectors,
                                  const HaloContext &ctx, bool needInterp)
 {
-    if (!(needInterp && ctx.n_ghost > 1 && ctx.any_xrank_periodic)) return;
+    //* SOR pre-pass runs at TSC always; at CIC only when the WIP unified-halo
+    //* opt-in is set. Both n_ghost paths share the same SOR geometry — the
+    //* dup_n / strict_x slab math generalises to n_ghost=1 (dup_n=2 covers
+    //* the LO ghost + LO dup; strict_x = nx-4 > 0 for any nxc >= 3).
+    const bool xrank_at_this_n_ghost =
+        (ctx.n_ghost > 1) || ctx.use_xrank_completion_at_cic;
+    if (!(needInterp && xrank_at_this_n_ghost && ctx.any_xrank_periodic)) return;
 
     const int       n_ghost      = ctx.n_ghost;
     const int       image_offset = ctx.image_offset;
