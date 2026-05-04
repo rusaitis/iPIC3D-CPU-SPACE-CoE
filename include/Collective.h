@@ -362,10 +362,10 @@ class Collective
     //* cross-rank without adding noise.
     bool   KahanFieldEnergy;
 
-    //* Neumaier-aware halo exchange. `NBDerivedHaloComm` takes an optional
-    //* companion pointer and dispatches sum-on-receive to `*_kahan` variants; a
-    //* second fold merges halo-add residuals into the primary. Off-path is
-    //* byte-identical to legacy.
+    //* Neumaier-aware halo exchange. `NBDerivedHaloCommN` takes an optional
+    //* companion-array pointer and dispatches sum-on-receive to `*_kahan`
+    //* variants; a second fold merges halo-add residuals into the primary.
+    //* Off-path is byte-identical to legacy.
     bool   KahanHalo;
 
     int CurrentCycle;

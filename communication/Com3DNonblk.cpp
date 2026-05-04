@@ -22,15 +22,21 @@
 #include "EMfields3D.h"
 #include "Collective.h"
 
-//* Forward declaration of the n_ghost > 1 helper (definition further down).
-//* Multi-field signature: `vectors` is an array of `n_fields` pointers to
-//* 3D field arrays sharing the same (nx, ny, nz) extents and same MPI
-//* topology. All N fields are exchanged in one batched MPI message per
-//* direction (slab × N_fields doubles). At n_fields=1 this is bit-
-//* identical to the legacy single-field path. Optional `vectors_c`
-//* (Kahan companions) follows the same shape — pass nullptr for legacy
-//* COPY semantics, or a non-null array of N companion pointers to
-//* enable Neumaier compensation in the trailing addFace at n_ghost=1.
+//* Single source of truth for the entire halo exchange. `vectors` is an
+//* array of `n_fields` pointers to 3D field arrays sharing the same
+//* (nx, ny, nz) extents and MPI topology. All N fields are exchanged in
+//* one batched MPI message per direction.
+//*
+//*   isCenterFlag    1 = communicateCenter; 0 = communicateNode
+//*   isFaceOnlyFlag  1 = skip edge/corner phases (BC-only halos)
+//*   needInterp      1 = sum-on-receive (moments interp); 0 = COPY
+//*   isParticle      1 = use particle MPI comm; 0 = field MPI comm
+//*   vectors_c       Optional Kahan-compensation companion array (per
+//*                   field). nullptr → legacy +=. Non-null → Neumaier
+//*                   sum-on-receive with residuals landing in vectors_c.
+//*   unify_ps_dups   At periodic-self axes, fold the LO=HI strict
+//*                   duplicate before the cross-rank pack so neighbours
+//*                   inherit post-unify strict (mass-matrix / ECSIM).
 static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
@@ -39,41 +45,12 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 bool unify_ps_dups = false);
 
 
-//* Single-field NBDerivedHaloComm wrapper. Forwards to the multi-field
-//* NBDerivedHaloCommN helper (single source of truth for the entire halo
-//* exchange). The legacy strided-MPI-types fast path was deleted in
-//* Phase 5 of the CIC/TSC unification.
-//*
-//*   isCenterFlag    1 = communicateCenter; 0 = communicateNode
-//*   isFaceOnlyFlag  1 = skip edge/corner phases (BC-only halos)
-//*   needInterp      1 = sum-on-receive (moments interp); 0 = COPY
-//*   isParticle      1 = use particle MPI comm; 0 = field MPI comm
-//*   vector_c        Optional Kahan-compensation companion. nullptr →
-//*                   legacy +=. Non-null → Neumaier sum-on-receive with
-//*                   round-off residuals landing in vector_c.
-void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, EMfields3D *EMf,
-                        bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
-                        double ***vector_c = nullptr)
-{
-    double*** vectors[1] = {vector};
-    if (vector_c != nullptr) {
-        double*** vectors_c[1] = {vector_c};
-        NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
-                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vectors_c);
-    } else {
-        NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
-                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, nullptr);
-    }
-}
-
-
 //! ================================================================================
-//* HaloContext: state computed once per NBDerivedHaloCommN call, shared by the
-//* (future) multi-field variant. Holds n_ghost, the MPI communicator, the
-//* per-axis neighbour ranks, the Cartesian topology coords/dims/periods,
-//* and the offset/isCenterDim derived from the call's flags. Carries the
-//* two helpers (g_src and neighbour_at) as methods so the multi-field
-//* path can reuse them.
+//* HaloContext: state computed once per NBDerivedHaloCommN call and shared by
+//* every phase helper. Holds n_ghost, the MPI communicator, per-axis neighbour
+//* ranks, the Cartesian topology cache, and the offsets / isCenterDim derived
+//* from the call's flags. Methods g_src and neighbour_at are reused by the
+//* phase helpers.
 //! ================================================================================
 namespace {
 
@@ -97,9 +74,9 @@ struct HaloContext {
     //* Two semantically distinct offsets:
     //*   face_send_offset  — depth-from-boundary of the cell that gets
     //*                       PACKED for cross-rank face/edge/corner sends.
-    //*                       At n_ghost==1: isCenterFlag ? 0 : 1 (matches
-    //*                         legacy NBDerivedHaloComm — Center sends LO
-    //*                         dup at cell 1; Node sends strict-near at 2).
+    //*                       At n_ghost==1: isCenterFlag ? 0 : 1
+    //*                         (Center sends LO dup at cell 1; Node sends
+    //*                         strict-near at cell 2 — buffer-swap idiom).
     //*                       At n_ghost>1:  isCenterDim ? 0 : 1 (TSC uses
     //*                         strict-near sends at needInterp because the
     //*                         dup-pair is unified by do_xrank_completion).
@@ -167,10 +144,11 @@ static HaloContext make_halo_context(EMfields3D *EMf,
         (ctx.periods[2] && ctx.dims[2] > 1);
 
     ctx.isCenterDim = (isCenterFlag && !needInterp);
-    //* Phase 3: at n_ghost==1, replicate legacy NBDerivedHaloComm offsets
-    //* (isCenterFlag-based) so cross-rank face packs send the LO dup cell
-    //* and periodic_self_copies copies the dup into ghost at Center+needInterp.
-    //* At n_ghost>1 keep the TSC isCenterDim rule unchanged.
+    //* At n_ghost==1, offsets follow isCenterFlag (buffer-swap semantic):
+    //* Center+needInterp packs the LO dup at cell 1 for cross-rank dup unify,
+    //* and periodic_self_copies sources strict at cell nx-2.
+    //* At n_ghost>1, offsets follow isCenterDim — TSC unifies the dup pair
+    //* via do_xrank_completion instead, so packs send strict-near.
     if (ctx.n_ghost == 1) {
         ctx.face_send_offset = isCenterFlag ? 0 : 1;
         ctx.image_offset     = isCenterFlag ? 0 : 1;
@@ -187,20 +165,6 @@ static HaloContext make_halo_context(EMfields3D *EMf,
 }
 
 }  // namespace
-
-//! ================================================================================
-//  NBDerivedHaloCommN: wider ghost-slab variant of NBDerivedHaloComm.
-//
-//  Used when grid->getNGhost() > 1. Each layer of the n_ghost-thick ghost slab
-//  is exchanged via its own MPI call in a loop over layer offsets, since the
-//  merged edge/corner datatypes hard-code n_ghost == 1 outermost-only geometry.
-//  Per-layer face/edge types come from EMfields3D.cpp.
-//
-//  Notes:
-//  - Corner cubes fall back to scalar MPI_DOUBLE sends (no precomputed type).
-//  - Periodic-self buffer copies use a constant-extension fallback (matches
-//    legacy n_ghost == 1 behaviour).
-//! ================================================================================
 
 //* ============================================================================
 //* Phase E.18 — DIAGONAL CART EDGE-COPY
@@ -1617,28 +1581,30 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
     #endif
 
     //! ============================================================
-    //  Phase order:
-    //   1. Cross-rank moment completion (A SOR pre-pass + E.14 corner +
-    //      E.16 face-cell). No-op outside (needInterp && n_ghost > 1 &&
-    //      any_xrank_periodic). Must precede the FACE PHASE since its
-    //      COPY semantics would overwrite the ghost values the SOR
-    //      pre-pass needs to send.
-    //   2. Periodic-self fold (ghost → strict sum at periodic-self axes).
-    //      Only when needInterp. Must precede unify and FACE pack so the
-    //      pack carries post-fold strict.
-    //   3. Periodic-self LO=HI dup unify (sum at TSC, avg at CIC). Only
+    //  Phase order (each phase no-ops when its precondition fails):
+    //   1. Cross-rank moment completion (26-slot SOR pre-pass + corner
+    //      and face-cell completions). Only when (needInterp &&
+    //      n_ghost > 1 && any_xrank_periodic). Must precede the FACE
+    //      phase whose COPY semantics would overwrite the ghost values
+    //      the pre-pass needs to send.
+    //   2. Periodic-self fold (ghost → strict sum at periodic-self
+    //      axes). Only when (needInterp && !cic_interp): at cic_interp
+    //      the trailing addFace(skip_self=false) does the dup-pair
+    //      unify instead, and folding here would double-count.
+    //   3. Periodic-self LO=HI dup unify (SUM at TSC, AVG at CIC). Only
     //      when caller opts in via unify_ps_dups (mass-matrix / ECSIM).
-    //      Must precede FACE pack so cross-rank ghosts inherit post-unify.
     //   4. FACE phase (manual pack/unpack at N=1+).
-    //   5. EDGE / CORNER / E.18 diagonal Cart edge-copy / corner periodic-
+    //   5. EDGE / CORNER / diagonal Cart edge-copy / corner periodic-
     //      self self-copies — only when !isFaceOnlyFlag.
     //   6. Trailing addFace family at n_ghost==1 (CIC moments interp).
+    //   7. At cic_interp + unify_ps_dups: re-run FACE/EDGE/CORNER with
+    //      a Node-style ctx (offsets=1) to overwrite ghosts with
+    //      strict-near values, since step 6 leaves them at dup.
+    //
+    //  NOTE: at self-periodic thin axes where n_cells_per_rank < 2*n_ghost
+    //  the left/right addFace destinations overlap and double-count
+    //  periodic-wrap contributions. Require nxc_r >= 2*n_ghost - 1.
     //! ============================================================
-    //* At CIC + needInterp, the trailing addFace(skip_self=false) below
-    //* replicates the legacy buffer-swap+addFace dup-pair unify on periodic-
-    //* self axes — running do_periodic_self_fold on top would double-count
-    //* the ghost into both LO/HI dups via different paths. TSC keeps the
-    //* fold (its dup-pair unify lives elsewhere).
     const bool cic_interp = (ctx.n_ghost == 1) && needInterp;
     do_xrank_completion(nx, ny, nz, n_fields, vectors, ctx, needInterp);
     if (needInterp && !cic_interp)
@@ -1652,25 +1618,11 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
         do_corner_periodic_self (nx, ny, nz, n_fields, vectors, ctx);
     }
 
-    //* Moment summation: after the halo has filled the ghost slab, sum each
-    //  ghost layer back into the matching inner interior layer.
-    //
-    //  NOTE: for self-periodic thin axes where n_cells_per_rank < 2*n_ghost,
-    //  the left-side and right-side addFace destinations overlap, causing
-    //  double-counting of periodic-wrap moment contributions. This can NOT
-    //  be fixed by clamping addFace alone — the whole discretization (field
-    //  copy, stencils, moments) is self-consistently calibrated. Require
-    //  nxc_r >= 2*n_ghost - 1 per rank for each self-periodic axis.
-    //* CIC (n_ghost=1) only — at TSC the cross-rank SOR pre-pass above
-    //* already accumulated ghost natives into receivers' strict + dup, so
-    //* running the trailing addFace family on top would double-count.
-    //* skip_self=false: addFace(skip_self=false) provides the periodic-self
-    //* dup-pair unify (do_periodic_self_fold was skipped at cic_interp
-    //* above precisely so the cell 1 += cell 0 logic here can do that
-    //* unify by reading the post-buffer-swap ghost cells).
+    //* CIC moments-interp trailing addFace family — sum each ghost layer
+    //* into the matching interior layer. skip_self=false so periodic-self
+    //* axes get their dup-pair unify here (see step-2 invariant above).
+    //* Neumaier-compensated when vectors_c[f] is supplied.
     if (cic_interp) {
-        //* Legacy +=  when vectors_c is null; Neumaier-compensated update
-        //* lands residual in vectors_c[f] when supplied.
         const bool skip_self = false;
         for (int f = 0; f < n_fields; ++f) {
             double ***vc = (vectors_c != nullptr) ? vectors_c[f] : nullptr;
@@ -1682,16 +1634,10 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
         }
     }
 
-    //* Phase 6 — Node-style ghost refresh, folded inline.
-    //* At CIC + needInterp + unify_ps_dups, the trailing addFace above leaves
-    //* ghost cells holding dup values (cell 0 = neighbour's HI dup or local
-    //* HI dup at periodic-self) — wrong for downstream Maxwell stencils which
-    //* expect strict-near (cell 0 = cell n-3 via Node-style image_offset=1).
-    //* Re-run the FACE / EDGE / CORNER phase helpers with a Node-style ctx
-    //* (offsets=1) to overwrite the ghost layer with strict-near values. This
-    //* is what `communicateNode_P_multi` used to do as a separate post-step
-    //* call, now inlined to skip the second `make_halo_context` and centralize
-    //* halo work in this helper.
+    //* Node-style ghost refresh: at cic_interp + unify_ps_dups the
+    //* trailing addFace leaves ghosts at dup values, but downstream
+    //* Maxwell stencils expect strict-near. Clone ctx with offsets=1
+    //* and re-run face/edge/corner to overwrite ghost with strict-near.
     if (cic_interp && unify_ps_dups) {
         HaloContext ctx_node = ctx;
         ctx_node.face_send_offset = 1;
@@ -1707,7 +1653,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
 }
 
 
-//* communicate*BC* wrappers all follow the same shape: NBDerivedHaloComm
+//* communicate*BC* wrappers all follow the same shape: NBDerivedHaloCommN
 //* with one of four (isCenter, faceOnly) × (P / non-P) flag bits, then
 //* a BCface (or BCface_P) finalisation. The double*** overload carries the
 //* logic; the arr3_double overload just unpacks via fetch_arr3().
@@ -1717,7 +1663,8 @@ void communicateNodeBC(int nx, int ny, int nz, double*** vector,
                         int bcFaceZrght, int bcFaceZleft,
                         const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, false);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, false, false, false);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1738,7 +1685,8 @@ void communicateNodeBoxStencilBC(int nx, int ny, int nz, arr3_double _vector,
                                   const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double ***vector = _vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, true, false, false);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, true, false, false);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1749,7 +1697,8 @@ void communicateNodeBoxStencilBC_P(int nx, int ny, int nz, arr3_double _vector,
                                     const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double ***vector = _vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, true, false, true);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, true, false, true);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1760,7 +1709,8 @@ void communicateNodeBC_P(int nx, int ny, int nz, arr3_double _vector,
                           const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double ***vector = _vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, true);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, false, false, true);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1770,7 +1720,8 @@ void communicateCenterBC(int nx, int ny, int nz, double*** vector,
                           int bcFaceZrght, int bcFaceZleft,
                           const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, false, false);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, false, false, false);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1791,7 +1742,8 @@ void communicateCenterBC_P(int nx, int ny, int nz, arr3_double _vector,
                             const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double ***vector = _vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, false, true);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, false, false, true);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1802,7 +1754,8 @@ void communicateCenterBoxStencilBC(int nx, int ny, int nz, arr3_double _vector,
                                     const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double ***vector = _vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, true, false, false);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, true, false, false);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1813,7 +1766,8 @@ void communicateCenterBoxStencilBC_P(int nx, int ny, int nz, arr3_double _vector
                                       const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double ***vector = _vector.fetch_arr3();
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, true, false, true);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, true, false, true);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -2057,7 +2011,10 @@ void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D
 //* same idiom as the unified `addFace`/`addEdge*`/`addCorner` helpers.
 void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf, double*** vector_c)
 {
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, true, false, true, true, vector_c);
+    double*** vectors[1]   = {vector};
+    double*** vectors_c[1] = {vector_c};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, false, true, true,
+                       vector_c != nullptr ? vectors_c : nullptr);
 }
 
 void communicateInterp(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf)
@@ -2072,7 +2029,8 @@ void communicateInterp(int nx, int ny, int nz, arr3_double _vector, arr3_double 
 
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    NBDerivedHaloComm(nx, ny, nz, vector, vct, EMf, false, false, false, true);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, false, false, true);
 }
 
 void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf)
