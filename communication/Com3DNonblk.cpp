@@ -1681,6 +1681,29 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
             addCorner(nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
         }
     }
+
+    //* Phase 6 — Node-style ghost refresh, folded inline.
+    //* At CIC + needInterp + unify_ps_dups, the trailing addFace above leaves
+    //* ghost cells holding dup values (cell 0 = neighbour's HI dup or local
+    //* HI dup at periodic-self) — wrong for downstream Maxwell stencils which
+    //* expect strict-near (cell 0 = cell n-3 via Node-style image_offset=1).
+    //* Re-run the FACE / EDGE / CORNER phase helpers with a Node-style ctx
+    //* (offsets=1) to overwrite the ghost layer with strict-near values. This
+    //* is what `communicateNode_P_multi` used to do as a separate post-step
+    //* call, now inlined to skip the second `make_halo_context` and centralize
+    //* halo work in this helper.
+    if (cic_interp && unify_ps_dups) {
+        HaloContext ctx_node = ctx;
+        ctx_node.face_send_offset = 1;
+        ctx_node.image_offset     = 1;
+        do_face_phase           (nx, ny, nz, n_fields, vectors, ctx_node, /*needInterp=*/false);
+        if (!isFaceOnlyFlag) {
+            do_edge_phase           (nx, ny, nz, n_fields, vectors, ctx_node);
+            do_corner_phase         (nx, ny, nz, n_fields, vectors, ctx_node);
+            do_diagonal_edge_copy   (nx, ny, nz, n_fields, vectors, ctx_node);
+            do_corner_periodic_self (nx, ny, nz, n_fields, vectors, ctx_node);
+        }
+    }
 }
 
 
@@ -2058,7 +2081,7 @@ void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const Virtua
 }
 
 //* ================================================================================
-//  Multi-field dispatcher and call-site wrappers.
+//  Multi-field call-site wrappers.
 //
 //  Batches N ≥ 1 fields sharing the same (nx, ny, nz) extents and the same
 //  MPI Cartesian topology into one halo exchange per direction. At the
@@ -2066,30 +2089,10 @@ void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const Virtua
 //  calls with one batched call cuts MPI message count by N× and amortises
 //  per-message latency over an N×-larger payload.
 //
-//  Routes everything through NBDerivedHaloCommN (Phase 5 of the CIC/TSC
-//  unification — the legacy strided-MPI-types fast path is gone). At
-//  CIC + unify_ps_dups + needInterp the unified path's fold-then-add
-//  leaves ghosts at dup-avg, so we re-run as Node copy halo to refresh
-//  ghosts to strict-near (what downstream Maxwell stencils expect).
+//  Forward straight to NBDerivedHaloCommN — the unified helper handles the
+//  full halo end-to-end including the post-trailing Node-style ghost
+//  refresh at CIC + unify_ps_dups + needInterp.
 //* ================================================================================
-static void NBDerivedHaloComm_multi(int nx, int ny, int nz,
-                                     int n_fields, double ****vectors,
-                                     const VirtualTopology3D *vct, EMfields3D *EMf,
-                                     bool isCenterFlag, bool isFaceOnlyFlag,
-                                     bool needInterp, bool isParticle,
-                                     double ****vectors_c = nullptr,
-                                     bool unify_ps_dups = false)
-{
-    NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
-                       isCenterFlag, isFaceOnlyFlag, needInterp, isParticle,
-                       vectors_c, unify_ps_dups);
-    //* At CIC + unify_ps_dups + needInterp, the unified fold-then-add
-    //* path leaves ghosts at dup-avg. TSC's periodic_self_copies sources
-    //* strict-near (image_offset=1) so ghosts are already correct there.
-    if (EMf->getNGhost() == 1 && needInterp && unify_ps_dups) {
-        communicateNode_P_multi(nx, ny, nz, n_fields, vectors, vct, EMf);
-    }
-}
 
 //* Multi-field interpolation halo. Optional `vectors_c` companion array
 //* (parallel layout to `vectors`) routes the receive through Neumaier
@@ -2101,17 +2104,17 @@ void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****ve
                               const VirtualTopology3D *vct, EMfields3D *EMf,
                               double ****vectors_c, bool unify_ps_dups)
 {
-    NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
-                            /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,
-                            /*needInterp=*/true, /*isParticle=*/true,
-                            vectors_c, unify_ps_dups);
+    NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
+                       /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,
+                       /*needInterp=*/true, /*isParticle=*/true,
+                       vectors_c, unify_ps_dups);
 }
 
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf)
 {
-    NBDerivedHaloComm_multi(nx, ny, nz, n_fields, vectors, vct, EMf,
-                            /*isCenterFlag=*/false, /*isFaceOnlyFlag=*/false,
-                            /*needInterp=*/false, /*isParticle=*/true);
+    NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
+                       /*isCenterFlag=*/false, /*isFaceOnlyFlag=*/false,
+                       /*needInterp=*/false, /*isParticle=*/true);
 }
 
