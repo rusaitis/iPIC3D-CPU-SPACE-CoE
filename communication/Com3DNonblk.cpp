@@ -47,11 +47,14 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTo
                         bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
                         double ***vector_c = nullptr)
 {
-    //* Wider ghost-slab path goes through the loop-based helper. n_ghost == 1
-    //* falls through to the legacy merged-datatype fast path below.
-    //* Wrap the single-field pointer in a 1-element array so the
-    //* multi-field helper (NBDerivedHaloCommN) sees vectors[0] = vector.
-    if (EMf->getNGhost() > 1) {
+    //* Wider ghost-slab path goes through the loop-based helper. At n_ghost==1,
+    //* default routing keeps the legacy merged-datatype fast path; the opt-in
+    //* `UnifiedHaloPath` flag (Phase 3 WIP) routes CIC through NBDerivedHaloCommN
+    //* too. Wrap the single-field pointer in a 1-element array so the
+    //* multi-field helper sees vectors[0] = vector.
+    const bool route_unified =
+        (EMf->getNGhost() > 1) || EMf->get_col().getUnifiedHaloPath();
+    if (route_unified) {
         double*** vectors[1] = {vector};
         if (vector_c != nullptr) {
             double*** vectors_c[1] = {vector_c};
@@ -619,30 +622,30 @@ struct HaloContext {
 
     //* Field semantics.
     bool isCenterDim;
-    //* Two semantically distinct offsets. They are equal at every current
-    //* call site (both `isCenterDim ? 0 : 1`), so this split is a refactor
-    //* — bit-identical. Phase 3 will diverge them at CIC needInterp so the
-    //* unified path can match legacy n_ghost==1 face-send semantics.
+    //* Two semantically distinct offsets:
     //*   face_send_offset  — depth-from-boundary of the cell that gets
     //*                       PACKED for cross-rank face/edge/corner sends.
-    //*                       Currently isCenterDim ? 0 : 1.
+    //*                       At n_ghost==1: isCenterFlag ? 0 : 1 (matches
+    //*                         legacy NBDerivedHaloComm — Center sends LO
+    //*                         dup at cell 1; Node sends strict-near at 2).
+    //*                       At n_ghost>1:  isCenterDim ? 0 : 1 (TSC uses
+    //*                         strict-near sends at needInterp because the
+    //*                         dup-pair is unified by do_xrank_completion).
     //*   image_offset      — depth-from-boundary used in periodic-image
     //*                       stride formulas (do_periodic_self_fold dst,
     //*                       do_face_phase / do_edge_phase /
     //*                       do_corner_periodic_self self-copy sources,
     //*                       do_xrank_completion dst_idx).
-    //*                       Currently isCenterDim ? 0 : 1.
+    //*                       At n_ghost==1: isCenterFlag ? 0 : 1 (matches
+    //*                         legacy buffer-swap: Center sources strict
+    //*                         neighbour at cell nx-2; Node sources cell nx-3
+    //*                         to skip the duplicated boundary node).
+    //*                       At n_ghost>1:  isCenterDim ? 0 : 1.
     int  face_send_offset;
     int  image_offset;
 
     //* Periodic-self flags: axis is periodic and decomposition along axis = 1.
     bool ps_x_self, ps_y_self, ps_z_self;
-
-    //* WIP — Phase 2 of CIC/TSC unification. When true (sourced from
-    //* `Collective::UnifiedHaloPath`), `do_xrank_completion` runs at
-    //* n_ghost==1 too. Default false → SOR runs only at TSC, preserving
-    //* current bit-identical behavior at CIC.
-    bool use_xrank_completion_at_cic;
 
     //* Periodic-self ghost-source remap, no-op at n_ghost=1.
     int g_src(int g) const { return n_ghost - 1 - g; }
@@ -691,15 +694,22 @@ static HaloContext make_halo_context(EMfields3D *EMf,
         (ctx.periods[1] && ctx.dims[1] > 1) ||
         (ctx.periods[2] && ctx.dims[2] > 1);
 
-    ctx.isCenterDim       = (isCenterFlag && !needInterp);
-    ctx.face_send_offset  = ctx.isCenterDim ? 0 : 1;
-    ctx.image_offset      = ctx.isCenterDim ? 0 : 1;
+    ctx.isCenterDim = (isCenterFlag && !needInterp);
+    //* Phase 3: at n_ghost==1, replicate legacy NBDerivedHaloComm offsets
+    //* (isCenterFlag-based) so cross-rank face packs send the LO dup cell
+    //* and periodic_self_copies copies the dup into ghost at Center+needInterp.
+    //* At n_ghost>1 keep the TSC isCenterDim rule unchanged.
+    if (ctx.n_ghost == 1) {
+        ctx.face_send_offset = isCenterFlag ? 0 : 1;
+        ctx.image_offset     = isCenterFlag ? 0 : 1;
+    } else {
+        ctx.face_send_offset = ctx.isCenterDim ? 0 : 1;
+        ctx.image_offset     = ctx.isCenterDim ? 0 : 1;
+    }
 
     ctx.ps_x_self = (ctx.neighbours[0] == ctx.myrank && ctx.neighbours[1] == ctx.myrank);
     ctx.ps_y_self = (ctx.neighbours[2] == ctx.myrank && ctx.neighbours[3] == ctx.myrank);
     ctx.ps_z_self = (ctx.neighbours[4] == ctx.myrank && ctx.neighbours[5] == ctx.myrank);
-
-    ctx.use_xrank_completion_at_cic = EMf->get_col().getUnifiedHaloPath();
 
     return ctx;
 }
@@ -893,13 +903,11 @@ static void do_xrank_completion(int nx, int ny, int nz,
                                  int n_fields, double ****vectors,
                                  const HaloContext &ctx, bool needInterp)
 {
-    //* SOR pre-pass runs at TSC always; at CIC only when the WIP unified-halo
-    //* opt-in is set. Both n_ghost paths share the same SOR geometry — the
-    //* dup_n / strict_x slab math generalises to n_ghost=1 (dup_n=2 covers
-    //* the LO ghost + LO dup; strict_x = nx-4 > 0 for any nxc >= 3).
-    const bool xrank_at_this_n_ghost =
-        (ctx.n_ghost > 1) || ctx.use_xrank_completion_at_cic;
-    if (!(needInterp && xrank_at_this_n_ghost && ctx.any_xrank_periodic)) return;
+    //* SOR pre-pass runs at TSC only — `dst_idx` for sd=±1 degenerates at
+    //* n_ghost=1 (both ghost-h=0 and dup-h=ng map to the dup cell). At CIC,
+    //* cross-rank dup unify is handled by face_send_offset=0 + addFace
+    //* skip_self=false in the unified_cic_interp path.
+    if (!(needInterp && ctx.n_ghost > 1 && ctx.any_xrank_periodic)) return;
 
     const int       n_ghost      = ctx.n_ghost;
     const int       image_offset = ctx.image_offset;
@@ -2156,8 +2164,16 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
     //      self self-copies — only when !isFaceOnlyFlag.
     //   6. Trailing addFace family at n_ghost==1 (CIC moments interp).
     //! ============================================================
+    //* Phase 3: at unified-CIC needInterp the trailing addFace(skip_self=false)
+    //* below replicates the legacy buffer-swap+addFace dup-pair unify on
+    //* periodic-self axes — running do_periodic_self_fold on top would
+    //* double-count the ghost into both LO/HI dups via different paths.
+    //* TSC keeps the fold (its dup-pair unify lives elsewhere).
+    const bool unified_cic_interp =
+        (ctx.n_ghost == 1) && needInterp && EMf->get_col().getUnifiedHaloPath();
     do_xrank_completion(nx, ny, nz, n_fields, vectors, ctx, needInterp);
-    if (needInterp)    do_periodic_self_fold(nx, ny, nz, n_fields, vectors, ctx);
+    if (needInterp && !unified_cic_interp)
+                       do_periodic_self_fold(nx, ny, nz, n_fields, vectors, ctx);
     if (unify_ps_dups) do_unify_ps_dups     (nx, ny, nz, n_fields, vectors, ctx);
     do_face_phase      (nx, ny, nz, n_fields, vectors, ctx, needInterp);
     if (!isFaceOnlyFlag) {
@@ -2188,7 +2204,10 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
         //* path here historically did NOT skip periodic-self at the multi-
         //* field site (only the legacy plain path did), so preserve that
         //* asymmetry by keeping skip_self gated on vectors_c.
-        const bool skip_self = (vectors_c == nullptr);
+        //* Phase 3: under UnifiedHaloPath the periodic-self fold above is
+        //* skipped, so addFace(skip_self=false) must run here to provide
+        //* the periodic-self dup-pair unify (matches legacy line 585).
+        const bool skip_self = unified_cic_interp ? false : (vectors_c == nullptr);
         for (int f = 0; f < n_fields; ++f) {
             double ***vc = (vectors_c != nullptr) ? vectors_c[f] : nullptr;
             addFace  (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
@@ -2601,7 +2620,18 @@ static void NBDerivedHaloComm_multi(int nx, int ny, int nz,
                                      double ****vectors_c = nullptr,
                                      bool unify_ps_dups = false)
 {
-    if (EMf->getNGhost() > 1) {
+    //* TSC always goes through the unified helper. Opt-in `UnifiedHaloPath`
+    //* (Phase 3 WIP) routes CIC there too — but ONLY when unify_ps_dups=false.
+    //* The unify_ps_dups=true path is mass-matrix / ECSIM moments, where
+    //* legacy fallback runs an extra communicateNode_P_multi to refresh ghost
+    //* cells from strict-near (Node-style image_offset=1). The unified path's
+    //* fold-then-add leaves ghost at dup-avg — different value used by the
+    //* downstream Maxwell stencils. Until that ghost-refresh is folded in,
+    //* keep the legacy fallback for the unify_ps_dups=true CIC case.
+    const bool route_unified =
+        (EMf->getNGhost() > 1) ||
+        (EMf->get_col().getUnifiedHaloPath() && !unify_ps_dups);
+    if (route_unified) {
         NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
                            isCenterFlag, isFaceOnlyFlag, needInterp, isParticle,
                            vectors_c, unify_ps_dups);
