@@ -589,18 +589,6 @@ public:
     /*! print electromagnetic fields info */
     void print(void) const;
     
-    //get MPI Derived Datatype
-    MPI_Datatype getYZFacetype(bool isCenterFlag){return isCenterFlag ?yzFacetypeC : yzFacetypeN;}
-    MPI_Datatype getXZFacetype(bool isCenterFlag){return isCenterFlag ?xzFacetypeC : xzFacetypeN;}
-    MPI_Datatype getXYFacetype(bool isCenterFlag){return isCenterFlag ?xyFacetypeC : xyFacetypeN;}
-    MPI_Datatype getXEdgetype(bool isCenterFlag){return  isCenterFlag ?xEdgetypeC : xEdgetypeN;}
-    MPI_Datatype getYEdgetype(bool isCenterFlag){return  isCenterFlag ?yEdgetypeC : yEdgetypeN;}
-    MPI_Datatype getZEdgetype(bool isCenterFlag){return  isCenterFlag ?zEdgetypeC : zEdgetypeN;}
-    MPI_Datatype getXEdgetype2(bool isCenterFlag){return  isCenterFlag ?xEdgetypeC2 : xEdgetypeN2;}
-    MPI_Datatype getYEdgetype2(bool isCenterFlag){return  isCenterFlag ?yEdgetypeC2 : yEdgetypeN2;}
-    MPI_Datatype getZEdgetype2(bool isCenterFlag){return  isCenterFlag ?zEdgetypeC2 : zEdgetypeN2;}
-    MPI_Datatype getCornertype(bool isCenterFlag){return  isCenterFlag ?cornertypeC : cornertypeN;}
-
     MPI_Datatype getProcview(){return  procview;}
     MPI_Datatype getXYZeType(){return xyzcomp;}
     MPI_Datatype getProcviewXYZ(){return  procviewXYZ;}
@@ -866,30 +854,6 @@ private:
     
     double u_bulk, v_bulk, w_bulk;              //* Bulk velocity along X, Y, Z, respectively for the Lagrangian reference frame
 
-    //MPI Derived Datatype for Center Halo Exchange
-    MPI_Datatype yzFacetypeC;
-    MPI_Datatype xzFacetypeC;
-    MPI_Datatype xyFacetypeC;
-    MPI_Datatype xEdgetypeC;
-    MPI_Datatype yEdgetypeC;
-    MPI_Datatype zEdgetypeC;
-    MPI_Datatype xEdgetypeC2;
-    MPI_Datatype yEdgetypeC2;
-    MPI_Datatype zEdgetypeC2;
-    MPI_Datatype cornertypeC;
-
-    //MPI Derived Datatype for Node Halo Exchange
-    MPI_Datatype yzFacetypeN;
-    MPI_Datatype xzFacetypeN;
-    MPI_Datatype xyFacetypeN;
-    MPI_Datatype xEdgetypeN;
-    MPI_Datatype yEdgetypeN;
-    MPI_Datatype zEdgetypeN;
-    MPI_Datatype xEdgetypeN2;
-    MPI_Datatype yEdgetypeN2;
-    MPI_Datatype zEdgetypeN2;
-    MPI_Datatype cornertypeN;
-    
     //for VTK output
     MPI_Datatype  procviewXYZ,xyzcomp,procview,ghosttype;
     bool lEndFlag;

@@ -224,7 +224,6 @@ class Collective
     bool   getEigenmodeProbe()           const { return EigenmodeProbe; }
     bool   getRestrictMassMatrix3Cube()  const { return RestrictMassMatrix3Cube; }
     bool   getDumpMassMatrixStages()     const { return DumpMassMatrixStages; }
-    bool   getUnifiedHaloPath()          const { return UnifiedHaloPath; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
     bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
@@ -324,14 +323,6 @@ class Collective
     //*   stage3_post_unify  — after periodic-duplicate unify + final halo
     //* Localizes which step introduces the 1.83× boundary band. Default off.
     bool   DumpMassMatrixStages;
-
-    //* WIP — Phase 2 of CIC/TSC halo unification. When true, n_ghost==1 (CIC)
-    //* halos enable the cross-rank SOR pre-pass (`do_xrank_completion`) that
-    //* TSC uses for cross-rank dup-pair unify. Default off — tested at TSC
-    //* only until Phase 3 routes CIC through `NBDerivedHaloCommN`. Once the
-    //* unified path matches legacy at every config, this becomes default
-    //* and the legacy ~547 LOC `NBDerivedHaloComm` body is dropped.
-    bool   UnifiedHaloPath;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

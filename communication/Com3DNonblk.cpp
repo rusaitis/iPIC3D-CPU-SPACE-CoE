@@ -38,560 +38,32 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 double ****vectors_c = nullptr,
                                 bool unify_ps_dups = false);
 
-//! isCenterFlag: 1 = communicateCenter; 0 = communicateNode
-//! `vector_c` is the optional Kahan-compensation companion array. `= nullptr`
-//! is the legacy behaviour (byte-identical); a non-null pointer routes the
-//! sum-on-receive step (`addFace`/`addEdge*`/`addCorner`) through a Neumaier-
-//! compensated update that lands residuals in `vector_c`.
+
+//* Single-field NBDerivedHaloComm wrapper. Forwards to the multi-field
+//* NBDerivedHaloCommN helper (single source of truth for the entire halo
+//* exchange). The legacy strided-MPI-types fast path was deleted in
+//* Phase 5 of the CIC/TSC unification.
+//*
+//*   isCenterFlag    1 = communicateCenter; 0 = communicateNode
+//*   isFaceOnlyFlag  1 = skip edge/corner phases (BC-only halos)
+//*   needInterp      1 = sum-on-receive (moments interp); 0 = COPY
+//*   isParticle      1 = use particle MPI comm; 0 = field MPI comm
+//*   vector_c        Optional Kahan-compensation companion. nullptr →
+//*                   legacy +=. Non-null → Neumaier sum-on-receive with
+//*                   round-off residuals landing in vector_c.
 void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, EMfields3D *EMf,
                         bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
                         double ***vector_c = nullptr)
 {
-    //* Wider ghost-slab path goes through the loop-based helper. At n_ghost==1,
-    //* default routing keeps the legacy merged-datatype fast path; the opt-in
-    //* `UnifiedHaloPath` flag (Phase 3 WIP) routes CIC through NBDerivedHaloCommN
-    //* too. Wrap the single-field pointer in a 1-element array so the
-    //* multi-field helper sees vectors[0] = vector.
-    const bool route_unified =
-        (EMf->getNGhost() > 1) || EMf->get_col().getUnifiedHaloPath();
-    if (route_unified) {
-        double*** vectors[1] = {vector};
-        if (vector_c != nullptr) {
-            double*** vectors_c[1] = {vector_c};
-            NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
-                               isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vectors_c);
-        } else {
-            NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
-                               isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, nullptr);
-        }
-        return;
+    double*** vectors[1] = {vector};
+    if (vector_c != nullptr) {
+        double*** vectors_c[1] = {vector_c};
+        NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
+                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vectors_c);
+    } else {
+        NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf,
+                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, nullptr);
     }
-
-    const MPI_Comm comm       = isParticle ?vct->getParticleComm()      :vct->getFieldComm();
-    #ifdef DEBUG
-	    MPI_Errhandler_set(comm,MPI_ERRORS_RETURN);
-    #endif
-    MPI_Status  stat[12];
-    MPI_Request reqList[12];				  //at most 6 requests x 2 (send recv)
-    int communicationCnt[6] = {0,0,0,0,0,0};  //1 if there communication on that dir
-    int recvcnt = 0,sendcnt = 0;              //request counter
-
-    const int tag_XL=1,tag_YL=2,tag_ZL=3,tag_XR=4,tag_YR=5,tag_ZR=6;//To address same rank as left and right neighbour in periodic case
-    const int myrank    	  = vct->getCartesian_rank();
-    const int right_neighborX = isParticle ?vct->getXright_neighbor_P() :vct->getXright_neighbor();
-    const int left_neighborX  = isParticle ?vct->getXleft_neighbor_P()  :vct->getXleft_neighbor();
-    const int right_neighborY = isParticle ?vct->getYright_neighbor_P() :vct->getYright_neighbor();
-    const int left_neighborY  = isParticle ?vct->getYleft_neighbor_P()  :vct->getYleft_neighbor();
-    const int right_neighborZ = isParticle ?vct->getZright_neighbor_P() :vct->getZright_neighbor();
-    const int left_neighborZ  = isParticle ?vct->getZleft_neighbor_P()  :vct->getZleft_neighbor();
-    
-    bool isCenterDim = (isCenterFlag&&!needInterp);//This is to address moment interp use nodes dimension but exchange center face
-    
-    const MPI_Datatype yzFacetype = EMf->getYZFacetype(isCenterDim);
-    const MPI_Datatype xzFacetype = EMf->getXZFacetype(isCenterDim);
-    const MPI_Datatype xyFacetype = EMf->getXYFacetype(isCenterDim);
-    const MPI_Datatype xEdgetype = EMf->getXEdgetype(isCenterDim);
-    const MPI_Datatype yEdgetype = EMf->getYEdgetype(isCenterDim);
-    const MPI_Datatype zEdgetype = EMf->getZEdgetype(isCenterDim);
-    const MPI_Datatype xEdgetype2 = EMf->getXEdgetype2(isCenterDim);
-    const MPI_Datatype yEdgetype2 = EMf->getYEdgetype2(isCenterDim);
-    const MPI_Datatype zEdgetype2 = EMf->getZEdgetype2(isCenterDim);
-    const MPI_Datatype cornertype = EMf->getCornertype(isCenterDim);
-
-
-    //Face Exchange as long as neighbor exits on that direction
-    //Tag is based on the sender: XL for sender = XR for receiver
-    //Post Recv before Send
-    if(left_neighborX != MPI_PROC_NULL && left_neighborX != myrank)
-    {
-        MPI_Irecv(&vector[0][1][1], 1, yzFacetype, left_neighborX,tag_XR, comm, &reqList[recvcnt++]);
-        communicationCnt[0] = 1;
-    }
-    if(right_neighborX != MPI_PROC_NULL && right_neighborX != myrank)
-    {
-        MPI_Irecv(&vector[nx-1][1][1], 1, yzFacetype, right_neighborX,tag_XL, comm, &reqList[recvcnt++]);
-        communicationCnt[1] = 1;
-    }
-    if(left_neighborY != MPI_PROC_NULL && left_neighborY != myrank)
-    {
-        MPI_Irecv(&vector[1][0][1], 1, xzFacetype, left_neighborY,tag_YR, comm, &reqList[recvcnt++]);
-        communicationCnt[2] = 1;
-    }
-    if(right_neighborY != MPI_PROC_NULL && right_neighborY != myrank)
-    {
-        MPI_Irecv(&vector[1][ny-1][1], 1, xzFacetype, right_neighborY,tag_YL, comm, &reqList[recvcnt++]);
-        communicationCnt[3] = 1;
-    }
-    if(left_neighborZ != MPI_PROC_NULL && left_neighborZ != myrank)
-    {
-        MPI_Irecv(&vector[1][1][0],    1, xyFacetype, left_neighborZ,tag_ZR, comm, &reqList[recvcnt++]);
-        communicationCnt[4] = 1;
-    }
-    if(right_neighborZ != MPI_PROC_NULL&& right_neighborZ != myrank)
-    {
-        MPI_Irecv(&vector[1][1][nz-1], 1, xyFacetype, right_neighborZ,tag_ZL, comm, &reqList[recvcnt++]);
-        communicationCnt[5] = 1;
-    }
-
-    sendcnt = recvcnt;
-
-    int offset = (isCenterFlag ?0:1);
-
-    if(communicationCnt[0] == 1)
-        MPI_Isend(&vector[1+offset][1][1],    1, yzFacetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
-    if(communicationCnt[1] == 1)
-        MPI_Isend(&vector[nx-2-offset][1][1], 1, yzFacetype, right_neighborX,tag_XR, comm, &reqList[sendcnt++]);
-    if(communicationCnt[2] == 1)
-        MPI_Isend(&vector[1][1+offset][1],    1, xzFacetype, left_neighborY, tag_YL, comm, &reqList[sendcnt++]);
-    if(communicationCnt[3] == 1)
-        MPI_Isend(&vector[1][ny-2-offset][1], 1, xzFacetype, right_neighborY,tag_YR, comm, &reqList[sendcnt++]);
-    if(communicationCnt[4] == 1)
-        MPI_Isend(&vector[1][1][1+offset],    1, xyFacetype, left_neighborZ, tag_ZL, comm, &reqList[sendcnt++]);
-    if(communicationCnt[5] == 1)
-        MPI_Isend(&vector[1][1][nz-2-offset], 1, xyFacetype, right_neighborZ,tag_ZR, comm, &reqList[sendcnt++]);
-
-    assert_eq(recvcnt,sendcnt-recvcnt);
-
-    //Buffer swap if any (done before waiting for receiving msg done to delay sync)
-    //* NODE arrays on a self-periodic axis carry duplicates at {n_ghost, nx-n_ghost-1}
-    //* (two images of the same physical boundary node). The offset-by-one self-swap
-    //* ghost(0)=interior(nx-3), ghost(nx-1)=interior(2) maps each ghost to the proper
-    //* periodic neighbour one step inside, matching ECSIM's `makeNodeFace` and the
-    //* MPI-send convention for XLEN>1. CENTER halos (`isCenterFlag`) and the
-    //* sum-on-receive path (`needInterp`) keep the legacy `nx-2 / 1`. Non-periodic
-    //* axes return `MPI_PROC_NULL` so the self-swap gate below is false and the
-    //* offset is unread.
-    const bool node_halo_fix = !isCenterFlag && !needInterp;
-    const int xlo_src = node_halo_fix ? (nx-3) : (nx-2);
-    const int xhi_src = node_halo_fix ? 2      : 1;
-    const int ylo_src = node_halo_fix ? (ny-3) : (ny-2);
-    const int yhi_src = node_halo_fix ? 2      : 1;
-    const int zlo_src = node_halo_fix ? (nz-3) : (nz-2);
-    const int zhi_src = node_halo_fix ? 2      : 1;
-
-    if (right_neighborX == myrank &&  left_neighborX== myrank)
-    {
-        for (int iy = 1; iy < ny-1; iy++)
-            for (int iz = 1; iz < nz-1; iz++)
-            {
-                vector[0][iy][iz] = vector[xlo_src][iy][iz];
-                vector[nx-1][iy][iz] = vector[xhi_src][iy][iz];
-            }
-    }
-    if (right_neighborY == myrank &&  left_neighborY == myrank)
-    {
-        for (int ix = 1; ix < nx-1; ix++)
-            for (int iz = 1; iz < nz-1; iz++)
-            {
-                vector[ix][0][iz] = vector[ix][ylo_src][iz];
-                vector[ix][ny-1][iz] = vector[ix][yhi_src][iz];
-            }
-    }
-    if (right_neighborZ == myrank &&  left_neighborZ == myrank)
-    {
-        for (int ix = 1; ix < nx-1; ix++)
-            for (int iy = 1; iy < ny-1; iy++)
-            {
-                vector[ix][iy][0]    = vector[ix][iy][zlo_src];
-                vector[ix][iy][nz-1] = vector[ix][iy][zhi_src];
-            }
-    }
-
-    //* Need to finish receiving + sending before edge exchange
-    if(sendcnt>0)
-    {
-        MPI_Waitall(sendcnt,  &reqList[0], &stat[0]);
-        bool stopFlag = false;
-        for(int si=0;si< sendcnt;si++){
-            int error_code = stat[si].MPI_ERROR;
-            if (error_code != MPI_SUCCESS) 
-            {
-                stopFlag = true;
-                
-                #ifdef DEBUG
-                    char error_string[100];
-                    int length_of_error_string, error_class;
-
-                    MPI_Error_class(error_code, &error_class);
-                    MPI_Error_string(error_class, error_string, &length_of_error_string);
-                    dprintf("MPI_Waitall error at %d  %s\n",si, error_string);
-                #endif
-            }
-        }
-        
-        if(stopFlag) exit (EXIT_FAILURE);
-    }
-
-
-	if( !isFaceOnlyFlag ){
-
-		//Exchange yEdge only when Z X neighbours exist
-		//if Zleft + Zright, use merged yEdgeType2 to send two edges in one msg
-		//Otherwise, only send one yEdge
-		recvcnt = 0,sendcnt = 0;
-		if(communicationCnt[0] == 1){
-			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Irecv(&vector[0][1][0],   1,  yEdgetype2, left_neighborX, tag_XR, comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[4] == 1){
-				MPI_Irecv(&vector[0][1][0],   1,  yEdgetype, left_neighborX, tag_XR, comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[5] == 1){
-				MPI_Irecv(&vector[0][1][nz-1],1,  yEdgetype, left_neighborX, tag_XR, comm, &reqList[recvcnt++]);
-			}
-		}
-		if(communicationCnt[1] == 1){
-			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Irecv(&vector[nx-1][1][0],  1,  yEdgetype2,right_neighborX,tag_XL, comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[4] == 1){
-				MPI_Irecv(&vector[nx-1][1][0],   1, yEdgetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[5] == 1){
-				MPI_Irecv(&vector[nx-1][1][nz-1],1, yEdgetype, right_neighborX, tag_XL, comm, &reqList[recvcnt++]);
-			}
-		}
-		//Exchange zEdge only when X Y neighbours exist
-		//if Xleft + Xright, use merged zEdgeType2
-		//Otherwise, only send one zEdge
-		if(communicationCnt[2] == 1){
-			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Irecv(&vector[0][0][1],   1, zEdgetype2,left_neighborY, tag_YR,comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[0] == 1){
-				MPI_Irecv(&vector[0][0][1],   1, zEdgetype, left_neighborY, tag_YR,comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[1] == 1){
-				MPI_Irecv(&vector[nx-1][0][1],1, zEdgetype, left_neighborY, tag_YR,comm, &reqList[recvcnt++]);
-			}
-		}
-		if(communicationCnt[3] == 1){
-			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Irecv(&vector[0][ny-1][1],	 1, zEdgetype2,right_neighborY,tag_YL,comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[0] == 1){
-				MPI_Irecv(&vector[0][ny-1][1],   1, zEdgetype, right_neighborY,tag_YL,comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[1] == 1){
-				MPI_Irecv(&vector[nx-1][ny-1][1],1, zEdgetype, right_neighborY,tag_YL,comm, &reqList[recvcnt++]);
-			}
-		}
-		//Exchange xEdge only when Y Z neighbours exist
-		//if Yleft + Yright exist, use merged xEdgeType2
-		//Otherwise, only send one xEdge
-		if(communicationCnt[4] == 1){
-			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Irecv(&vector[1][0][0],1,    xEdgetype2,left_neighborZ, tag_ZR,   comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[2] == 1){
-				MPI_Irecv(&vector[1][0][0],1,    xEdgetype, left_neighborZ, tag_ZR,comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[3] == 1){
-				MPI_Irecv(&vector[1][ny-1][0],1, xEdgetype, left_neighborZ,tag_ZR,comm, &reqList[recvcnt++]);
-			}
-		}
-		if(communicationCnt[5] == 1){
-			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Irecv(&vector[1][0][nz-1],1,  xEdgetype2,right_neighborZ, tag_ZL,comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[2] == 1){
-				MPI_Irecv(&vector[1][0][nz-1],1,   xEdgetype,right_neighborZ, tag_ZL,comm, &reqList[recvcnt++]);
-			}else if(communicationCnt[3] == 1){
-				MPI_Irecv(&vector[1][ny-1][nz-1],1,xEdgetype,right_neighborZ, tag_ZL,comm, &reqList[recvcnt++]);
-			}
-		}
-
-		sendcnt = recvcnt;
-
-		//* edge/corner MPI sends inherit the face-send offset-by-one
-		//* convention so rank-boundary corner ghosts use the same periodic-duplicate
-		//* source as face ghosts do. Face sends at lines 113-124 already apply
-		//*   base_idx = isCenterFlag ? legacy : 1+offset (= 2 for node-copy)
-		//* but edge/corner sends previously hard-coded legacy (idx=1, nx-2, etc.).
-		//* That mismatch shows up as 2e-7 abs / 1e-3 l2_rel in Stage C (raw M·E)
-		//* at rank-interior corners (local X=1 & nx-2, Y=1 & ny-2) for np>1 runs.
-		if(communicationCnt[0] == 1){
-			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Isend(&vector[1+offset][1][0],   1,  yEdgetype2,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[4] == 1){
-				MPI_Isend(&vector[1+offset][1][0],   1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[5] == 1){
-				MPI_Isend(&vector[1+offset][1][nz-1],1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
-			}
-		}
-		if(communicationCnt[1] == 1){
-			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Isend(&vector[nx-2-offset][1][0],1,   yEdgetype2,right_neighborX, tag_XR, comm,&reqList[sendcnt++]);
-			}else if(communicationCnt[4] == 1){
-				MPI_Isend(&vector[nx-2-offset][1][0],1,   yEdgetype,right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[5] == 1){
-				MPI_Isend(&vector[nx-2-offset][1][nz-1],1,yEdgetype,right_neighborX, tag_XR,comm,&reqList[sendcnt++]);
-			}
-		}
-		if(communicationCnt[2] == 1){
-			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Isend(&vector[0][1+offset][1],1,   zEdgetype2, left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[0][1+offset][1],1,   zEdgetype,  left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-1][1+offset][1],1,zEdgetype,left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
-			}
-		}
-		if(communicationCnt[3] == 1){
-			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Isend(&vector[0][ny-2-offset][1],1,   zEdgetype2, right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[0][ny-2-offset][1],1,   zEdgetype,  right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-1][ny-2-offset][1],1,zEdgetype,right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
-			}
-		}
-		if(communicationCnt[4] == 1){
-			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][0][1+offset],1, xEdgetype2, left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[2] == 1){
-				MPI_Isend(&vector[1][0][1+offset],1, xEdgetype,  left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][ny-1][1+offset],1,xEdgetype,left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
-			}
-		}
-		if(communicationCnt[5] == 1){
-			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][0][nz-2-offset],1,    xEdgetype2, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[2] == 1){
-				MPI_Isend(&vector[1][0][nz-2-offset],1,    xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
-			}else if(communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][ny-1][nz-2-offset],1, xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
-			}
-		}
-
-		assert_eq(recvcnt,sendcnt-recvcnt);
-
-		//Swap Local Edges
-		//* edge swaps honour the node_halo_fix so the
-		//* periodic-self X/Y/Z wrap uses the offset-by-one source convention
-		//* (xlo_src/xhi_src etc.) matching the face swaps above. Without this,
-		//* corner/edge ghosts inherit the legacy nx-2/1 mapping while face
-		//* ghosts have been remapped to nx-3/2 — the mismatch biases the
-		//* MaxwellImage stencil at interior-boundary DOFs.
-		if(right_neighborX == myrank &&  left_neighborX== myrank){
-           if(right_neighborZ != MPI_PROC_NULL ){
-                for (int iy = 1; iy < ny-1; iy++){
-                    vector[0][iy][nz-1]    = vector[xlo_src][iy][nz-1];
-                    vector[nx-1][iy][nz-1] = vector[xhi_src][iy][nz-1];
-                }
-           }
-           if(left_neighborZ != MPI_PROC_NULL ){
-                for (int iy = 1; iy < ny-1; iy++){
-                    vector[0][iy][0]    = vector[xlo_src][iy][0];
-                    vector[nx-1][iy][0] = vector[xhi_src][iy][0];
-                }
-           }
-           if(right_neighborY != MPI_PROC_NULL ){
-                for (int iz = 1; iz < nz-1; iz++) {
-                    vector[0][ny-1][iz]    = vector[xlo_src][ny-1][iz];
-                    vector[nx-1][ny-1][iz] = vector[xhi_src][ny-1][iz];
-                }
-           }
-           if(left_neighborY != MPI_PROC_NULL ){
-                for (int iz = 1; iz < nz-1; iz++) {
-                    vector[0][0][iz]       = vector[xlo_src][0][iz];
-                    vector[nx-1][0][iz]    = vector[xhi_src][0][iz];
-                }
-           }
-        }
-		if(right_neighborY == myrank &&  left_neighborY == myrank){
-		   if(right_neighborX != MPI_PROC_NULL ){
-                for (int iz = 1; iz < nz-1; iz++) {
-                    vector[nx-1][0][iz]    = vector[nx-1][ylo_src][iz];
-                    vector[nx-1][ny-1][iz] = vector[nx-1][yhi_src][iz];
-			}
-		  }
-          if(left_neighborX != MPI_PROC_NULL){
-                for (int iz = 1; iz < nz-1; iz++) {
-                    vector[0][0][iz]       = vector[0][ylo_src][iz];
-                    vector[0][ny-1][iz]    = vector[0][yhi_src][iz];
-                }
-		  }
-		  if(right_neighborZ != MPI_PROC_NULL){
-                for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][0][nz-1]    = vector[ix][ylo_src][nz-1];
-                    vector[ix][ny-1][nz-1] = vector[ix][yhi_src][nz-1];
-                }
-		  }
-		  if(left_neighborZ != MPI_PROC_NULL){
-                for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][0][0]       = vector[ix][ylo_src][0];
-                    vector[ix][ny-1][0]    = vector[ix][yhi_src][0];
-                }
-		  }
-		}
-
-		if(right_neighborZ == myrank &&  left_neighborZ == myrank){
-            if(right_neighborY != MPI_PROC_NULL ){
-                for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][ny-1][0]    = vector[ix][ny-1][zlo_src];
-                    vector[ix][ny-1][nz-1] = vector[ix][ny-1][zhi_src];
-                }
-            }
-            if(left_neighborY != MPI_PROC_NULL ){
-                for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][0][0]    = vector[ix][0][zlo_src];
-                    vector[ix][0][nz-1] = vector[ix][0][zhi_src];
-                }
-            }
-            if(right_neighborX != MPI_PROC_NULL ){
-                for (int iy = 1; iy < ny-1; iy++){
-                    vector[nx-1][iy][0]    = vector[nx-1][iy][zlo_src];
-                    vector[nx-1][iy][nz-1] = vector[nx-1][iy][zhi_src];
-                }
-            }
-            if(left_neighborX != MPI_PROC_NULL ){
-                for (int iy = 1; iy < ny-1; iy++){
-                    vector[0][iy][0]    = vector[0][iy][zlo_src];
-                    vector[0][iy][nz-1] = vector[0][iy][zhi_src];
-                }
-            }
-        }
-		//Need to finish receiving edges for corner exchange
-		if(sendcnt>0){
-			MPI_Waitall(sendcnt,&reqList[0],&stat[0]);
-			bool stopFlag = false;
-			for(int si=0;si< sendcnt;si++){
-				int error_code = stat[si].MPI_ERROR;
-				if (error_code != MPI_SUCCESS) {
-					stopFlag = true;
-#ifdef DEBUG
-					char error_string[100];
-					int length_of_error_string, error_class;
-
-					MPI_Error_class(error_code, &error_class);
-					MPI_Error_string(error_class, error_string, &length_of_error_string);
-					dprintf("MPI_Waitall error at %d  %s\n",si, error_string);
-#endif
-				}
-			}
-			if(stopFlag) exit (EXIT_FAILURE);;
-		}
-
-
-		//Corner Exchange only needed if XYZ neighbours all exist
-		//4 corners communicated in one message
-		//Assume Non-periodic will be handled in BC
-		//Define corner types for X communication
-		recvcnt = 0,sendcnt = 0;
-		if((communicationCnt[2] == 1 || communicationCnt[3] == 1) && (communicationCnt[4] == 1 || communicationCnt[5] == 1)){
-			//if XLeft exists, send 4 corners to XLeft
-			if(communicationCnt[0] == 1){
-				MPI_Irecv(&vector[0][0][0],1,   cornertype, left_neighborX, tag_XR,comm, &reqList[recvcnt++]);
-			}
-			//if XRight exist
-			if(communicationCnt[1] == 1){
-				MPI_Irecv(&vector[nx-1][0][0],1,cornertype, right_neighborX, tag_XL,comm, &reqList[recvcnt++]);
-			}
-
-			sendcnt=recvcnt;
-
-			//* corner send uses the offset-by-one X source,
-			//* matching face/edge sends.
-			if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[1+offset][0][0],   1,cornertype,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
-			}
-			if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-2-offset][0][0],1,cornertype,right_neighborX, tag_XR,comm, &reqList[sendcnt++]);
-			}
-		}
-
-		assert_eq(recvcnt,sendcnt-recvcnt);
-
-
-		//Delay local data copy — corner self-swaps honour the same
-		//* node_halo_fix offset as face/edge swaps so all three periodic-wrap
-		//* source indices agree.
-		if (left_neighborX== myrank && right_neighborX == myrank){
-			if( (left_neighborY != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][0]       = vector[xlo_src][0][0];
-				vector[nx-1][0][0]    = vector[xhi_src][0][0];
-			}
-			if( (left_neighborY != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][nz-1]    = vector[xlo_src][0][nz-1];
-				vector[nx-1][0][nz-1] = vector[xhi_src][0][nz-1];
-			}
-			if( (right_neighborY != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[0][ny-1][0]    = vector[xlo_src][ny-1][0];
-				vector[nx-1][ny-1][0] = vector[xhi_src][ny-1][0];
-			}
-			if( (right_neighborY != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[0][ny-1][nz-1]    = vector[xlo_src][ny-1][nz-1];
-				vector[nx-1][ny-1][nz-1] = vector[xhi_src][ny-1][nz-1];
-			}
-		}
-		else if (left_neighborY== myrank && right_neighborY == myrank){
-			if( (left_neighborX != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][0]       = vector[0][ylo_src][0];
-				vector[0][ny-1][0]    = vector[0][yhi_src][0];
-			}
-			if( (left_neighborX != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][nz-1]    = vector[0][ylo_src][nz-1];
-				vector[0][ny-1][nz-1]    = vector[0][yhi_src][nz-1];
-			}
-			if( (right_neighborX != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[nx-1][0][0]    = vector[nx-1][ylo_src][0];
-				vector[nx-1][ny-1][0] = vector[nx-1][yhi_src][0];
-			}
-			if( (right_neighborX != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[nx-1][0][nz-1]    = vector[nx-1][ylo_src][nz-1];
-				vector[nx-1][ny-1][nz-1] = vector[nx-1][yhi_src][nz-1];
-			}
-		}
-		else if (left_neighborZ== myrank && right_neighborZ == myrank){
-			if( (left_neighborY != MPI_PROC_NULL) && (left_neighborX != MPI_PROC_NULL)){
-				vector[0][0][0]       = vector[0][0][zlo_src];
-				vector[0][0][nz-1]    = vector[0][0][zhi_src];
-			}
-
-			if( (left_neighborY != MPI_PROC_NULL) && (right_neighborX != MPI_PROC_NULL)){
-				vector[nx-1][0][0]    = vector[nx-1][0][zlo_src];
-				vector[nx-1][0][nz-1] = vector[nx-1][0][zhi_src];
-			}
-
-			if( (right_neighborY != MPI_PROC_NULL) && (left_neighborX != MPI_PROC_NULL)){
-				vector[0][ny-1][0]    = vector[0][ny-1][zlo_src];
-				vector[0][ny-1][nz-1] = vector[0][ny-1][zhi_src];
-			}
-
-			if( (right_neighborY != MPI_PROC_NULL) && (right_neighborX != MPI_PROC_NULL)){
-				vector[nx-1][ny-1][0]    = vector[nx-1][ny-1][zlo_src];
-				vector[nx-1][ny-1][nz-1] = vector[nx-1][ny-1][zhi_src];
-			}
-		}
-
-
-		if(sendcnt>0){
-			MPI_Waitall(sendcnt,  &reqList[0], &stat[0]);
-			bool stopFlag = false;
-			for(int si=0;si< sendcnt;si++){
-				int error_code = stat[si].MPI_ERROR;
-				if (error_code != MPI_SUCCESS) {
-					stopFlag = true;
-#ifdef DEBUG
-					char error_string[100];
-					int length_of_error_string, error_class;
-
-					MPI_Error_class(error_code, &error_class);
-					MPI_Error_string(error_class, error_string, &length_of_error_string);
-					dprintf("MPI_Waitall error at %d  %s\n",si, error_string);
-#endif
-				}
-			}
-			if(stopFlag) exit (EXIT_FAILURE);
-		}
-	}
-
-	//if this is NodeInterpolation operation
-	if(needInterp){
-	    //* Kahan-aware sum-on-receive. Legacy path (`vector_c == nullptr`)
-	    //* falls through to plain `+=`, byte-identical to pre-Step-68c.
-	    //* When `vector_c` is supplied, each receiving interior cell is
-	    //* updated via a Neumaier step with the residual landing in
-	    //* `vector_c`; the caller folds `vector_c` back into `vector`
-	    //* after the halo exchange.
-	    addFace  (nx, ny, nz, vector, vct, /*n_ghost=*/1, /*skip_self=*/false, vector_c);
-	    addEdgeZ (nx, ny, nz, vector, vct, /*n_ghost=*/1, /*skip_self=*/false, vector_c);
-	    addEdgeY (nx, ny, nz, vector, vct, /*n_ghost=*/1, /*skip_self=*/false, vector_c);
-	    addEdgeX (nx, ny, nz, vector, vct, /*n_ghost=*/1, /*skip_self=*/false, vector_c);
-	    addCorner(nx, ny, nz, vector, vct, /*n_ghost=*/1, /*skip_self=*/false, vector_c);
-	}
-
 }
 
 
@@ -1257,8 +729,7 @@ static void do_xrank_completion(int nx, int ny, int nz,
 //* perpendicular to the edge direction. Routing: yEdge → X neighbours,
 //* zEdge → Y neighbours, xEdge → Z neighbours; each Cart side carries its
 //* 2 perp corners (e.g., yEdge X-LO carries Z-LO + Z-HI corners) batched
-//* into one MPI message. Replaces the strided yEdgetype / zEdgetype /
-//* xEdgetype custom datatypes.
+//* into one MPI message.
 //*
 //* Bit-identicality vs the legacy MPI-types path: legacy ran edge self-copies
 //* BEFORE the EDGE Waitall (Irecvs in flight, pre-progress reads). Manual
@@ -1593,8 +1064,7 @@ static void do_edge_phase(int nx, int ny, int nz,
 //* FACE PHASE — manual pack/unpack at N=1+
 //*
 //* Each of the 6 face directions exchanges n_ghost slab layers, batched into
-//* one MPI message per direction (vs n_ghost messages with the strided
-//* yzFacetype/xzFacetype/xyFacetype custom types this block used to call).
+//* one MPI message per direction.
 //* Bit-identical end state: same doubles in same destination cells. Manual
 //* pack/unpack also closes the Phase E.20 race window structurally — Irecv
 //* targets a contiguous recv buffer, so periodic-self self-copies and sum-
@@ -1773,7 +1243,7 @@ static void do_face_phase(int nx, int ny, int nz,
 
     //* Pack a yz / xz / xy face slab (fixed coord on the named axis,
     //* strict-interior on the other two) into a contiguous buffer for one
-    //* field. Iteration order matches the strided MPI types.
+    //* field.
     auto pack_yz = [&](int f, int ix, double* buf) {
         int idx = 0;
         for (int j = 1; j <= ny - 2; ++j)
@@ -2164,15 +1634,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
     //      self self-copies — only when !isFaceOnlyFlag.
     //   6. Trailing addFace family at n_ghost==1 (CIC moments interp).
     //! ============================================================
-    //* Phase 3: at unified-CIC needInterp the trailing addFace(skip_self=false)
-    //* below replicates the legacy buffer-swap+addFace dup-pair unify on
-    //* periodic-self axes — running do_periodic_self_fold on top would
-    //* double-count the ghost into both LO/HI dups via different paths.
-    //* TSC keeps the fold (its dup-pair unify lives elsewhere).
-    const bool unified_cic_interp =
-        (ctx.n_ghost == 1) && needInterp && EMf->get_col().getUnifiedHaloPath();
+    //* At CIC + needInterp, the trailing addFace(skip_self=false) below
+    //* replicates the legacy buffer-swap+addFace dup-pair unify on periodic-
+    //* self axes — running do_periodic_self_fold on top would double-count
+    //* the ghost into both LO/HI dups via different paths. TSC keeps the
+    //* fold (its dup-pair unify lives elsewhere).
+    const bool cic_interp = (ctx.n_ghost == 1) && needInterp;
     do_xrank_completion(nx, ny, nz, n_fields, vectors, ctx, needInterp);
-    if (needInterp && !unified_cic_interp)
+    if (needInterp && !cic_interp)
                        do_periodic_self_fold(nx, ny, nz, n_fields, vectors, ctx);
     if (unify_ps_dups) do_unify_ps_dups     (nx, ny, nz, n_fields, vectors, ctx);
     do_face_phase      (nx, ny, nz, n_fields, vectors, ctx, needInterp);
@@ -2194,20 +1663,15 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
     //  nxc_r >= 2*n_ghost - 1 per rank for each self-periodic axis.
     //* CIC (n_ghost=1) only — at TSC the cross-rank SOR pre-pass above
     //* already accumulated ghost natives into receivers' strict + dup, so
-    //* running the trailing addFace family on top would double-count. The
-    //* `skip_self_periodic=true` argument keeps the legacy CIC path from
-    //* re-summing periodic-self ghosts that the periodic-self fold/copy
-    //* above already handled.
-    if (needInterp && ctx.n_ghost == 1) {
+    //* running the trailing addFace family on top would double-count.
+    //* skip_self=false: addFace(skip_self=false) provides the periodic-self
+    //* dup-pair unify (do_periodic_self_fold was skipped at cic_interp
+    //* above precisely so the cell 1 += cell 0 logic here can do that
+    //* unify by reading the post-buffer-swap ghost cells).
+    if (cic_interp) {
         //* Legacy +=  when vectors_c is null; Neumaier-compensated update
-        //* lands residual in vectors_c[f] when supplied. Note: the Kahan
-        //* path here historically did NOT skip periodic-self at the multi-
-        //* field site (only the legacy plain path did), so preserve that
-        //* asymmetry by keeping skip_self gated on vectors_c.
-        //* Phase 3: under UnifiedHaloPath the periodic-self fold above is
-        //* skipped, so addFace(skip_self=false) must run here to provide
-        //* the periodic-self dup-pair unify (matches legacy line 585).
-        const bool skip_self = unified_cic_interp ? false : (vectors_c == nullptr);
+        //* lands residual in vectors_c[f] when supplied.
+        const bool skip_self = false;
         for (int f = 0; f < n_fields; ++f) {
             double ***vc = (vectors_c != nullptr) ? vectors_c[f] : nullptr;
             addFace  (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
@@ -2602,15 +2066,11 @@ void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const Virtua
 //  calls with one batched call cuts MPI message count by N× and amortises
 //  per-message latency over an N×-larger payload.
 //
-//  Path selection mirrors the single-field NBDerivedHaloComm:
-//   - n_ghost > 1 (TSC moments path): forward to the multi-field
-//     NBDerivedHaloCommN. One MPI message per direction carries
-//     n_fields × slab_size doubles.
-//   - n_ghost == 1 (CIC fast path): the legacy merged-MPI-types fast path
-//     in NBDerivedHaloComm hard-codes single-field strided datatypes.
-//     Multi-field at this width just loops, calling the legacy function
-//     N times. Halo cost is small at CIC (1 layer) so per-message latency
-//     doesn't dominate.
+//  Routes everything through NBDerivedHaloCommN (Phase 5 of the CIC/TSC
+//  unification — the legacy strided-MPI-types fast path is gone). At
+//  CIC + unify_ps_dups + needInterp the unified path's fold-then-add
+//  leaves ghosts at dup-avg, so we re-run as Node copy halo to refresh
+//  ghosts to strict-near (what downstream Maxwell stencils expect).
 //* ================================================================================
 static void NBDerivedHaloComm_multi(int nx, int ny, int nz,
                                      int n_fields, double ****vectors,
@@ -2620,39 +2080,13 @@ static void NBDerivedHaloComm_multi(int nx, int ny, int nz,
                                      double ****vectors_c = nullptr,
                                      bool unify_ps_dups = false)
 {
-    //* TSC always goes through the unified helper. Opt-in `UnifiedHaloPath`
-    //* (Phase 3 WIP) routes CIC there too — but ONLY when unify_ps_dups=false.
-    //* The unify_ps_dups=true path is mass-matrix / ECSIM moments, where
-    //* legacy fallback runs an extra communicateNode_P_multi to refresh ghost
-    //* cells from strict-near (Node-style image_offset=1). The unified path's
-    //* fold-then-add leaves ghost at dup-avg — different value used by the
-    //* downstream Maxwell stencils. Until that ghost-refresh is folded in,
-    //* keep the legacy fallback for the unify_ps_dups=true CIC case.
-    const bool route_unified =
-        (EMf->getNGhost() > 1) ||
-        (EMf->get_col().getUnifiedHaloPath() && !unify_ps_dups);
-    if (route_unified) {
-        NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
-                           isCenterFlag, isFaceOnlyFlag, needInterp, isParticle,
-                           vectors_c, unify_ps_dups);
-        return;
-    }
-    //* CIC fallback: loop the legacy single-field fast path. NBDerivedHaloComm's
-    //* trailing addFace family (with skip_self=false) deposits periodic-self
-    //* ghosts into LO and HI strict separately, leaving them asymmetric — so
-    //* unify is meaningful at CIC and must run after the interp pass. A copy
-    //* halo refresh follows so cross-rank ghosts pick up the post-unify strict.
-    for (int f = 0; f < n_fields; ++f) {
-        double ***vc = (vectors_c != nullptr) ? vectors_c[f] : nullptr;
-        NBDerivedHaloComm(nx, ny, nz, vectors[f], vct, EMf,
-                          isCenterFlag, isFaceOnlyFlag, needInterp, isParticle, vc);
-    }
-    if (unify_ps_dups) {
-        const HaloContext ctx = make_halo_context(EMf, vct, isCenterFlag, needInterp, isParticle);
-        do_unify_ps_dups(nx, ny, nz, n_fields, vectors, ctx);
-        //* Refresh ghosts with post-unify strict via the standard Node_P
-        //* path — matches the pre-fold semantics (isCenterFlag=false,
-        //* needInterp=false) the call site previously used post-unify.
+    NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
+                       isCenterFlag, isFaceOnlyFlag, needInterp, isParticle,
+                       vectors_c, unify_ps_dups);
+    //* At CIC + unify_ps_dups + needInterp, the unified fold-then-add
+    //* path leaves ghosts at dup-avg. TSC's periodic_self_copies sources
+    //* strict-near (image_offset=1) so ghosts are already correct there.
+    if (EMf->getNGhost() == 1 && needInterp && unify_ps_dups) {
         communicateNode_P_multi(nx, ny, nz, n_fields, vectors, vct, EMf);
     }
 }
