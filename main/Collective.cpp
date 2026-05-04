@@ -166,11 +166,15 @@ void Collective::ReadInput(string inputfile)
         //* band is introduced.
         DumpMassMatrixStages        = config.read<bool>("DumpMassMatrixStages", false);
 
-        //* WIP — Phase 2/3/4 of CIC/TSC halo unification. Opt-in; enables
-        //* SOR-at-CIC + (eventually) full CIC routing through
-        //* NBDerivedHaloCommN. Default off until the unified path is
-        //* bit-identical to legacy at all configs.
-        UnifiedHaloPath             = config.read<bool>("UnifiedHaloPath", false);
+        //* CIC/TSC halo unification: routes the n_ghost==1 (CIC) moments halo
+        //* through NBDerivedHaloCommN — the same path used at TSC. Eliminates
+        //* the legacy strided-MPI-types fast path's divergence from the manual
+        //* pack/unpack path. ε across np=1/2/4/8 × periodic-self/cross-rank.
+        //* The unify_ps_dups=true case (mass-matrix / ECSIM moments) still
+        //* falls through to legacy at CIC inside NBDerivedHaloComm_multi —
+        //* see Phase 5 plan for folding that ghost refresh into the unified
+        //* helper. Set to 0 to opt out.
+        UnifiedHaloPath             = config.read<bool>("UnifiedHaloPath", true);
 
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
