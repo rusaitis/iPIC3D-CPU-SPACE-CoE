@@ -22,25 +22,60 @@
 #include "EMfields3D.h"
 #include "Collective.h"
 
+//* Halo call kinds. Each value names the public-API wrapper it serves and
+//* maps to a fixed combination of the four behavioural flags decoded by
+//* `to_flags`. Internal: only used inside this TU.
+enum class HaloKind {
+    NodeBC,                  // node + full halo + copy + field comm
+    NodeBC_P,                // node + full halo + copy + particle comm
+    NodeBoxStencilBC,        // node + face-only + copy + field comm
+    NodeBoxStencilBC_P,      // node + face-only + copy + particle comm
+    CenterBC,                // center + full halo + copy + field comm
+    CenterBC_P,              // center + full halo + copy + particle comm
+    CenterBoxStencilBC,      // center + face-only + copy + field comm
+    CenterBoxStencilBC_P,    // center + face-only + copy + particle comm
+    Interp,                  // center + full halo + interp (sum-on-receive) + particle comm
+};
+
+struct HaloFlagBits {
+    bool is_center;
+    bool face_only;
+    bool need_interp;
+    bool is_particle;
+};
+
+constexpr HaloFlagBits to_flags(HaloKind k) {
+    switch (k) {
+        case HaloKind::NodeBC:                 return {false, false, false, false};
+        case HaloKind::NodeBC_P:               return {false, false, false, true };
+        case HaloKind::NodeBoxStencilBC:       return {false, true,  false, false};
+        case HaloKind::NodeBoxStencilBC_P:     return {false, true,  false, true };
+        case HaloKind::CenterBC:               return {true,  false, false, false};
+        case HaloKind::CenterBC_P:             return {true,  false, false, true };
+        case HaloKind::CenterBoxStencilBC:     return {true,  true,  false, false};
+        case HaloKind::CenterBoxStencilBC_P:   return {true,  true,  false, true };
+        case HaloKind::Interp:                 return {true,  false, true,  true };
+    }
+    return {false, false, false, false};  //* unreachable; quiets non-exhaustive-switch warnings
+}
+
 //* Single source of truth for the entire halo exchange. `vectors` is an
 //* array of `n_fields` pointers to 3D field arrays sharing the same
 //* (nx, ny, nz) extents and MPI topology. All N fields are exchanged in
 //* one batched MPI message per direction.
 //*
-//*   isCenterFlag    1 = communicateCenter; 0 = communicateNode
-//*   isFaceOnlyFlag  1 = skip edge/corner phases (BC-only halos)
-//*   needInterp      1 = sum-on-receive (moments interp); 0 = COPY
-//*   isParticle      1 = use particle MPI comm; 0 = field MPI comm
-//*   vectors_c       Optional Kahan-compensation companion array (per
-//*                   field). nullptr → legacy +=. Non-null → Neumaier
-//*                   sum-on-receive with residuals landing in vectors_c.
-//*   unify_ps_dups   At periodic-self axes, fold the LO=HI strict
-//*                   duplicate before the cross-rank pack so neighbours
-//*                   inherit post-unify strict (mass-matrix / ECSIM).
+//*   kind           Which behavioural flag combination to apply (see
+//*                  HaloKind / to_flags above).
+//*   vectors_c      Optional Kahan-compensation companion array (per
+//*                  field). nullptr → legacy +=. Non-null → Neumaier
+//*                  sum-on-receive with residuals landing in vectors_c.
+//*   unify_ps_dups  At periodic-self axes, fold the LO=HI strict
+//*                  duplicate before the cross-rank pack so neighbours
+//*                  inherit post-unify strict (mass-matrix / ECSIM).
 static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
-                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
+                                HaloKind kind,
                                 double ****vectors_c = nullptr,
                                 bool unify_ps_dups = false);
 
@@ -1571,9 +1606,10 @@ static void do_corner_periodic_self(int nx, int ny, int nz,
 static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
-                                bool isCenterFlag, bool isFaceOnlyFlag, bool needInterp, bool isParticle,
+                                HaloKind kind,
                                 double ****vectors_c, bool unify_ps_dups)
 {
+    const auto [isCenterFlag, isFaceOnlyFlag, needInterp, isParticle] = to_flags(kind);
     //* Single-source-of-truth halo state shared across all phase helpers.
     const HaloContext ctx = make_halo_context(EMf, vct, isCenterFlag, needInterp, isParticle);
     #ifdef DEBUG
@@ -1664,7 +1700,7 @@ void communicateNodeBC(int nx, int ny, int nz, double*** vector,
                         const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, false, false, false);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::NodeBC);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1686,7 +1722,7 @@ void communicateNodeBoxStencilBC(int nx, int ny, int nz, arr3_double _vector,
 {
     double ***vector = _vector.fetch_arr3();
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, true, false, false);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::NodeBoxStencilBC);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1698,7 +1734,7 @@ void communicateNodeBoxStencilBC_P(int nx, int ny, int nz, arr3_double _vector,
 {
     double ***vector = _vector.fetch_arr3();
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, true, false, true);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::NodeBoxStencilBC_P);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1710,7 +1746,7 @@ void communicateNodeBC_P(int nx, int ny, int nz, arr3_double _vector,
 {
     double ***vector = _vector.fetch_arr3();
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, false, false, true);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::NodeBC_P);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1721,7 +1757,7 @@ void communicateCenterBC(int nx, int ny, int nz, double*** vector,
                           const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, false, false, false);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::CenterBC);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1743,7 +1779,7 @@ void communicateCenterBC_P(int nx, int ny, int nz, arr3_double _vector,
 {
     double ***vector = _vector.fetch_arr3();
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, false, false, true);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::CenterBC_P);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1755,7 +1791,7 @@ void communicateCenterBoxStencilBC(int nx, int ny, int nz, arr3_double _vector,
 {
     double ***vector = _vector.fetch_arr3();
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, true, false, false);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::CenterBoxStencilBC);
     BCface(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -1767,7 +1803,7 @@ void communicateCenterBoxStencilBC_P(int nx, int ny, int nz, arr3_double _vector
 {
     double ***vector = _vector.fetch_arr3();
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, true, false, true);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::CenterBoxStencilBC_P);
     BCface_P(nx, ny, nz, vector, bcFaceXrght, bcFaceXleft, bcFaceYrght, bcFaceYleft, bcFaceZrght, bcFaceZleft, vct);
 }
 
@@ -2013,7 +2049,7 @@ void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTo
 {
     double*** vectors[1]   = {vector};
     double*** vectors_c[1] = {vector_c};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, true, false, true, true,
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::Interp,
                        vector_c != nullptr ? vectors_c : nullptr);
 }
 
@@ -2030,7 +2066,7 @@ void communicateInterp(int nx, int ny, int nz, arr3_double _vector, arr3_double 
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     double*** vectors[1] = {vector};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, false, false, false, true);
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::NodeBC_P);
 }
 
 void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf)
@@ -2063,16 +2099,12 @@ void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****ve
                               double ****vectors_c, bool unify_ps_dups)
 {
     NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
-                       /*isCenterFlag=*/true, /*isFaceOnlyFlag=*/false,
-                       /*needInterp=*/true, /*isParticle=*/true,
-                       vectors_c, unify_ps_dups);
+                       HaloKind::Interp, vectors_c, unify_ps_dups);
 }
 
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf)
 {
-    NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
-                       /*isCenterFlag=*/false, /*isFaceOnlyFlag=*/false,
-                       /*needInterp=*/false, /*isParticle=*/true);
+    NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf, HaloKind::NodeBC_P);
 }
 
