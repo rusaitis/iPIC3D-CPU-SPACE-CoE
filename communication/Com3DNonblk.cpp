@@ -619,7 +619,21 @@ struct HaloContext {
 
     //* Field semantics.
     bool isCenterDim;
-    int  offset;
+    //* Two semantically distinct offsets. They are equal at every current
+    //* call site (both `isCenterDim ? 0 : 1`), so this split is a refactor
+    //* — bit-identical. Phase 3 will diverge them at CIC needInterp so the
+    //* unified path can match legacy n_ghost==1 face-send semantics.
+    //*   face_send_offset  — depth-from-boundary of the cell that gets
+    //*                       PACKED for cross-rank face/edge/corner sends.
+    //*                       Currently isCenterDim ? 0 : 1.
+    //*   image_offset      — depth-from-boundary used in periodic-image
+    //*                       stride formulas (do_periodic_self_fold dst,
+    //*                       do_face_phase / do_edge_phase /
+    //*                       do_corner_periodic_self self-copy sources,
+    //*                       do_xrank_completion dst_idx).
+    //*                       Currently isCenterDim ? 0 : 1.
+    int  face_send_offset;
+    int  image_offset;
 
     //* Periodic-self flags: axis is periodic and decomposition along axis = 1.
     bool ps_x_self, ps_y_self, ps_z_self;
@@ -671,8 +685,9 @@ static HaloContext make_halo_context(EMfields3D *EMf,
         (ctx.periods[1] && ctx.dims[1] > 1) ||
         (ctx.periods[2] && ctx.dims[2] > 1);
 
-    ctx.isCenterDim = (isCenterFlag && !needInterp);
-    ctx.offset      = ctx.isCenterDim ? 0 : 1;
+    ctx.isCenterDim       = (isCenterFlag && !needInterp);
+    ctx.face_send_offset  = ctx.isCenterDim ? 0 : 1;
+    ctx.image_offset      = ctx.isCenterDim ? 0 : 1;
 
     ctx.ps_x_self = (ctx.neighbours[0] == ctx.myrank && ctx.neighbours[1] == ctx.myrank);
     ctx.ps_y_self = (ctx.neighbours[2] == ctx.myrank && ctx.neighbours[3] == ctx.myrank);
@@ -717,12 +732,12 @@ static void do_diagonal_edge_copy(int nx, int ny, int nz,
 {
     if (!ctx.any_xrank_periodic) return;
 
-    const int       n_ghost  = ctx.n_ghost;
-    const int       offset   = ctx.offset;
-    const MPI_Comm  comm     = ctx.comm;
-    const int       myrank   = ctx.myrank;
-    const int* const dims    = ctx.dims;
-    const int* const periods = ctx.periods;
+    const int       n_ghost          = ctx.n_ghost;
+    const int       face_send_offset = ctx.face_send_offset;
+    const MPI_Comm  comm             = ctx.comm;
+    const int       myrank           = ctx.myrank;
+    const int* const dims            = ctx.dims;
+    const int* const periods         = ctx.periods;
 
     const bool xrank[3] = {
         periods[0] && dims[0] > 1,
@@ -785,15 +800,15 @@ static void do_diagonal_edge_copy(int nx, int ny, int nz,
                     for (int f = 0; f < n_fields; ++f) {
                         for (int ga = 0; ga < n_ghost; ++ga) {
                             ijk[a] = (sa == +1)
-                                     ? (nax[a] - 1 - n_ghost - offset
+                                     ? (nax[a] - 1 - n_ghost - face_send_offset
                                         - (n_ghost - 1 - ga))
-                                     : (n_ghost + offset
+                                     : (n_ghost + face_send_offset
                                         + (n_ghost - 1 - ga));
                             for (int gb = 0; gb < n_ghost; ++gb) {
                                 ijk[b] = (sb == +1)
-                                         ? (nax[b] - 1 - n_ghost - offset
+                                         ? (nax[b] - 1 - n_ghost - face_send_offset
                                             - (n_ghost - 1 - gb))
-                                         : (n_ghost + offset
+                                         : (n_ghost + face_send_offset
                                             + (n_ghost - 1 - gb));
                                 for (int hc = 0; hc < len_c; ++hc) {
                                     ijk[c] = c_lo + hc;
@@ -872,12 +887,12 @@ static void do_xrank_completion(int nx, int ny, int nz,
 {
     if (!(needInterp && ctx.n_ghost > 1 && ctx.any_xrank_periodic)) return;
 
-    const int       n_ghost  = ctx.n_ghost;
-    const int       offset   = ctx.offset;
-    const MPI_Comm  comm     = ctx.comm;
-    const int       myrank   = ctx.myrank;
-    const int* const dims    = ctx.dims;
-    const int* const periods = ctx.periods;
+    const int       n_ghost      = ctx.n_ghost;
+    const int       image_offset = ctx.image_offset;
+    const MPI_Comm  comm         = ctx.comm;
+    const int       myrank       = ctx.myrank;
+    const int* const dims        = ctx.dims;
+    const int* const periods     = ctx.periods;
 
     //* Per-axis (n, s) → source index, and (n, s) → destination index.
     //* h is the layer counter:
@@ -891,10 +906,10 @@ static void do_xrank_completion(int nx, int ny, int nz,
     };
     auto dst_idx = [&](int sd, int n, int h) -> int {
         if (sd == -1) {
-            return (h < n_ghost) ? (h + n - 2 * n_ghost - offset) : (n - 1 - n_ghost);
+            return (h < n_ghost) ? (h + n - 2 * n_ghost - image_offset) : (n - 1 - n_ghost);
         }
         if (sd == +1) {
-            return (h < n_ghost) ? ((2 * n_ghost - 1 + offset) - h) : n_ghost;
+            return (h < n_ghost) ? ((2 * n_ghost - 1 + image_offset) - h) : n_ghost;
         }
         return n_ghost + 1 + h;
     };
@@ -1234,9 +1249,10 @@ static void do_edge_phase(int nx, int ny, int nz,
                            int n_fields, double ****vectors,
                            const HaloContext &ctx)
 {
-    const int        n_ghost = ctx.n_ghost;
-    const int        offset  = ctx.offset;
-    const MPI_Comm   comm    = ctx.comm;
+    const int        n_ghost          = ctx.n_ghost;
+    const int        face_send_offset = ctx.face_send_offset;
+    const int        image_offset     = ctx.image_offset;
+    const MPI_Comm   comm             = ctx.comm;
     const int        myrank  = ctx.myrank;
     const int* const cnt     = ctx.communicationCnt;
     const int        lnX     = ctx.neighbours[0], rnX = ctx.neighbours[1];
@@ -1280,12 +1296,12 @@ static void do_edge_phase(int nx, int ny, int nz,
         int idx = 0;
         for (int gx = 0; gx < n_ghost; ++gx) {
             const int sx = ctx.g_src(gx);
-            const int ix = (x_side == 0) ? (n_ghost + offset + sx)
-                                         : (nx - 1 - n_ghost - offset - sx);
+            const int ix = (x_side == 0) ? (n_ghost + face_send_offset + sx)
+                                         : (nx - 1 - n_ghost - face_send_offset - sx);
             for (int gz = 0; gz < n_ghost; ++gz) {
                 const int sz = ctx.g_src(gz);
-                const int iz = (z_side == 0) ? (n_ghost + offset + sz)
-                                             : (nz - 1 - n_ghost - offset - sz);
+                const int iz = (z_side == 0) ? (n_ghost + face_send_offset + sz)
+                                             : (nz - 1 - n_ghost - face_send_offset - sz);
                 for (int iy = 1; iy <= ny - 2; ++iy)
                     buf[idx++] = vectors[f][ix][iy][iz];
             }
@@ -1306,12 +1322,12 @@ static void do_edge_phase(int nx, int ny, int nz,
         int idx = 0;
         for (int gx = 0; gx < n_ghost; ++gx) {
             const int sx = ctx.g_src(gx);
-            const int ix = (x_side == 0) ? (n_ghost + offset + sx)
-                                         : (nx - 1 - n_ghost - offset - sx);
+            const int ix = (x_side == 0) ? (n_ghost + face_send_offset + sx)
+                                         : (nx - 1 - n_ghost - face_send_offset - sx);
             for (int gy = 0; gy < n_ghost; ++gy) {
                 const int sy = ctx.g_src(gy);
-                const int iy = (y_side == 0) ? (n_ghost + offset + sy)
-                                             : (ny - 1 - n_ghost - offset - sy);
+                const int iy = (y_side == 0) ? (n_ghost + face_send_offset + sy)
+                                             : (ny - 1 - n_ghost - face_send_offset - sy);
                 for (int iz = 1; iz <= nz - 2; ++iz)
                     buf[idx++] = vectors[f][ix][iy][iz];
             }
@@ -1332,12 +1348,12 @@ static void do_edge_phase(int nx, int ny, int nz,
         int idx = 0;
         for (int gy = 0; gy < n_ghost; ++gy) {
             const int sy = ctx.g_src(gy);
-            const int iy = (y_side == 0) ? (n_ghost + offset + sy)
-                                         : (ny - 1 - n_ghost - offset - sy);
+            const int iy = (y_side == 0) ? (n_ghost + face_send_offset + sy)
+                                         : (ny - 1 - n_ghost - face_send_offset - sy);
             for (int gz = 0; gz < n_ghost; ++gz) {
                 const int sz = ctx.g_src(gz);
-                const int iz = (z_side == 0) ? (n_ghost + offset + sz)
-                                             : (nz - 1 - n_ghost - offset - sz);
+                const int iz = (z_side == 0) ? (n_ghost + face_send_offset + sz)
+                                             : (nz - 1 - n_ghost - face_send_offset - sz);
                 for (int ix = 1; ix <= nx - 2; ++ix)
                     buf[idx++] = vectors[f][ix][iy][iz];
             }
@@ -1452,8 +1468,8 @@ static void do_edge_phase(int nx, int ny, int nz,
     for (int f = 0; f < n_fields; ++f) {
         if (rnX == myrank && lnX == myrank) {
             for (int g = 0; g < n_ghost; g++) {
-                const int sL = nx - 1 - n_ghost - offset - ctx.g_src(g);
-                const int sR = n_ghost + offset + ctx.g_src(g);
+                const int sL = nx - 1 - n_ghost - image_offset - ctx.g_src(g);
+                const int sR = n_ghost + image_offset + ctx.g_src(g);
                 if (rnZ != MPI_PROC_NULL) {
                     for (int iy = 1; iy < ny - 1; iy++) {
                         vectors[f][g][iy][nz-1]         = vectors[f][sL][iy][nz-1];
@@ -1482,8 +1498,8 @@ static void do_edge_phase(int nx, int ny, int nz,
         }
         if (rnY == myrank && lnY == myrank) {
             for (int g = 0; g < n_ghost; g++) {
-                const int sL = ny - 1 - n_ghost - offset - ctx.g_src(g);
-                const int sR = n_ghost + offset + ctx.g_src(g);
+                const int sL = ny - 1 - n_ghost - image_offset - ctx.g_src(g);
+                const int sR = n_ghost + image_offset + ctx.g_src(g);
                 if (rnX != MPI_PROC_NULL) {
                     for (int iz = 1; iz < nz - 1; iz++) {
                         vectors[f][nx-1][g][iz]         = vectors[f][nx-1][sL][iz];
@@ -1512,8 +1528,8 @@ static void do_edge_phase(int nx, int ny, int nz,
         }
         if (rnZ == myrank && lnZ == myrank) {
             for (int g = 0; g < n_ghost; g++) {
-                const int sL = nz - 1 - n_ghost - offset - ctx.g_src(g);
-                const int sR = n_ghost + offset + ctx.g_src(g);
+                const int sL = nz - 1 - n_ghost - image_offset - ctx.g_src(g);
+                const int sR = n_ghost + image_offset + ctx.g_src(g);
                 if (rnY != MPI_PROC_NULL) {
                     for (int ix = 1; ix < nx - 1; ix++) {
                         vectors[f][ix][ny-1][g]         = vectors[f][ix][ny-1][sL];
@@ -1584,19 +1600,20 @@ static void do_periodic_self_fold(int nx, int ny, int nz,
                                    int n_fields, double ****vectors,
                                    const HaloContext &ctx)
 {
-    const int n_ghost = ctx.n_ghost;
-    const int offset  = ctx.offset;
-    const bool ps_x   = ctx.ps_x_self;
-    const bool ps_y   = ctx.ps_y_self;
-    const bool ps_z   = ctx.ps_z_self;
+    const int n_ghost      = ctx.n_ghost;
+    //* image_offset only — fold dst is a periodic-image stride.
+    const int image_offset = ctx.image_offset;
+    const bool ps_x        = ctx.ps_x_self;
+    const bool ps_y        = ctx.ps_y_self;
+    const bool ps_z        = ctx.ps_z_self;
 
     if (!(ps_x || ps_y || ps_z)) return;
 
     for (int f = 0; f < n_fields; ++f) {
         if (ps_x) {
             for (int g = 0; g < n_ghost; g++) {
-                const int dst_lo = g + nx - 2 * n_ghost - offset;
-                const int dst_hi = (2 * n_ghost - 1 + offset) - g;
+                const int dst_lo = g + nx - 2 * n_ghost - image_offset;
+                const int dst_hi = (2 * n_ghost - 1 + image_offset) - g;
                 for (int iy = 1; iy <= ny - 2; iy++)
                     for (int iz = 1; iz <= nz - 2; iz++) {
                         vectors[f][dst_lo][iy][iz] += vectors[f][g][iy][iz];
@@ -1606,8 +1623,8 @@ static void do_periodic_self_fold(int nx, int ny, int nz,
         }
         if (ps_y) {
             for (int g = 0; g < n_ghost; g++) {
-                const int dst_lo = g + ny - 2 * n_ghost - offset;
-                const int dst_hi = (2 * n_ghost - 1 + offset) - g;
+                const int dst_lo = g + ny - 2 * n_ghost - image_offset;
+                const int dst_hi = (2 * n_ghost - 1 + image_offset) - g;
                 for (int ix = 1; ix <= nx - 2; ix++)
                     for (int iz = 1; iz <= nz - 2; iz++) {
                         vectors[f][ix][dst_lo][iz] += vectors[f][ix][g][iz];
@@ -1617,8 +1634,8 @@ static void do_periodic_self_fold(int nx, int ny, int nz,
         }
         if (ps_z) {
             for (int g = 0; g < n_ghost; g++) {
-                const int dst_lo = g + nz - 2 * n_ghost - offset;
-                const int dst_hi = (2 * n_ghost - 1 + offset) - g;
+                const int dst_lo = g + nz - 2 * n_ghost - image_offset;
+                const int dst_hi = (2 * n_ghost - 1 + image_offset) - g;
                 for (int ix = 1; ix <= nx - 2; ix++)
                     for (int iy = 1; iy <= ny - 2; iy++) {
                         vectors[f][ix][iy][dst_lo] += vectors[f][ix][iy][g];
@@ -1699,14 +1716,15 @@ static void do_face_phase(int nx, int ny, int nz,
                            int n_fields, double ****vectors,
                            const HaloContext &ctx, bool needInterp)
 {
-    const int        n_ghost = ctx.n_ghost;
-    const int        offset  = ctx.offset;
-    const MPI_Comm   comm    = ctx.comm;
-    const int        myrank  = ctx.myrank;
-    const int* const cnt     = ctx.communicationCnt;
-    const int        lnX     = ctx.neighbours[0], rnX = ctx.neighbours[1];
-    const int        lnY     = ctx.neighbours[2], rnY = ctx.neighbours[3];
-    const int        lnZ     = ctx.neighbours[4], rnZ = ctx.neighbours[5];
+    const int        n_ghost          = ctx.n_ghost;
+    const int        face_send_offset = ctx.face_send_offset;
+    const int        image_offset     = ctx.image_offset;
+    const MPI_Comm   comm             = ctx.comm;
+    const int        myrank           = ctx.myrank;
+    const int* const cnt              = ctx.communicationCnt;
+    const int        lnX = ctx.neighbours[0], rnX = ctx.neighbours[1];
+    const int        lnY = ctx.neighbours[2], rnY = ctx.neighbours[3];
+    const int        lnZ = ctx.neighbours[4], rnZ = ctx.neighbours[5];
     const int tag_XL=1, tag_YL=2, tag_ZL=3, tag_XR=4, tag_YR=5, tag_ZR=6;
 
     const int yz_per_layer = (ny - 2) * (nz - 2);
@@ -1778,12 +1796,12 @@ static void do_face_phase(int nx, int ny, int nz,
     for (int f = 0; f < n_fields; ++f) {
         for (int g = 0; g < n_ghost; ++g) {
             const int s = ctx.g_src(g);
-            if (cnt[0]) pack_yz(f, n_ghost + offset + s,            face_send_bufs[0].data() + (f * n_ghost + g) * yz_per_layer);
-            if (cnt[1]) pack_yz(f, nx - 1 - n_ghost - offset - s,   face_send_bufs[1].data() + (f * n_ghost + g) * yz_per_layer);
-            if (cnt[2]) pack_xz(f, n_ghost + offset + s,            face_send_bufs[2].data() + (f * n_ghost + g) * xz_per_layer);
-            if (cnt[3]) pack_xz(f, ny - 1 - n_ghost - offset - s,   face_send_bufs[3].data() + (f * n_ghost + g) * xz_per_layer);
-            if (cnt[4]) pack_xy(f, n_ghost + offset + s,            face_send_bufs[4].data() + (f * n_ghost + g) * xy_per_layer);
-            if (cnt[5]) pack_xy(f, nz - 1 - n_ghost - offset - s,   face_send_bufs[5].data() + (f * n_ghost + g) * xy_per_layer);
+            if (cnt[0]) pack_yz(f, n_ghost + face_send_offset + s,            face_send_bufs[0].data() + (f * n_ghost + g) * yz_per_layer);
+            if (cnt[1]) pack_yz(f, nx - 1 - n_ghost - face_send_offset - s,   face_send_bufs[1].data() + (f * n_ghost + g) * yz_per_layer);
+            if (cnt[2]) pack_xz(f, n_ghost + face_send_offset + s,            face_send_bufs[2].data() + (f * n_ghost + g) * xz_per_layer);
+            if (cnt[3]) pack_xz(f, ny - 1 - n_ghost - face_send_offset - s,   face_send_bufs[3].data() + (f * n_ghost + g) * xz_per_layer);
+            if (cnt[4]) pack_xy(f, n_ghost + face_send_offset + s,            face_send_bufs[4].data() + (f * n_ghost + g) * xy_per_layer);
+            if (cnt[5]) pack_xy(f, nz - 1 - n_ghost - face_send_offset - s,   face_send_bufs[5].data() + (f * n_ghost + g) * xy_per_layer);
         }
     }
 
@@ -1824,11 +1842,11 @@ static void do_face_phase(int nx, int ny, int nz,
     auto periodic_self_copies = [&]() {
         for (int f = 0; f < n_fields; ++f) {
             if (rnX == myrank && lnX == myrank) {
-                const int stride = nx - 2 * n_ghost - offset;
+                const int stride = nx - 2 * n_ghost - image_offset;
                 for (int g = 0; g < n_ghost; g++) {
-                    int sL = nx - 1 - n_ghost - offset - ctx.g_src(g);
+                    int sL = nx - 1 - n_ghost - image_offset - ctx.g_src(g);
                     if (sL < n_ghost) sL += stride;
-                    int sR = n_ghost + offset + ctx.g_src(g);
+                    int sR = n_ghost + image_offset + ctx.g_src(g);
                     if (sR > nx - 1 - n_ghost) sR -= stride;
                     for (int iy = 1; iy < ny - 1; iy++)
                         for (int iz = 1; iz < nz - 1; iz++) {
@@ -1838,11 +1856,11 @@ static void do_face_phase(int nx, int ny, int nz,
                 }
             }
             if (rnY == myrank && lnY == myrank) {
-                const int stride = ny - 2 * n_ghost - offset;
+                const int stride = ny - 2 * n_ghost - image_offset;
                 for (int g = 0; g < n_ghost; g++) {
-                    int sL = ny - 1 - n_ghost - offset - ctx.g_src(g);
+                    int sL = ny - 1 - n_ghost - image_offset - ctx.g_src(g);
                     if (sL < n_ghost) sL += stride;
-                    int sR = n_ghost + offset + ctx.g_src(g);
+                    int sR = n_ghost + image_offset + ctx.g_src(g);
                     if (sR > ny - 1 - n_ghost) sR -= stride;
                     for (int ix = 1; ix < nx - 1; ix++)
                         for (int iz = 1; iz < nz - 1; iz++) {
@@ -1852,11 +1870,11 @@ static void do_face_phase(int nx, int ny, int nz,
                 }
             }
             if (rnZ == myrank && lnZ == myrank) {
-                const int stride = nz - 2 * n_ghost - offset;
+                const int stride = nz - 2 * n_ghost - image_offset;
                 for (int g = 0; g < n_ghost; g++) {
-                    int sL = nz - 1 - n_ghost - offset - ctx.g_src(g);
+                    int sL = nz - 1 - n_ghost - image_offset - ctx.g_src(g);
                     if (sL < n_ghost) sL += stride;
-                    int sR = n_ghost + offset + ctx.g_src(g);
+                    int sR = n_ghost + image_offset + ctx.g_src(g);
                     if (sR > nz - 1 - n_ghost) sR -= stride;
                     for (int ix = 1; ix < nx - 1; ix++)
                         for (int iy = 1; iy < ny - 1; iy++) {
@@ -1902,13 +1920,14 @@ static void do_corner_phase(int nx, int ny, int nz,
                              int n_fields, double ****vectors,
                              const HaloContext &ctx)
 {
-    const int       n_ghost  = ctx.n_ghost;
-    const int       offset   = ctx.offset;
-    const MPI_Comm  comm     = ctx.comm;
-    const int* const cnt     = ctx.communicationCnt;
-    const int       lnX      = ctx.neighbours[0];
-    const int       rnX      = ctx.neighbours[1];
-    const int       tag_XL   = 1, tag_XR = 4;
+    const int       n_ghost          = ctx.n_ghost;
+    //* face_send_offset only — corner pack source is a cross-rank send.
+    const int       face_send_offset = ctx.face_send_offset;
+    const MPI_Comm  comm             = ctx.comm;
+    const int* const cnt             = ctx.communicationCnt;
+    const int       lnX              = ctx.neighbours[0];
+    const int       rnX              = ctx.neighbours[1];
+    const int       tag_XL           = 1, tag_XR = 4;
 
     if (!((cnt[2] == 1 || cnt[3] == 1) && (cnt[4] == 1 || cnt[5] == 1)))
         return;
@@ -1925,23 +1944,23 @@ static void do_corner_phase(int nx, int ny, int nz,
     }
 
     //* Pack send buffers. Source cells = strict-interior cube at depth
-    //* (n_ghost+offset+g_src) from the active X face. For each (gx,gy,gz)
+    //* (n_ghost+face_send_offset+g_src) from the active X face. For each (gx,gy,gz)
     //* the 4 perp Y/Z corners pack in canonical order (Y-LO,Z-LO),
     //* (Y-LO,Z-HI), (Y-HI,Z-LO), (Y-HI,Z-HI). Both ranks pack the same
     //* canonical order so the receiver's unpack lands matching doubles.
     for (int f = 0; f < n_fields; ++f) {
         for (int gx = 0; gx < n_ghost; ++gx) {
             const int sx   = ctx.g_src(gx);
-            const int xs_l = n_ghost + offset + sx;
-            const int xs_r = nx - 1 - n_ghost - offset - sx;
+            const int xs_l = n_ghost + face_send_offset + sx;
+            const int xs_r = nx - 1 - n_ghost - face_send_offset - sx;
             for (int gy = 0; gy < n_ghost; ++gy) {
                 const int sy   = ctx.g_src(gy);
-                const int ys_l = n_ghost + offset + sy;
-                const int ys_r = ny - 1 - n_ghost - offset - sy;
+                const int ys_l = n_ghost + face_send_offset + sy;
+                const int ys_r = ny - 1 - n_ghost - face_send_offset - sy;
                 for (int gz = 0; gz < n_ghost; ++gz) {
                     const int sz   = ctx.g_src(gz);
-                    const int zs_l = n_ghost + offset + sz;
-                    const int zs_r = nz - 1 - n_ghost - offset - sz;
+                    const int zs_l = n_ghost + face_send_offset + sz;
+                    const int zs_r = nz - 1 - n_ghost - face_send_offset - sz;
                     const int base = f * corner_per_field
                                    + 4 * ((gx * n_ghost + gy) * n_ghost + gz);
                     if (cnt[0]) {
@@ -2006,18 +2025,19 @@ static void do_corner_periodic_self(int nx, int ny, int nz,
                                      int n_fields, double ****vectors,
                                      const HaloContext &ctx)
 {
-    const int n_ghost = ctx.n_ghost;
-    const int offset  = ctx.offset;
-    const int myrank  = ctx.myrank;
-    const int lnX     = ctx.neighbours[0], rnX = ctx.neighbours[1];
-    const int lnY     = ctx.neighbours[2], rnY = ctx.neighbours[3];
-    const int lnZ     = ctx.neighbours[4], rnZ = ctx.neighbours[5];
+    const int n_ghost      = ctx.n_ghost;
+    //* image_offset only — corner self-copy sources are periodic-image strides.
+    const int image_offset = ctx.image_offset;
+    const int myrank       = ctx.myrank;
+    const int lnX          = ctx.neighbours[0], rnX = ctx.neighbours[1];
+    const int lnY          = ctx.neighbours[2], rnY = ctx.neighbours[3];
+    const int lnZ          = ctx.neighbours[4], rnZ = ctx.neighbours[5];
 
     for (int f = 0; f < n_fields; ++f) {
         if (lnX == myrank && rnX == myrank) {
             for (int g = 0; g < n_ghost; g++) {
-                const int sL = nx - 1 - n_ghost - offset - ctx.g_src(g);
-                const int sR = n_ghost + offset + ctx.g_src(g);
+                const int sL = nx - 1 - n_ghost - image_offset - ctx.g_src(g);
+                const int sR = n_ghost + image_offset + ctx.g_src(g);
                 for (int gy = 0; gy < n_ghost; gy++)
                 for (int gz = 0; gz < n_ghost; gz++) {
                     if (lnY != MPI_PROC_NULL && lnZ != MPI_PROC_NULL) {
@@ -2041,8 +2061,8 @@ static void do_corner_periodic_self(int nx, int ny, int nz,
         }
         else if (lnY == myrank && rnY == myrank) {
             for (int g = 0; g < n_ghost; g++) {
-                const int sL = ny - 1 - n_ghost - offset - ctx.g_src(g);
-                const int sR = n_ghost + offset + ctx.g_src(g);
+                const int sL = ny - 1 - n_ghost - image_offset - ctx.g_src(g);
+                const int sR = n_ghost + image_offset + ctx.g_src(g);
                 for (int gx = 0; gx < n_ghost; gx++)
                 for (int gz = 0; gz < n_ghost; gz++) {
                     if (lnX != MPI_PROC_NULL && lnZ != MPI_PROC_NULL) {
@@ -2066,8 +2086,8 @@ static void do_corner_periodic_self(int nx, int ny, int nz,
         }
         else if (lnZ == myrank && rnZ == myrank) {
             for (int g = 0; g < n_ghost; g++) {
-                const int sL = nz - 1 - n_ghost - offset - ctx.g_src(g);
-                const int sR = n_ghost + offset + ctx.g_src(g);
+                const int sL = nz - 1 - n_ghost - image_offset - ctx.g_src(g);
+                const int sR = n_ghost + image_offset + ctx.g_src(g);
                 for (int gx = 0; gx < n_ghost; gx++)
                 for (int gy = 0; gy < n_ghost; gy++) {
                     if (lnX != MPI_PROC_NULL && lnY != MPI_PROC_NULL) {
