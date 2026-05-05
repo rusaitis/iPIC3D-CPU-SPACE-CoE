@@ -5974,10 +5974,222 @@ void EMfields3D::init_KHI_FLR()
         //* Initialise rho on cell centres
         for (int is = 0; is < ns; is++)
             grid->interpN2C(rhocs, is, rhons);
-    } 
+    }
     else
         init();  //! READ FROM RESTART
 
+}
+
+//* Plane electromagnetic wave in vacuum (or near-vacuum). Forward-propagating
+//* sinusoid: δEy(x,0) = A sin(kx), δBz(x,0) = (A/c) sin(kx) → ω = c·k.
+//* input_param[0] = amplitude A, input_param[1] = mode m so k = 2π m / Lx.
+void EMfields3D::init_PlaneEMWave()
+{
+    const Collective *col = &get_col();
+    const VirtualTopology3D *vct = &get_vct();
+    const Grid *grid = &get_grid();
+
+    const double amplitude = input_param[0];
+    const int    mode      = static_cast<int>(input_param[1]);
+    const double k_wave    = 2.0 * M_PI * mode / Lx;
+    const double inv_c     = 1.0 / c;
+
+    if (restart_status == 0)
+    {
+        if (vct->getCartesian_rank() == 0)
+        {
+            cout << "------------------------------------------" << endl;
+            cout << "  Initialising plane EM wave (vacuum)     " << endl;
+            cout << "------------------------------------------" << endl;
+            cout << "δEy amplitude (A)                = " << amplitude << endl;
+            cout << "Mode m (k = 2π m / Lx)           = " << mode << endl;
+            cout << "k                                = " << k_wave << endl;
+            cout << "Expected ω = c·k                 = " << c * k_wave << endl;
+            cout << "------------------------------------------" << endl;
+        }
+
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    const double x_node = grid->getXN(i, j, k);
+                    const double sin_kx = sin(k_wave * x_node);
+
+                    Ex[i][j][k] = 0.0;
+                    Ey[i][j][k] = amplitude * sin_kx;
+                    Ez[i][j][k] = 0.0;
+
+                    Bxn[i][j][k] = B0x;
+                    Byn[i][j][k] = B0y;
+                    Bzn[i][j][k] = B0z + amplitude * inv_c * sin_kx;
+
+                    for (int is = 0; is < ns; is++)
+                        rhons[is][i][j][k] = rhoINIT[is] / FourPI;
+                }
+
+        //* B at cell centres (interp from nodes; perturbation lives on Bzn)
+        grid->interpN2C(Bxc, Bxn);
+        grid->interpN2C(Byc, Byn);
+        grid->interpN2C(Bzc, Bzn);
+
+        //* Halo exchange — both E and B carry the perturbation, so all six need it
+        communicateNodeBC(nxn, nyn, nzn, Ex,  col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Ey,  col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Ez,  col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+        for (int is = 0; is < ns; is++)
+            grid->interpN2C(rhocs, is, rhons);
+    }
+    else
+        init();  //! READ FROM RESTART
+}
+
+//* Traveling shear Alfvén wave: guide field B0x along propagation direction
+//* with sinusoidal transverse seed δBy(x,0) = δB·sin(kx). No particle drift —
+//* wave forms self-consistently as a forward+backward shear-Alfvén mode pair,
+//* both at ω = k·v_A. Visual signature: δBy(x,t) circulates the periodic box
+//* every L/v_A.
+//* input_param[0] = δB/B0x (relative perturbation), input_param[1] = mode m.
+void EMfields3D::init_AlfvenWave()
+{
+    const Collective *col = &get_col();
+    const VirtualTopology3D *vct = &get_vct();
+    const Grid *grid = &get_grid();
+
+    const double dB_over_B0 = input_param[0];
+    const int    mode       = static_cast<int>(input_param[1]);
+    const double k_wave     = 2.0 * M_PI * mode / Lx;
+    const double dB         = dB_over_B0 * B0x;
+
+    if (restart_status == 0)
+    {
+        if (vct->getCartesian_rank() == 0)
+        {
+            cout << "------------------------------------------" << endl;
+            cout << "  Initialising shear Alfvén wave          " << endl;
+            cout << "------------------------------------------" << endl;
+            cout << "Guide B0x                        = " << B0x << endl;
+            cout << "δB/B0 (perturbation)             = " << dB_over_B0 << endl;
+            cout << "Mode m (k = 2π m / Lx)           = " << mode << endl;
+            cout << "k                                = " << k_wave << endl;
+            cout << "B-only seed → forward+backward shear-Alfvén pair, ω = k·v_A" << endl;
+            cout << "------------------------------------------" << endl;
+        }
+
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    const double x_node = grid->getXN(i, j, k);
+                    const double sin_kx = sin(k_wave * x_node);
+
+                    Ex[i][j][k] = 0.0;
+                    Ey[i][j][k] = 0.0;
+                    Ez[i][j][k] = 0.0;
+
+                    Bxn[i][j][k] = B0x;
+                    Byn[i][j][k] = B0y + dB * sin_kx;
+                    Bzn[i][j][k] = B0z;
+
+                    for (int is = 0; is < ns; is++)
+                        rhons[is][i][j][k] = rhoINIT[is] / FourPI;
+                }
+
+        grid->interpN2C(Bxc, Bxn);
+        grid->interpN2C(Byc, Byn);
+        grid->interpN2C(Bzc, Bzn);
+
+        communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+        for (int is = 0; is < ns; is++)
+            grid->interpN2C(rhocs, is, rhons);
+    }
+    else
+        init();  //! READ FROM RESTART
+}
+
+//* Whistler R-mode wave: guide field B0x along propagation direction with
+//* right-circularly-polarized transverse seed
+//*   δBy(x,0) = δB · cos(k·x),   δBz(x,0) = δB · sin(k·x)
+//* The matched (y, z) helix at t=0 advances right-handed in space, exciting
+//* only the R-mode branch of cold-plasma dispersion. Forward + backward R-modes
+//* both lie at |ω| = ω_R(k) so a real-time-FFT shows a single peak there.
+//* Cold-plasma dispersion: ω = k²c²·ω_ce / (ω_pe² + k²c²), valid for ω_ci ≪ ω.
+//* input_param[0] = δB/B0x, input_param[1] = mode m.
+void EMfields3D::init_WhistlerPacket()
+{
+    const Collective *col = &get_col();
+    const VirtualTopology3D *vct = &get_vct();
+    const Grid *grid = &get_grid();
+
+    const double dB_over_B0 = input_param[0];
+    const int    mode       = static_cast<int>(input_param[1]);
+    const double k_wave     = 2.0 * M_PI * mode / Lx;
+    const double dB         = dB_over_B0 * B0x;
+
+    if (restart_status == 0)
+    {
+        if (vct->getCartesian_rank() == 0)
+        {
+            cout << "------------------------------------------" << endl;
+            cout << "  Initialising whistler R-mode wave       " << endl;
+            cout << "------------------------------------------" << endl;
+            cout << "Guide B0x                        = " << B0x << endl;
+            cout << "δB/B0                            = " << dB_over_B0 << endl;
+            cout << "Mode m (k = 2π m / Lx)           = " << mode << endl;
+            cout << "k                                = " << k_wave << endl;
+            cout << "Right-polarized: δBy=cos(kx), δBz=sin(kx) → R-mode only" << endl;
+            cout << "Cold dispersion: ω = k²c²·ω_ce / (ω_pe² + k²c²)" << endl;
+            cout << "------------------------------------------" << endl;
+        }
+
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    const double x_node = grid->getXN(i, j, k);
+                    const double cos_kx = cos(k_wave * x_node);
+                    const double sin_kx = sin(k_wave * x_node);
+
+                    Ex[i][j][k] = 0.0;
+                    Ey[i][j][k] = 0.0;
+                    Ez[i][j][k] = 0.0;
+
+                    Bxn[i][j][k] = B0x;
+                    Byn[i][j][k] = B0y + dB * cos_kx;
+                    Bzn[i][j][k] = B0z + dB * sin_kx;
+
+                    for (int is = 0; is < ns; is++)
+                        rhons[is][i][j][k] = rhoINIT[is] / FourPI;
+                }
+
+        grid->interpN2C(Bxc, Bxn);
+        grid->interpN2C(Byc, Byn);
+        grid->interpN2C(Bzc, Bzn);
+
+        communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+        for (int is = 0; is < ns; is++)
+            grid->interpN2C(rhocs, is, rhons);
+    }
+    else
+        init();  //! READ FROM RESTART
 }
 
 

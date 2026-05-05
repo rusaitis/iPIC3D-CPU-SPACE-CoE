@@ -112,7 +112,16 @@ public:
     void initTaylorGreen();
 
     //* Initialise fields for shear velocity in fluid finite Larmor radius (FLR) equilibrium (Cerri et al. 2013)
-    void init_KHI_FLR(); 
+    void init_KHI_FLR();
+
+    //* Initialise plane electromagnetic wave (vacuum or near-vacuum). δEy + δBz=δEy/c sinusoid → forward c-wave
+    void init_PlaneEMWave();
+
+    //* Initialise traveling shear Alfvén wave. B0x guide + δBy=δB·sin(kx) seed → ω=k·v_A (forward+backward pair)
+    void init_AlfvenWave();
+
+    //* Initialise whistler R-mode wave. B0x guide + R-circularly polarized δBy=cos(kx), δBz=sin(kx) → ω=ω_R(k)
+    void init_WhistlerPacket();
 
     //? ---------- Initial particle distributions (Relativistic) ---------- ?//
 

@@ -1,0 +1,140 @@
+###! INPUT FILE — Traveling shear Alfvén wave (Test 2: BC stress)
+#
+# Periodic box, guide field B0x = B0 along propagation direction. B-only seed:
+#   δBy(x, 0) = δB · sin(2π m x / Lx),   δBz = 0
+# No particle drift — the wave forms self-consistently as a forward + backward
+# shear-Alfvén pair, both at ω = k · v_A (distinguishable by phase, identical
+# in dispersion). Visual signature: δBy(x, t) circulates the periodic box every
+# L / v_A.
+#
+# Domain: Lx = 10 (≈ 1.6 d_i in ion-skin units), m = 1 → λ = 10, k = 2π / 10.
+# Plasma: e-i, mass ratio m_i/m_e = 25 (qom_e = -25, qom_i = +1), rhoINIT = 1
+# both species → ρ_total = 1/(4π) · (1/25 + 1) ≈ 0.083, so v_A = B0 / √(0.083·4π)
+# ≈ B0 / √1.04. With B0 = 0.2 → v_A ≈ 0.196.
+#
+# Wave period T = 2π / (k·v_A) ≈ 51 code time. dt = 0.25 → 204 cycles per
+# period; ncycles = 800 → 4 periods. FieldOutputCycle = 2 → 400 samples → FFT
+# bin width 2π/(800·0.25) ≈ 0.0314 rad/t; expected ω ≈ 0.123 → ~4 bins above DC.
+# Thermal: vth_e = 0.02, vth_i = 0.01 — vth_e/v_A ≈ 0.1 → β small, kinetic
+# corrections to ω = k·v_A under a few percent.
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                TEST CASE                                   %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Case                           = AlfvenWave
+SimulationName                 = AlfvenWave_np4
+SaveDirName                    = data_AlfvenWave_np4
+RestartDirName                 = data_AlfvenWave_np4
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                    OUTPUT                                  %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+WriteMethod                    = phdf5
+output_data_precision          = DOUBLE
+
+restart_status                 = 0
+
+DiagnosticsOutputCycle         = 1
+RestartOutputCycle             = 0
+FieldOutputCycle               = 2
+ParticlesOutputCycle           = 0
+ParticlesDownsampleOutputCycle = 0
+ParticlesDownsampleFactor      = 1
+
+FieldOutputTag                 = E + B
+ParticlesOutputTag             = position + velocity + q
+ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                             PHYSICS and GEOMETRY                           %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+###? Custom parameters (max. 10)
+nparam                         = 2
+custom_parameters              = 0.05        1
+
+#* custom_parameter 1 → δB / B0x  (relative perturbation amplitude)
+#* custom_parameter 2 → Mode m (k = 2π m / Lx)
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                         ELECTRIC and MAGNETIC FIELD                        %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+B0x                            = 2.0                                            # Guide field along k. Sets v_A and ω_ci; ω_pi=10 from rhoINIT
+B0y                            = 0.0
+B0z                            = 0.0
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                     TIME                                   %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+dt                             = 0.25
+ncycles                        = 800                                            # 4 wave periods
+th                             = 0.5
+c                              = 1.0
+GMREStol                       = 1E-15
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                   SMOOTHING                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Smooth                         = 0
+num_smoothings                 = 0
+SmoothCycle                    = 1
+
+MaxwellOperator                = lap_graddiv
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                    BOX SIZE                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Lx                             = 10.0                                           # Wave propagation direction
+Ly                             = 1.0
+Lz                             = 1.0
+
+nxc                            = 64
+nyc                            = 4
+nzc                            = 4
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                  MPI TOPOLOGY                              %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+XLEN                           = 4                                              # Split along k → cross-rank periodic-X stress
+YLEN                           = 1
+ZLEN                           = 1
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                   PARTICLES                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# Cold electron-ion plasma at uniform density. m_i/m_e = 25.
+
+ns                  = 2
+
+rhoINIT             = 100.0         100.0                                       # ω_pi = √(rhoINIT·|qom|) = 10 → d_i = 0.1, k·d_i ≈ 0.063 (MHD)
+rhoINJECT           = 0.0           0.0
+
+npcelx              = 4             4
+npcely              = 4             4
+npcelz              = 4             4
+NpMaxNpRatio        = 5.0
+
+qom                 = -25.0         1.0                                         # Mass ratio 25 (electron / ion)
+
+uth                 = 0.02          0.01
+vth                 = 0.02          0.01
+wth                 = 0.02          0.01
+
+u0                  = 0.0           0.0
+v0                  = 0.0           0.0
+w0                  = 0.0           0.0
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                               BOUNDARY CONDITION                           %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+PERIODICX                      = 1
+PERIODICY                      = 1
+PERIODICZ                      = 1
