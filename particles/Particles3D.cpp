@@ -252,6 +252,74 @@ void Particles3D::maxwellian(Field * EMf)
     }
 }
 
+/** Maxwellian + Walen-relation drift δv_z = -δB·sin(k_x x + k_y y)/√(4πρ_total).
+ *  Pairs with EMfields3D::init_ObliqueAlfvenWave to seed a single forward-propagating
+ *  shear-Alfvén wave (no backward partner, no equilibration transient). All species
+ *  ride the same δv (it's a bulk MHD motion); the Walen amplitude reduces to
+ *  δv = (δB/B0)·v_A. input_param convention matches init_ObliqueAlfvenWave:
+ *    [0] = δB/B0x   [1] = m_x   [2] = m_y                                        */
+void Particles3D::oblique_alfven_seed(Field * EMf)
+{
+    long long seed = (vct->getCartesian_rank() + 1)*20 + ns;
+    srand(seed);
+    srand48(seed);
+
+    assert_eq(_pcls.size(), 0);
+
+    const double dB_over_B0 = input_param[0];
+    const int    mx         = static_cast<int>(input_param[1]);
+    const int    my         = static_cast<int>(input_param[2]);
+    const double kx_wave    = 2.0 * M_PI * mx / Lx;
+    const double ky_wave    = 2.0 * M_PI * my / Ly;
+
+    //? Total mass density in code units. iPIC3D init() sets rhons[s] = rhoINIT[s]/4π,
+    //  so ρ_s = rhoINIT[s] / (4π·|qom_s|) and 4π·ρ_total = Σ_s |rhoINIT[s]|/|qom_s|.
+    //  v_A = B0/√(4πρ_total) and the Walen drift amplitude is dB_over_B0·v_A.
+    double mass_density_norm = 0.0;
+    for (int s = 0; s < col->getNs(); s++) {
+        const double q = col->getQOM(s);
+        if (q != 0.0)
+            mass_density_norm += fabs(col->getRHOinit(s)) / fabs(q);
+    }
+    const double B0x_loc = col->getB0x();
+    const double v_A     = (mass_density_norm > 0.0 && B0x_loc != 0.0)
+                            ? B0x_loc / sqrt(mass_density_norm)
+                            : 0.0;
+    //* Forward branch: ω = +k_∥·v_A → δv_z = -(δB/B0)·v_A · sin(phase). Sign matches
+    //* the linearised induction equation ∂B/∂t = ∇×(v×B0) for a forward wave.
+    const double dvz_amp = -dB_over_B0 * v_A;
+
+    const double q_sgn = (qom / fabs(qom));
+    const double q_factor = q_sgn * grid->getVOL() / npcel;
+
+    const int ng = grid->getNGhost();
+    for (int i = ng; i < grid->getNXC() - ng; i++)
+        for (int j = ng; j < grid->getNYC() - ng; j++)
+            for (int k = ng; k < grid->getNZC() - ng; k++)
+            {
+                const double q = q_factor * fabs(EMf->getRHOcs(i, j, k, ns));
+
+                for (int ii = 0; ii < npcelx; ii++)
+                    for (int jj = 0; jj < npcely; jj++)
+                        for (int kk = 0; kk < npcelz; kk++)
+                        {
+                            const double x = (ii + .5) * (dx / npcelx) + grid->getXN(i, j, k);
+                            const double y = (jj + .5) * (dy / npcely) + grid->getYN(i, j, k);
+                            const double z = (kk + .5) * (dz / npcelz) + grid->getZN(i, j, k);
+
+                            const double phase = kx_wave * x + ky_wave * y;
+                            const double dvz   = dvz_amp * sin(phase);
+
+                            double u, v, w;
+                            sample_maxwellian(u, v, w, uth, vth, wth, u0, v0, w0 + dvz);
+
+                            create_new_particle(u, v, w, q, x, y, z);
+                        }
+            }
+
+    fixPosition();
+}
+
 /** Maxellian velocity from currents and uniform spatial distribution */
 void Particles3D::maxwellianNullPoints(Field * EMf)
 {

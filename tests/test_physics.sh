@@ -3,18 +3,24 @@
 # growth rates across the periodic-BC halo path at np=1 and np=4.
 #
 # Tests:
-#   A. Plane EM wave in vacuum   ω = c·k          (analyze_dispersion.py)
-#   B. Shear Alfvén wave         ω = k·v_A        (analyze_dispersion.py)
-#   C. Two-stream instability    γ = ω_pe/(2√2)   (analyze_growth_rate.py)
-#   D. Whistler R-mode wave      ω = ω_R(k)       (analyze_dispersion.py)
+#   A. Plane EM wave in vacuum    ω = c·k                (analyze_dispersion.py)
+#   B. Shear Alfvén wave          ω = k·v_A              (analyze_dispersion.py)
+#   C. Two-stream instability     γ = ω_pe/(2√2)         (analyze_growth_rate.py)
+#   D. Whistler R-mode wave       ω = ω_R(k)             (analyze_dispersion.py)
+#   E. Oblique shear Alfvén wave  ω = k·v_A·cos(θ_kB)    (analyze_dispersion.py)
 #
-# Each test runs once at np=1 (single-rank periodic-self halo path) and once
-# at np=4 X-decomposition (cross-rank periodic halo path). The unification
-# work guarantees these paths produce equivalent physics; this suite checks
-# the guarantee against analytical references.
+# Tests A–D run at np=1 (single-rank periodic-self halo path) and np=4
+# X-decomp (cross-rank periodic halo on one axis). Test E runs at np=1 and
+# np=4 with XLEN=2,YLEN=2 to stress 2-axis cross-rank halos (the regime that
+# motivated Phases E.14 / E.16 / E.18). Test E uses Walen-correct δv from
+# Particles3D::oblique_alfven_seed so the wave excites a single forward branch
+# rather than a forward+backward standing pair (essential for clean ω at
+# oblique k). The unification work guarantees these paths produce equivalent
+# physics; this suite checks the guarantee against analytical references.
 #
-# Runtime: ~17 min on Apple silicon. Designed for nightly / pre-merge CI,
-# not the inner loop. Use tests/test_energy.sh + `pixi run test` for that.
+# Runtime: ~30 min on Apple silicon (oblique test adds ~12 min). Designed
+# for nightly / pre-merge CI, not the inner loop. Use tests/test_energy.sh
+# + `pixi run test` for that.
 
 set -euo pipefail
 
@@ -34,7 +40,7 @@ mkdir -p "$OUTROOT"
 
 cd "$REPO"
 
-# ── Run all 8 simulations (4 tests × 2 decompositions) ───────────────────
+# ── Run all 10 simulations (5 tests × 2 decompositions) ──────────────────
 
 run_sim() {
     local label=$1 np=$2 inp=$3 outdir=$4
@@ -52,6 +58,8 @@ run_sim twostream_np1    1 TwoStream.inp         "$REPO/data_TwoStream"
 run_sim twostream_np4    4 TwoStream_np4.inp     "$REPO/data_TwoStream_np4"
 run_sim whistler_np1     1 WhistlerPacket.inp    "$REPO/data_WhistlerPacket"
 run_sim whistler_np4     4 WhistlerPacket_np4.inp "$REPO/data_WhistlerPacket_np4"
+run_sim oblique_alf_np1  1 ObliqueAlfvenWave.inp     "$REPO/data_ObliqueAlfvenWave"
+run_sim oblique_alf_np4  4 ObliqueAlfvenWave_np4.inp "$REPO/data_ObliqueAlfvenWave_np4"
 
 # ── Run analyzers, capture pass/fail ──────────────────────────────────────
 
@@ -81,6 +89,8 @@ check "twostream_np1" "$PYTHON scripts/analyze_growth_rate.py data_TwoStream --i
 check "twostream_np4" "$PYTHON scripts/analyze_growth_rate.py data_TwoStream_np4 --inp inputfiles/TwoStream_np4.inp --expected 'wpe/(2*sqrt(2))' --tol 0.20"
 check "whistler_np1"  "$PYTHON scripts/analyze_dispersion.py data_WhistlerPacket --inp inputfiles/WhistlerPacket.inp --field B --component y --expected 'k**2*c**2*omega_ce/(omega_pe**2 + k**2*c**2)' --tol 0.10"
 check "whistler_np4"  "$PYTHON scripts/analyze_dispersion.py data_WhistlerPacket_np4 --inp inputfiles/WhistlerPacket_np4.inp --field B --component y --expected 'k**2*c**2*omega_ce/(omega_pe**2 + k**2*c**2)' --tol 0.10"
+check "oblique_alf_np1" "$PYTHON scripts/analyze_dispersion.py data_ObliqueAlfvenWave --inp inputfiles/ObliqueAlfvenWave.inp --field B --component z --method phase --expected 'k*v_A*cos_kB' --tol 0.05"
+check "oblique_alf_np4" "$PYTHON scripts/analyze_dispersion.py data_ObliqueAlfvenWave_np4 --inp inputfiles/ObliqueAlfvenWave_np4.inp --field B --component z --method phase --expected 'k*v_A*cos_kB' --tol 0.05"
 
 # ── Summary table ────────────────────────────────────────────────────────
 

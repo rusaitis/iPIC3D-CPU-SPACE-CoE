@@ -120,6 +120,10 @@ public:
     //* Initialise traveling shear Alfvén wave. B0x guide + δBy=δB·sin(kx) seed → ω=k·v_A (forward+backward pair)
     void init_AlfvenWave();
 
+    //* Initialise oblique shear Alfvén wave. B0x guide + δBz=δB·sin(kx·x+ky·y) → ω=k·v_A·cos(θ_kB).
+    //* Pairs with Particles3D::oblique_alfven_seed for Walen-correct δv → forward branch only.
+    void init_ObliqueAlfvenWave();
+
     //* Initialise whistler R-mode wave. B0x guide + R-circularly polarized δBy=cos(kx), δBz=sin(kx) → ω=ω_R(k)
     void init_WhistlerPacket();
 

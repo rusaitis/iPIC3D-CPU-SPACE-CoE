@@ -1,0 +1,152 @@
+###! INPUT FILE — Oblique shear Alfvén wave (Test 5: 2-axis BC stress)
+#
+# Periodic 2D box (Lx = Ly), guide field B0x along x. Walen-correct seed:
+#   δBz(x, y, 0) = δB · sin(k_x·x + k_y·y),   δBx = δBy = 0
+#   δv_z(x, y, 0) = -(δB/B0)·v_A · sin(k_x·x + k_y·y)   ← from oblique_alfven_seed
+# The matched B and v perturbation puts the system on the FORWARD shear-Alfvén
+# branch only — no backward partner, no equilibration transient. This is the
+# essential ingredient for clean ω measurement at oblique k; without δv (B-only
+# seed) the wave dies in <1 period from forward+backward standing-wave mixing.
+#
+# Mode (m_x, m_y) = (1, 1) on Lx = Ly = 10:
+#   k_x = k_y = 2π/10 ≈ 0.628, |k| = √2·0.628 ≈ 0.889, θ_kB = 45°.
+# Plasma identical to AlfvenWave.inp: m_i/m_e = 25, ω_pi = 10, d_i = 0.1.
+# v_A = B0/√(Σ rhoINIT/|qom|) = 2/√104 ≈ 0.196.
+# ω_expected = |k|·v_A·cos(45°) = 0.889·0.196/√2 ≈ 0.123.
+# (Same ω as 1D AlfvenWave m=1 — the projection k·cos(θ) = k_x is preserved.)
+#
+# Grid: 32×32×4 with ppc = 2×2×2 = 8 → 32,768 particles per rank. With the
+# Walen seed the wave is deterministic, so low ppc still gives clean ω
+# (random thermal noise averages over 32×32×4 = 4096 cells per spatial mode).
+# λ_oblique/dx ≈ 23 cells per wavelength.
+#
+# Period T ≈ 51 code time. dt = 0.25, ncycles = 800 → 4 periods, FFT bin
+# 2π/(800·0.25) ≈ 0.0314 rad/t → expected ω ≈ 4 bins above DC.
+#
+# Why this test: 1D Alfvén only stresses a single decomposed axis. Oblique k
+# in the x-y plane forces wavefronts to cross diagonal X+Y rank corners every
+# cycle. Validates Phase E.14 (multi-axis corner SOR), E.16 (face-cell
+# completion), E.18 (diagonal edge-copy) on a physics quantity, not just an
+# energy-conservation regression.
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                TEST CASE                                   %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Case                           = ObliqueAlfvenWave
+SimulationName                 = ObliqueAlfvenWave
+SaveDirName                    = data_ObliqueAlfvenWave
+RestartDirName                 = data_ObliqueAlfvenWave
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                    OUTPUT                                  %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+WriteMethod                    = phdf5
+output_data_precision          = DOUBLE
+
+restart_status                 = 0
+
+DiagnosticsOutputCycle         = 1
+RestartOutputCycle             = 0
+FieldOutputCycle               = 2
+ParticlesOutputCycle           = 0
+ParticlesDownsampleOutputCycle = 0
+ParticlesDownsampleFactor      = 1
+
+FieldOutputTag                 = E + B
+ParticlesOutputTag             = position + velocity + q
+ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                             PHYSICS and GEOMETRY                           %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+###? Custom parameters (max. 10)
+nparam                         = 3
+custom_parameters              = 0.20        1           1
+
+#* custom_parameter 1 → δB / B0x  (relative perturbation amplitude)
+#* custom_parameter 2 → Mode m_x  (k_x = 2π m_x / Lx)
+#* custom_parameter 3 → Mode m_y  (k_y = 2π m_y / Ly)
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                         ELECTRIC and MAGNETIC FIELD                        %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+B0x                            = 2.0                                            # Guide field along x. Oblique k makes θ_kB = 45° here
+B0y                            = 0.0
+B0z                            = 0.0
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                     TIME                                   %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+dt                             = 0.25
+ncycles                        = 800                                            # 4 wave periods at T ≈ 51
+th                             = 0.5
+c                              = 1.0
+GMREStol                       = 1E-15
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                   SMOOTHING                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Smooth                         = 0
+num_smoothings                 = 0
+SmoothCycle                    = 1
+
+MaxwellOperator                = lap_graddiv
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                    BOX SIZE                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Lx                             = 10.0                                           # Square 2D box → m_x = m_y = 1 gives clean 45°
+Ly                             = 10.0
+Lz                             = 1.0
+
+nxc                            = 32                                             # λ_oblique/dx ≈ 23 cells per wavelength
+nyc                            = 32
+nzc                            = 4
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                  MPI TOPOLOGY                              %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+XLEN                           = 1
+YLEN                           = 1
+ZLEN                           = 1
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                   PARTICLES                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# Cold electron-ion plasma at uniform density. m_i/m_e = 25.
+
+ns                  = 2
+
+rhoINIT             = 100.0         100.0                                       # ω_pi = √(rhoINIT·|qom|) = 10 → d_i = 0.1, k·d_i ≈ 0.089 (MHD)
+rhoINJECT           = 0.0           0.0
+
+npcelx              = 2             2
+npcely              = 2             2
+npcelz              = 2             2
+NpMaxNpRatio        = 5.0
+
+qom                 = -25.0         1.0                                         # Mass ratio 25 (electron / ion)
+
+uth                 = 0.02          0.01
+vth                 = 0.02          0.01
+wth                 = 0.02          0.01
+
+u0                  = 0.0           0.0
+v0                  = 0.0           0.0
+w0                  = 0.0           0.0
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                               BOUNDARY CONDITION                           %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+PERIODICX                      = 1
+PERIODICY                      = 1
+PERIODICZ                      = 1

@@ -6119,6 +6119,88 @@ void EMfields3D::init_AlfvenWave()
         init();  //! READ FROM RESTART
 }
 
+//* Oblique shear Alfvén wave with k = (k_x, k_y, 0) tilted off the guide field B0 = (B0x, 0, 0).
+//* Polarisation is forced to δB ⊥ k AND δB ⊥ B0; with k in the x-y plane and B0 along x,
+//* this leaves δB along z only:
+//*   δBz(x, y, 0) = δB · sin(k_x·x + k_y·y),  δBx = δBy = 0
+//* Particles get the Walen-relation drift δv_z = -(δB/B0)·v_A·sin(...) via
+//* Particles3D::oblique_alfven_seed → single forward shear-Alfvén branch only,
+//* no backward partner, no equilibration transient.
+//* Cold-MHD dispersion: ω = |k|·v_A·cos(θ_kB), where cos(θ_kB) = k_x/|k|.
+//* Purpose: stress 2-axis cross-rank halo paths (corner / edge / face-cell completion at the
+//* X+Y decomposition boundary). 1D Alfvén only exercises a single axis.
+//* input_param[0] = δB/B0x, input_param[1] = m_x, input_param[2] = m_y.
+void EMfields3D::init_ObliqueAlfvenWave()
+{
+    const Collective *col = &get_col();
+    const VirtualTopology3D *vct = &get_vct();
+    const Grid *grid = &get_grid();
+
+    const double dB_over_B0 = input_param[0];
+    const int    mx         = static_cast<int>(input_param[1]);
+    const int    my         = static_cast<int>(input_param[2]);
+    const double kx_wave    = 2.0 * M_PI * mx / Lx;
+    const double ky_wave    = 2.0 * M_PI * my / Ly;
+    const double k_mag      = sqrt(kx_wave*kx_wave + ky_wave*ky_wave);
+    const double dB         = dB_over_B0 * B0x;
+
+    if (restart_status == 0)
+    {
+        if (vct->getCartesian_rank() == 0)
+        {
+            const double theta_deg = atan2(ky_wave, kx_wave) * 180.0 / M_PI;
+            cout << "------------------------------------------" << endl;
+            cout << "  Initialising oblique shear Alfvén wave  " << endl;
+            cout << "------------------------------------------" << endl;
+            cout << "Guide B0x                        = " << B0x << endl;
+            cout << "δB/B0 (perturbation)             = " << dB_over_B0 << endl;
+            cout << "Modes (m_x, m_y)                 = (" << mx << ", " << my << ")" << endl;
+            cout << "(k_x, k_y)                       = (" << kx_wave << ", " << ky_wave << ")" << endl;
+            cout << "|k|                              = " << k_mag << endl;
+            cout << "θ_kB (deg, k vs B0)              = " << theta_deg << endl;
+            cout << "δB along z (⊥ k and ⊥ B0)        " << endl;
+            cout << "Walen-correct δv from oblique_alfven_seed → single forward branch ω = |k|·v_A·cos(θ_kB)" << endl;
+            cout << "------------------------------------------" << endl;
+        }
+
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    const double x_node = grid->getXN(i, j, k);
+                    const double y_node = grid->getYN(i, j, k);
+                    const double phase  = kx_wave * x_node + ky_wave * y_node;
+
+                    Ex[i][j][k] = 0.0;
+                    Ey[i][j][k] = 0.0;
+                    Ez[i][j][k] = 0.0;
+
+                    Bxn[i][j][k] = B0x;
+                    Byn[i][j][k] = B0y;
+                    Bzn[i][j][k] = B0z + dB * sin(phase);
+
+                    for (int is = 0; is < ns; is++)
+                        rhons[is][i][j][k] = rhoINIT[is] / FourPI;
+                }
+
+        grid->interpN2C(Bxc, Bxn);
+        grid->interpN2C(Byc, Byn);
+        grid->interpN2C(Bzc, Bzn);
+
+        communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+        for (int is = 0; is < ns; is++)
+            grid->interpN2C(rhocs, is, rhons);
+    }
+    else
+        init();  //! READ FROM RESTART
+}
+
 //* Whistler R-mode wave: guide field B0x along propagation direction with
 //* right-circularly-polarized transverse seed
 //*   δBy(x,0) = δB · cos(k·x),   δBz(x,0) = δB · sin(k·x)
