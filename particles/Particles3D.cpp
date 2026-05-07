@@ -252,13 +252,13 @@ void Particles3D::maxwellian(Field * EMf)
     }
 }
 
-/** Maxwellian + Walen-relation drift δv_z = -δB·sin(k_x x + k_y y)/√(4πρ_total).
- *  Pairs with EMfields3D::init_ObliqueAlfvenWave to seed a single forward-propagating
- *  shear-Alfvén wave (no backward partner, no equilibration transient). All species
- *  ride the same δv (it's a bulk MHD motion); the Walen amplitude reduces to
- *  δv = (δB/B0)·v_A. input_param convention matches init_ObliqueAlfvenWave:
- *    [0] = δB/B0x   [1] = m_x   [2] = m_y                                        */
-void Particles3D::oblique_alfven_seed(Field * EMf)
+/** Maxwellian + Walen-relation drift along whichever transverse axis carries δB in
+ *  the matching field init. Pairs with both init_AlfvenWave (m_y = 0 → δv along y)
+ *  and init_ObliqueAlfvenWave (m_y ≠ 0 → δv along z) to excite a single forward-
+ *  propagating shear-Alfvén branch (no backward partner, no equilibration transient).
+ *  All species ride the same δv (bulk MHD motion); amplitude is (δB/B0)·v_A.
+ *  input_param: [0] = δB/B0x   [1] = m_x   [2] = m_y                              */
+void Particles3D::alfven_walen_seed(Field * EMf)
 {
     long long seed = (vct->getCartesian_rank() + 1)*20 + ns;
     srand(seed);
@@ -285,9 +285,12 @@ void Particles3D::oblique_alfven_seed(Field * EMf)
     const double v_A     = (mass_density_norm > 0.0 && B0x_loc != 0.0)
                             ? B0x_loc / sqrt(mass_density_norm)
                             : 0.0;
-    //* Forward branch: ω = +k_∥·v_A → δv_z = -(δB/B0)·v_A · sin(phase). Sign matches
-    //* the linearised induction equation ∂B/∂t = ∇×(v×B0) for a forward wave.
-    const double dvz_amp = -dB_over_B0 * v_A;
+    //* Forward branch: ω = +k_∥·v_A → δv = -(δB/B0)·v_A · sin(phase) along the same
+    //* axis as δB. Sign from the linearised induction equation ∂B/∂t = ∇×(v×B0).
+    //* m_y == 0 (1D parallel, init_AlfvenWave seeds δBy)  → δv_y.
+    //* m_y != 0 (oblique,    init_ObliqueAlfvenWave δBz)  → δv_z.
+    const double dv_amp = -dB_over_B0 * v_A;
+    const bool   oblique = (my != 0);
 
     const double q_sgn = (qom / fabs(qom));
     const double q_factor = q_sgn * grid->getVOL() / npcel;
@@ -308,10 +311,12 @@ void Particles3D::oblique_alfven_seed(Field * EMf)
                             const double z = (kk + .5) * (dz / npcelz) + grid->getZN(i, j, k);
 
                             const double phase = kx_wave * x + ky_wave * y;
-                            const double dvz   = dvz_amp * sin(phase);
+                            const double dv    = dv_amp * sin(phase);
+                            const double dvy   = oblique ? 0.0 : dv;
+                            const double dvz   = oblique ? dv  : 0.0;
 
                             double u, v, w;
-                            sample_maxwellian(u, v, w, uth, vth, wth, u0, v0, w0 + dvz);
+                            sample_maxwellian(u, v, w, uth, vth, wth, u0, v0 + dvy, w0 + dvz);
 
                             create_new_particle(u, v, w, q, x, y, z);
                         }

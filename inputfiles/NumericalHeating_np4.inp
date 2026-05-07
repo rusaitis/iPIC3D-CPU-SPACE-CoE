@@ -1,0 +1,91 @@
+###! INPUT FILE — Numerical heating at np=4 X-decomposition
+#
+# Identical physics to NumericalHeating.inp; only difference is XLEN=4 to
+# stress cross-rank periodic-X moment halos in the heating-noise regime.
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                TEST CASE                                   %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Case                           = Maxwellian
+SimulationName                 = NumericalHeating_np4
+SaveDirName                    = data_NumericalHeating_np4
+RestartDirName                 = data_NumericalHeating_np4
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                    OUTPUT                                  %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+WriteMethod                    = phdf5
+output_data_precision          = DOUBLE
+
+restart_status                 = 0
+
+DiagnosticsOutputCycle         = 1
+RestartOutputCycle             = 0
+FieldOutputCycle               = 0
+ParticlesOutputCycle           = 0
+ParticlesDownsampleOutputCycle = 0
+ParticlesDownsampleFactor      = 1
+
+FieldOutputTag                 = E + B
+ParticlesOutputTag             = position + velocity + q
+ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                             PHYSICS and GEOMETRY                           %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+nparam                         = 0
+
+B0x                            = 0.0
+B0y                            = 0.0
+B0z                            = 0.0
+
+dt                             = 0.05
+ncycles                        = 400
+th                             = 0.5
+c                              = 1.0
+GMREStol                       = 1E-10
+
+Smooth                         = 0
+num_smoothings                 = 0
+SmoothCycle                    = 1
+
+MaxwellOperator                = lap_graddiv
+
+Lx                             = 1.0
+Ly                             = 0.5
+Lz                             = 0.5
+
+nxc                            = 16
+nyc                            = 8
+nzc                            = 8
+
+XLEN                           = 4                                              # Cross-rank periodic-X stress in heating-noise regime
+YLEN                           = 1
+ZLEN                           = 1
+
+ns                  = 2
+
+rhoINIT             = 100.0         100.0
+rhoINJECT           = 0.0           0.0
+
+npcelx              = 4             4
+npcely              = 4             4
+npcelz              = 4             4
+NpMaxNpRatio        = 5.0
+
+qom                 = -25.0         1.0
+
+uth                 = 0.005         0.001
+vth                 = 0.005         0.001
+wth                 = 0.005         0.001
+
+u0                  = 0.0           0.0
+v0                  = 0.0           0.0
+w0                  = 0.0           0.0
+
+PERIODICX                      = 1
+PERIODICY                      = 1
+PERIODICZ                      = 1

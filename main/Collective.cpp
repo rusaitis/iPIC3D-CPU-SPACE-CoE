@@ -1368,6 +1368,7 @@ Collective::Collective(int argc, char **argv)
     // Positional args are: [inputfile] [restart]
     vector<string> positional;
     string solver_override;
+    string stencil_override;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
@@ -1378,13 +1379,14 @@ Collective::Collective(int argc, char **argv)
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 string value = argv[i + 1];
                 if (flag == "-solver") solver_override = value;
+                else if (flag == "-stencil") stencil_override = value;
                 i++; // skip the value
             }
 
-            // iPIC3D only recognises -solver; PETSc flags (-ksp_*, -pc_*, -mat_*,
-            // -vec_*, -snes_*, -log_*, -options_*) are passed through to PETSc
-            // via KSPSetFromOptions.  Warn about anything else.
-            if (flag != "-solver"
+            // iPIC3D recognises -solver and -stencil; PETSc flags (-ksp_*, -pc_*,
+            // -mat_*, -vec_*, -snes_*, -log_*, -options_*) are passed through to
+            // PETSc via KSPSetFromOptions.  Warn about anything else.
+            if (flag != "-solver" && flag != "-stencil"
                 && flag.substr(0, 4) != "-ksp" && flag.substr(0, 3) != "-pc"
                 && flag.substr(0, 4) != "-mat" && flag.substr(0, 4) != "-vec"
                 && flag.substr(0, 5) != "-snes" && flag.substr(0, 4) != "-log"
@@ -1423,6 +1425,32 @@ Collective::Collective(int argc, char **argv)
             SolverType = "GMRES";
         else
             SolverType = solver_override; // let validation catch invalid values
+    }
+
+    // Command-line -stencil flag overrides input file StencilOrder. Accept
+    // "linear"/"cic" → Linear, "tsc"/"quadratic" → Quadratic. Reapplies the
+    // same validation that ReadInput ran on the file value.
+    if (!stencil_override.empty()) {
+        string lower;
+        for (char c : stencil_override) lower += tolower(c);
+        if (lower == "linear" || lower == "cic") {
+            StencilOrder = "Linear";
+            stencilOrderInt = 1;
+        } else if (lower == "tsc" || lower == "quadratic") {
+            StencilOrder = "Quadratic";
+            stencilOrderInt = 2;
+        } else {
+            cout << "ERROR: -stencil " << stencil_override
+                 << " not recognised. Valid: Linear|CIC, TSC|Quadratic." << endl;
+            MPI_Abort(MPI_COMM_WORLD, -1);
+        }
+        if (stencilOrderInt == 2 && PrecType == "Matrix") {
+            cout << "ERROR: -stencil TSC is incompatible with PrecType=Matrix. "
+                    "Use PrecType=None." << endl;
+            MPI_Abort(MPI_COMM_WORLD, -1);
+        }
+        cout << "  [-stencil] StencilOrder overridden to " << StencilOrder
+             << " (n_ghost = " << stencilOrderInt << ")" << endl;
     }
 
     init_derived_parameters();

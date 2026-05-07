@@ -326,8 +326,8 @@ int c_Solver::Init(int argc, char **argv)
                 else if (col->getCase()=="Maxwellian") 		                            particles[i].maxwellian(EMf);
                 else if (col->getCase()=="KHI_FLR")                                     particles[i].maxwellian_KHI_FLR(EMf);
                 else if (col->getCase()=="PlaneEMWave")                                 particles[i].maxwellian(EMf);
-                else if (col->getCase()=="AlfvenWave")                                  particles[i].maxwellian(EMf);
-                else if (col->getCase()=="ObliqueAlfvenWave")                           particles[i].oblique_alfven_seed(EMf);
+                else if (col->getCase()=="AlfvenWave")                                  particles[i].alfven_walen_seed(EMf);
+                else if (col->getCase()=="ObliqueAlfvenWave")                           particles[i].alfven_walen_seed(EMf);
                 else if (col->getCase()=="WhistlerPacket")                              particles[i].maxwellian(EMf);
                 else                                  		                            particles[i].maxwellian(EMf);
             }

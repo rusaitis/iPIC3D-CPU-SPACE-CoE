@@ -68,7 +68,7 @@ dt                             = 0.05
 ncycles                        = 600
 th                             = 0.5
 c                              = 1.0
-GMREStol                       = 1E-15
+GMREStol                       = 1E-10                                          # γ_max growth-rate test at 20% tol — 1e-10 plenty (1e-15 made TSC GMRES dominate runtime)
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                   SMOOTHING                                %

@@ -6051,11 +6051,12 @@ void EMfields3D::init_PlaneEMWave()
 }
 
 //* Traveling shear Alfvén wave: guide field B0x along propagation direction
-//* with sinusoidal transverse seed δBy(x,0) = δB·sin(kx). No particle drift —
-//* wave forms self-consistently as a forward+backward shear-Alfvén mode pair,
-//* both at ω = k·v_A. Visual signature: δBy(x,t) circulates the periodic box
-//* every L/v_A.
-//* input_param[0] = δB/B0x (relative perturbation), input_param[1] = mode m.
+//* with sinusoidal transverse seed δBy(x,0) = δB·sin(kx). Pairs with
+//* Particles3D::alfven_walen_seed (m_y = 0 in input_param[2]) for δv_y =
+//* -(δB/B0)·v_A·sin(kx) → single forward shear-Alfvén branch at ω = k·v_A.
+//* Without the Walen δv the B-only seed gives a forward+backward standing
+//* pair; CIC tolerates it but TSC damps it before ω can be extracted.
+//* input_param[0] = δB/B0x, input_param[1] = mode m_x, input_param[2] = m_y (=0).
 void EMfields3D::init_AlfvenWave()
 {
     const Collective *col = &get_col();

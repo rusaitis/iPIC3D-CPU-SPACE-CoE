@@ -71,11 +71,14 @@ class Particles3D:public Particles3Dcomm
     //* Kelvin--Helmholtz Instability (Finite Larmor Radius; Cerri 2013, https://doi.org/10.1063/1.4828981)
     void maxwellian_KHI_FLR(Field* EMf);
 
-    //* Maxwellian + spatially-varying Walen-relation drift δv_z = -δB·sin(k_x x + k_y y)/√(4πρ_total).
-    //* Combined with init_ObliqueAlfvenWave's δB seed, this excites a single forward-propagating
-    //* shear-Alfvén branch instead of a forward+backward standing pair, eliminating the equilibration
-    //* transient that would otherwise pump energy into spurious modes at oblique k.
-    void oblique_alfven_seed(Field * EMf);
+    //* Maxwellian + Walen-relation drift δv = -(δB/B0)·v_A·sin(k_x x + k_y y) along the same
+    //* transverse axis as the matching field-init's δB. Selects axis from input_param[2]:
+    //*   m_y == 0 → 1D parallel (k along x, δB and δv along y) — pairs with init_AlfvenWave.
+    //*   m_y != 0 → oblique (k in xy-plane, δB and δv along z) — pairs with init_ObliqueAlfvenWave.
+    //* Excites a single forward-propagating shear-Alfvén branch (no backward partner, no
+    //* equilibration transient). Required at TSC: B-only seeds give a forward+backward standing
+    //* pair that damps before the FFT can lock onto ω = k·v_A·cos(θ_kB).
+    void alfven_walen_seed(Field * EMf);
 
     /** pitch_angle_energy initialization (Assume B on z only) for test particles */
     void pitch_angle_energy(Field * EMf);

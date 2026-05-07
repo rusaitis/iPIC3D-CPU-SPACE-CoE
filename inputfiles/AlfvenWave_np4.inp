@@ -1,11 +1,15 @@
 ###! INPUT FILE — Traveling shear Alfvén wave (Test 2: BC stress)
 #
-# Periodic box, guide field B0x = B0 along propagation direction. B-only seed:
+# Periodic box, guide field B0x = B0 along propagation direction. Walen-correct
+# seed pairs δBy with δv_y = -(δB/B0)·v_A so the system starts on a single
+# forward shear-Alfvén branch (Particles3D::alfven_walen_seed sees m_y=0 in
+# input_param[2] and applies δv along y to match init_AlfvenWave's δBy):
 #   δBy(x, 0) = δB · sin(2π m x / Lx),   δBz = 0
-# No particle drift — the wave forms self-consistently as a forward + backward
-# shear-Alfvén pair, both at ω = k · v_A (distinguishable by phase, identical
-# in dispersion). Visual signature: δBy(x, t) circulates the periodic box every
-# L / v_A.
+#   δv_y(x, 0) = -(δB/B0)·v_A · sin(...) ← Walen, forward branch only
+# Without the Walen δv the B-only seed produces a forward+backward standing
+# pair; CIC tolerates it (the FFT can still find ω from the survivor), but at
+# TSC the standing-wave damps before ω can be extracted. Visual signature:
+# δBy(x, t) circulates the periodic box every L / v_A.
 #
 # Domain: Lx = 10 (≈ 1.6 d_i in ion-skin units), m = 1 → λ = 10, k = 2π / 10.
 # Plasma: e-i, mass ratio m_i/m_e = 25 (qom_e = -25, qom_i = +1), rhoINIT = 1
@@ -52,11 +56,12 @@ ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 ###? Custom parameters (max. 10)
-nparam                         = 2
-custom_parameters              = 0.05        1
+nparam                         = 3
+custom_parameters              = 0.20        1           0
 
 #* custom_parameter 1 → δB / B0x  (relative perturbation amplitude)
-#* custom_parameter 2 → Mode m (k = 2π m / Lx)
+#* custom_parameter 2 → Mode m_x  (k_x = 2π m_x / Lx)
+#* custom_parameter 3 → Mode m_y  (must be 0 for 1D parallel — selects δv axis = y in alfven_walen_seed)
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                         ELECTRIC and MAGNETIC FIELD                        %
@@ -74,7 +79,7 @@ dt                             = 0.25
 ncycles                        = 800                                            # 4 wave periods
 th                             = 0.5
 c                              = 1.0
-GMREStol                       = 1E-15
+GMREStol                       = 1E-10                                          # ω measurement at 5% tolerance — 1e-10 is plenty (1e-15 ECSIM-energy-conservation tol slows TSC GMRES to 150+ iter/cycle for negligible benefit here)
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                   SMOOTHING                                %
@@ -94,9 +99,9 @@ Lx                             = 10.0                                           
 Ly                             = 1.0
 Lz                             = 1.0
 
-nxc                            = 64
-nyc                            = 4
-nzc                            = 4
+nxc                            = 32                                             # 32 cells per wavelength — overkill (was 64 + ppc=64 → too heavy at TSC)
+nyc                            = 8                                               # passive (1D wave) — extra cells boost particle count for shot-noise floor
+nzc                            = 8
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                  MPI TOPOLOGY                              %
@@ -116,9 +121,9 @@ ns                  = 2
 rhoINIT             = 100.0         100.0                                       # ω_pi = √(rhoINIT·|qom|) = 10 → d_i = 0.1, k·d_i ≈ 0.063 (MHD)
 rhoINJECT           = 0.0           0.0
 
-npcelx              = 4             4
-npcely              = 4             4
-npcelz              = 4             4
+npcelx              = 2             2
+npcely              = 2             2
+npcelz              = 2             2
 NpMaxNpRatio        = 5.0
 
 qom                 = -25.0         1.0                                         # Mass ratio 25 (electron / ion)
