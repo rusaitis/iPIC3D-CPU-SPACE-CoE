@@ -86,6 +86,10 @@ def main():
     ap.add_argument('--window', default=None,
                     help='Fit window as "i_start,i_end" diagnostic-row indices (default: auto)')
     ap.add_argument('--label', default=None, help='Test label for the printout')
+    ap.add_argument('--save-plot', default=None, dest='save_plot',
+                    help='Optional path to save log(E)-vs-t diagnostic PNG.')
+    ap.add_argument('--light', action='store_true',
+                    help='Use light theme for the saved plot (default dark).')
     args = ap.parse_args()
 
     try:
@@ -157,6 +161,64 @@ def main():
     print('─' * 56)
     print(f"  {'PASS' if ok else 'FAIL'}")
     print()
+
+    if args.save_plot:
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from plot_theme import apply_theme
+        except ImportError as e:
+            print(f"  WARNING: --save-plot disabled, missing dependency: {e}")
+        else:
+            theme = apply_theme(args)
+            measured_color = '#f38ba8' if theme.mode == 'dark' else '#EE6677'
+            theory_color   = '#a6e3a1' if theme.mode == 'dark' else '#228833'
+
+            fig, ax = plt.subplots(1, 1, figsize=(8.5, 5.0),
+                                    constrained_layout=True)
+
+            # Skip cycle 0 (often clipped to log = -690 from initial near-zero E
+            # field); set a sensible y-window around the fit segment + saturation.
+            i_plot0 = max(1, i_start // 4)
+            ax.plot(t[i_plot0:], log_energy[i_plot0:],
+                    color=theme.text_color, lw=1.1,
+                    label='log E-field energy', alpha=0.85)
+            ax.axvspan(t[i_start], t[i_end - 1], color=theory_color, alpha=0.18,
+                       label=f'fit window  (cyc {int(cycles[i_start])}..{int(cycles[i_end-1])})')
+
+            t_window = t[i_start:i_end]
+            fit_intercept = np.polyfit(t_window, log_energy[i_start:i_end], 1)[1]
+            ax.plot(t_window, slope * t_window + fit_intercept, color=measured_color, lw=2.0,
+                    label=f'fit  2g_meas = {slope:.4g}  (g_meas = {gamma_measured:.4g})')
+
+            theory_slope = 2.0 * gamma_expected
+            ax.plot(t_window, theory_slope * t_window + fit_intercept, color=theory_color, lw=1.8, ls='--',
+                    label=f'theory  2g_th = {theory_slope:.4g}  (g_th = {gamma_expected:.4g})')
+
+            # Zoom y to the visible curve only.
+            ymin = float(log_energy[i_plot0:].min())
+            ymax = float(log_energy[i_plot0:].max())
+            pad = 0.05 * max(1.0, ymax - ymin)
+            ax.set_ylim(ymin - pad, ymax + pad)
+
+            ax.set_xlabel('t [code time]')
+            ax.set_ylabel('log E-field energy')
+            ax.legend(loc='lower right', fontsize=9)
+            ax.text(0.02, 0.98,
+                    f'|Δγ/γ| = {rel:.2e}\nω_pe = {omega_pe:.4g}\nv_drift = {v_drift:.4g}',
+                    transform=ax.transAxes, va='top', fontsize=9,
+                    bbox=dict(facecolor=theme.box_face,
+                              edgecolor=theme.box_edge,
+                              alpha=theme.box_alpha))
+
+            verdict = 'PASS' if ok else 'FAIL'
+            fig.suptitle(f'{label}  —  |Δγ/γ| = {rel:.2e}  [{verdict}]', fontsize=12)
+            fig.savefig(args.save_plot, dpi=140)
+            plt.close(fig)
+            print(f"  Saved diagnostic plot → {args.save_plot}")
+            print()
+
     sys.exit(0 if ok else 1)
 
 

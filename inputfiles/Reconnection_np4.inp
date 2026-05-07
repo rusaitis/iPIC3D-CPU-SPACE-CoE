@@ -1,0 +1,153 @@
+###! INPUT FILE — Magnetic reconnection (Test 7: GEM-challenge scaled-down)
+#
+# A scaled-down version of the Birn et al. (2001) GEM challenge double-Harris
+# current sheet, sized to fit in the physics-validation suite (~5-15 min).
+# Triggers fast collisionless reconnection at the lower X-point seeded by the
+# canonical cos(2πx/Lx)·sin(πy/Ly) perturbation in init_double_Harris().
+#
+# Theory comparisons (analyze_reconnection.py):
+#
+#   1. Reconnected flux ψ(t) = max_x A_z(x, y_X) - min_x A_z(x, y_X)
+#      where A_z(x, y_X) = -∫₀^x B_y(x', y_X) dx' along the lower sheet
+#      midline y_X = Ly/4.  Should grow monotonically from the perturbation
+#      seed, transition through a linear phase, and saturate.
+#
+#   2. Peak reconnection rate dψ/dt | (B0 · v_A)  ≈  0.1 - 0.2
+#      The GEM-challenge consensus value across 5 different methods (full PIC,
+#      hybrid, two-fluid, Hall-MHD, resistive-MHD with Hall) is ≈ 0.1-0.2.
+#      iPIC3D as full kinetic should sit near the upper bound.
+#
+#   3. Magnetic energy decreases monotonically once linear phase begins,
+#      converted to KE + thermal energy (the heating signature).
+#
+# Setup choices for runtime:
+#   B0x = 0.0973  → ω_ci_i = 0.0973, ω_pe = √(rhoINIT·|qom|) = √25 = 5
+#   Lx = 20, Ly = 10 (smaller than canonical 30×30 d_i but resolved)
+#   m_i/m_e = 25 (vs canonical 256 — keeps electron timescale tractable)
+#   nxc=64, nyc=32 → dx ≈ 0.31 d_i (matches Birn et al. resolution)
+#   ppc 4×4 × 4 species = 64 ppc (low-noise enough for clean ψ(t))
+#   dt = 0.125, ncycles = 1500 → t = 187 code = 18.2 Ω_ci⁻¹
+#       (peak rate typically at ~15-20 Ω_ci⁻¹; saturation at ~30+)
+#
+# Pass criterion: peak dψ/dt / (B0·v_A) ∈ [0.05, 0.3].  Wide window — this
+# is a regime check, not a high-precision measurement (no closed-form ω_max).
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                TEST CASE                                   %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Case                           = Double_Harris
+SimulationName                 = Reconnection_np4
+SaveDirName                    = data_Reconnection_np4
+RestartDirName                 = data_Reconnection_np4
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                    OUTPUT                                  %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+WriteMethod                    = phdf5
+output_data_precision          = DOUBLE
+
+restart_status                 = 0
+
+DiagnosticsOutputCycle         = 5
+RestartOutputCycle             = 0
+FieldOutputCycle               = 25                                             # 60 snapshots over 1500 cycles
+ParticlesOutputCycle           = 0
+ParticlesDownsampleOutputCycle = 0
+ParticlesDownsampleFactor      = 1
+
+FieldOutputTag                 = E + B
+ParticlesOutputTag             = position + velocity + q
+ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                             PHYSICS and GEOMETRY                           %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+###* input_param[0] = perturbation amplitude (×B0x)
+###* input_param[1] = current-sheet half-thickness δ (in d_i)
+nparam                         = 2
+custom_parameters              = 0.1         0.5
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                         ELECTRIC and MAGNETIC FIELD                        %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+B0x                            = 0.0973                                         # Asymptotic reconnecting field (matches Birn 2001)
+B0y                            = 0.0
+B0z                            = 0.0                                            # No guide field (anti-parallel reconnection)
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                     TIME                                   %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+dt                             = 0.125
+ncycles                        = 1500                                           # ~18 Ω_ci⁻¹ — past peak reconnection
+th                             = 0.5
+c                              = 1.0
+GMREStol                       = 1E-10                                          # Reconnection-rate test tolerates GMRES at 1e-10
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                   SMOOTHING                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Smooth                         = 0                                              # Off — measure raw reconnection physics
+num_smoothings                 = 0
+SmoothCycle                    = 1
+
+MaxwellOperator                = lap_graddiv
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                    BOX SIZE                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Lx                             = 20.0                                           # Length along reconnection-outflow direction
+Ly                             = 10.0                                           # Length perpendicular to current sheet
+Lz                             = 1.0                                            # Quasi-2D
+
+nxc                            = 64                                             # dx = 0.31 d_i (≈ Birn et al. resolution)
+nyc                            = 32                                             # dy = 0.31 d_i
+nzc                            = 1
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                  MPI TOPOLOGY                              %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+XLEN                           = 2
+YLEN                           = 2
+ZLEN                           = 1
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                                   PARTICLES                                %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# 4 species: 2 (electron + ion) pairs, one per Harris sheet.  Mass ratio 25
+# (vs canonical 256) for tractable electron timescale.
+
+ns                  = 4
+
+rhoINIT             = 1.0           1.0             1.0             1.0
+rhoINJECT           = 0.0           0.0             0.0             0.0
+
+npcelx              = 4             4               4               4           # ppc=64/cell
+npcely              = 4             4               4               4
+npcelz              = 1             1               1               1
+NpMaxNpRatio        = 5.0
+
+qom                 = -25.0         1.0            -25.0            1.0         # m_i/m_e = 25
+
+uth                 = 0.045         0.0125          0.045           0.0125      # Harris equilibrium thermal velocities
+vth                 = 0.045         0.0125          0.045           0.0125
+wth                 = 0.045         0.0125          0.045           0.0125
+
+u0                  = 0.0           0.0             0.0             0.0
+v0                  = 0.0           0.0             0.0             0.0
+w0                  = 0.0           0.0             0.0             0.0
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# %                               BOUNDARY CONDITION                           %
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+PERIODICX                      = 1
+PERIODICY                      = 1
+PERIODICZ                      = 1

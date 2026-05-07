@@ -94,6 +94,10 @@ def main():
     ap.add_argument('--tol', type=float, default=0.05,
                     help='Pass tolerance |Δω/ω|. Default 0.05.')
     ap.add_argument('--label', default=None, help='Test label for the printout')
+    ap.add_argument('--save-plot', default=None, dest='save_plot',
+                    help='Optional path to save a 2-panel theory-agreement diagnostic PNG.')
+    ap.add_argument('--light', action='store_true',
+                    help='Use light theme for the saved plot (default dark).')
     args = ap.parse_args()
 
     try:
@@ -118,6 +122,13 @@ def main():
         i_probe, j_probe, k_probe = (int(x) for x in args.probe.split(','))
 
     sample_dt = sim['dt'] * (cycles[1] - cycles[0])
+
+    # Branch-local outputs — declared up front so the post-extraction plot
+    # block can reference them without Pyright "possibly unbound" warnings.
+    series = spectrum = freqs = None
+    mode_series = phase = t_fit = None
+    peak = 0
+    N = 0
 
     if args.method == 'fft':
         series = np.empty(len(cycles))
@@ -210,6 +221,114 @@ def main():
     print('─' * 56)
     print(f"  {'PASS' if ok else 'FAIL'}")
     print()
+
+    if args.save_plot:
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from plot_theme import apply_theme
+        except ImportError as e:
+            print(f"  WARNING: --save-plot disabled, missing dependency: {e}")
+        else:
+            theme = apply_theme(args)
+            measured_color = '#f38ba8' if theme.mode == 'dark' else '#EE6677'
+            theory_color   = '#a6e3a1' if theme.mode == 'dark' else '#228833'
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5),
+                                            constrained_layout=True)
+
+            if args.method == 'fft':
+                assert series is not None and spectrum is not None and freqs is not None
+                t_full = np.arange(len(series)) * sample_dt
+                # LSQ fit amplitude+phase against theory frequency: shows visual ω agreement.
+                cos_b = np.cos(omega_expected * t_full)
+                sin_b = np.sin(omega_expected * t_full)
+                M = np.column_stack([cos_b, sin_b])
+                coef, *_ = np.linalg.lstsq(M, series, rcond=None)
+                theory_curve = coef[0] * cos_b + coef[1] * sin_b
+
+                ax1.plot(t_full, series, color=theme.text_color, lw=1.1,
+                         label='measured probe', alpha=0.9)
+                ax1.plot(t_full, theory_curve, color=theory_color, lw=1.6, ls='--',
+                         label=f'theory ω={omega_expected:.4g}')
+                ax1.set_xlabel('t [code time]')
+                ax1.set_ylabel(f'δ{args.field}{args.component} (probe)')
+                ax1.set_title('Probe time series')
+                ax1.legend(loc='upper right', fontsize=9)
+
+                norm = freqs / omega_expected if omega_expected else freqs
+                ax2.plot(norm, spectrum, color=theme.text_color, lw=1.2)
+                ax2.axvline(1.0, color=theory_color, lw=1.4, ls='--',
+                            label=f'ω_theory = {omega_expected:.4g}')
+                ax2.plot(omega_measured / omega_expected if omega_expected else 0,
+                         spectrum[peak], 'o', color=measured_color, ms=8,
+                         label=f'ω_measured = {omega_measured:.4g}')
+                ax2.set_xlabel('ω / ω_theory')
+                ax2.set_ylabel('|FFT[probe]|')
+                ax2.set_title('Frequency spectrum')
+                xmax = max(2.5, 1.6 * (omega_measured / omega_expected if omega_expected else 1.0))
+                ax2.set_xlim(0, xmax)
+                ax2.legend(loc='upper right', fontsize=9)
+                bin_w = freqs[1] if len(freqs) > 1 else float('nan')
+                ax2.text(0.02, 0.96,
+                         f'FFT bin Δω = {bin_w:.4g}\n|Δω/ω| = {rel:.2e}',
+                         transform=ax2.transAxes, va='top', fontsize=9,
+                         bbox=dict(facecolor=theme.box_face,
+                                   edgecolor=theme.box_edge,
+                                   alpha=theme.box_alpha))
+            else:  # phase method
+                assert mode_series is not None and phase is not None and t_fit is not None
+                t_full = np.arange(len(cycles)) * sample_dt
+                ax1.plot(t_full, np.abs(mode_series),
+                         color=theme.text_color, lw=1.2)
+                ax1.axvspan(0, t_fit[-1], alpha=0.18, color=theory_color,
+                            label=f'fit window (N={N})')
+                ax1.set_xlabel('t [code time]')
+                ax1.set_ylabel(f'|F_k(δ{args.field}{args.component})|')
+                ax1.set_title(f'Spatial-FFT mode amplitude (m_x={mode_x}, m_y={mode_y})')
+                if (np.abs(mode_series) > 0).all():
+                    ax1.set_yscale('log')
+                ax1.legend(loc='upper right', fontsize=9)
+
+                _, intercept = np.polyfit(t_fit, phase[:N], 1)
+                ax2.plot(t_full, phase, color=theme.text_color, lw=1.1,
+                         label='unwrapped phase', alpha=0.85)
+                fit_slope = np.polyfit(t_fit, phase[:N], 1)[0]
+                theory_slope = -omega_expected if fit_slope < 0 else omega_expected
+                ax2.plot(t_fit, fit_slope * t_fit + intercept, color=measured_color,
+                         lw=2.0, label=f'fit slope = {fit_slope:.4g}')
+                ax2.plot(t_fit, theory_slope * t_fit + intercept, color=theory_color,
+                         lw=1.8, ls='--', label=f'theory slope = {theory_slope:.4g}')
+                ax2.set_xlabel('t [code time]')
+                ax2.set_ylabel('unwrapped phase [rad]')
+                ax2.set_title('Phase-slope fit')
+                ax2.legend(loc='best', fontsize=9)
+                # Zoom x to a few fit-windows so the slope match is visible —
+                # phase past the damping point is noise, not wave physics.
+                t_zoom = max(5 * t_fit[-1], 4 * sample_dt * 5)
+                xmax_zoom = min(float(t_full[-1]), t_zoom)
+                ax2.set_xlim(0, xmax_zoom)
+                # Match y to the visible x window so the fit slope isn't squashed.
+                visible = phase[t_full <= xmax_zoom]
+                if len(visible) > 1:
+                    pad = 0.10 * max(1.0, abs(visible.max() - visible.min()))
+                    ax2.set_ylim(float(visible.min()) - pad,
+                                 float(visible.max()) + pad)
+                ax2.text(0.02, 0.96, f'|Δω/ω| = {rel:.2e}',
+                         transform=ax2.transAxes, va='top', fontsize=9,
+                         bbox=dict(facecolor=theme.box_face,
+                                   edgecolor=theme.box_edge,
+                                   alpha=theme.box_alpha))
+
+            verdict = 'PASS' if ok else 'FAIL'
+            fig.suptitle(f'{label}  ({args.method})  —  |Δω/ω| = {rel:.2e}  [{verdict}]',
+                         fontsize=12)
+            fig.savefig(args.save_plot, dpi=140)
+            plt.close(fig)
+            print(f"  Saved diagnostic plot → {args.save_plot}")
+            print()
+
     sys.exit(0 if ok else 1)
 
 

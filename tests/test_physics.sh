@@ -9,6 +9,7 @@
 #   D. Whistler R-mode wave       ω = ω_R(k)             (analyze_dispersion.py)
 #   E. Oblique shear Alfvén wave  ω = k·v_A·cos(θ_kB)    (analyze_dispersion.py)
 #   F. Numerical heating          peak(EE)/KE₀ < tol     (analyze_heating.py)
+#   G. Magnetic reconnection      dψ/dt ~ 0.1·B0·v_A     (analyze_reconnection.py)
 #
 # Tests A–D run at np=1 (single-rank periodic-self halo path) and np=4
 # X-decomp (cross-rank periodic halo on one axis). Test E runs at np=1 and
@@ -23,11 +24,10 @@
 # The unification work guarantees the halo paths produce equivalent physics;
 # this suite checks the guarantee against analytical / theoretical references.
 #
-# Runtime (Apple silicon, 6 cores): ~25 min at default CIC stencil (Linear).
-# Add STENCIL=TSC for n_ghost=2 / Quadratic B-spline — ~6 hours; whistler and
-# twostream dominate (524K and 393K particles/rank, respectively). Designed for
-# nightly / pre-merge CI, not the inner loop. Use tests/test_energy.sh +
-# `pixi run test` for that.
+# Runtime (Apple silicon, 6 cores): ~30-35 min at default CIC stencil (Linear).
+# Add STENCIL=TSC for n_ghost=2 / Quadratic B-spline — ~7 hours; whistler,
+# twostream, reconnection dominate. Designed for nightly / pre-merge CI,
+# not the inner loop. Use tests/test_energy.sh + `pixi run test` for that.
 
 set -euo pipefail
 
@@ -78,8 +78,16 @@ run_sim oblique_alf_np1  1 ObliqueAlfvenWave.inp     "$REPO/data_ObliqueAlfvenWa
 run_sim oblique_alf_np4  4 ObliqueAlfvenWave_np4.inp "$REPO/data_ObliqueAlfvenWave_np4"
 run_sim heating_np1      1 NumericalHeating.inp      "$REPO/data_NumericalHeating"
 run_sim heating_np4      4 NumericalHeating_np4.inp  "$REPO/data_NumericalHeating_np4"
+run_sim reconnection_np1 1 Reconnection.inp          "$REPO/data_Reconnection"
+run_sim reconnection_np4 4 Reconnection_np4.inp      "$REPO/data_Reconnection_np4"
 
 # ── Run analyzers, capture pass/fail ──────────────────────────────────────
+
+# Theory-agreement plots (--save-plot) and propagation movies are best-effort
+# add-ons: failures here do NOT change the test verdict.
+OUTPLOTS="$OUTROOT/plots"
+OUTMOVIES="$OUTROOT/movies"
+mkdir -p "$OUTPLOTS" "$OUTMOVIES"
 
 declare -a RESULTS
 fail=0
@@ -87,16 +95,31 @@ fail=0
 check() {
     local label=$1 cmd=$2
     local out
+    # All analyzers accept --save-plot; appending here keeps call sites tidy.
+    cmd="$cmd --save-plot $OUTPLOTS/${label}.png"
     if out=$(eval "$cmd" 2>&1); then
         local tag="PASS"
     else
         local tag="FAIL"
         fail=1
     fi
-    # Extract |Δω/ω|, |Δγ/γ|, or |EE|/KE₀ value (after the colon, before "tol =")
+    # Extract the headline number for the summary (different per analyzer):
+    #   dispersion → |Δω/ω|,  growth → |Δγ/γ|,  heating → |EE|/KE₀,
+    #   reconnection → "peak / (B0·v_A)"
     local rel
-    rel=$(echo "$out" | grep -E '\|Δω/ω\||\|Δγ/γ\||\|EE\|/KE' | sed -E 's/.*: *([0-9.e+-]+).*/\1/' | head -1)
+    rel=$(echo "$out" | grep -E '\|Δω/ω\||\|Δγ/γ\||\|EE\|/KE|peak / \(B0' | sed -E 's/.*: *([0-9.e+-]+).*/\1/' | head -1)
     RESULTS+=("$tag|$label|$rel")
+}
+
+# Generate a propagation movie (best-effort — never fails the suite).
+movie() {
+    local label=$1 outdir=$2 inp=$3 field=$4 component=$5
+    $PYTHON scripts/movie_physics_test.py "$outdir" \
+        --inp "inputfiles/$inp" \
+        --field "$field" --component "$component" \
+        -o "$OUTMOVIES/${label}.mp4" \
+        > "$OUTMOVIES/${label}.log" 2>&1 || \
+        echo "  WARNING: movie generation for ${label} failed (see $OUTMOVIES/${label}.log)"
 }
 
 check "plane_em_np1"  "$PYTHON scripts/analyze_dispersion.py data_PlaneEMWave --inp inputfiles/PlaneEMWave.inp --field E --component y --expected 'c*k' --tol 0.02"
@@ -109,8 +132,26 @@ check "whistler_np1"  "$PYTHON scripts/analyze_dispersion.py data_WhistlerPacket
 check "whistler_np4"  "$PYTHON scripts/analyze_dispersion.py data_WhistlerPacket_np4 --inp inputfiles/WhistlerPacket_np4.inp --field B --component y --expected 'k**2*c**2*omega_ce/(omega_pe**2 + k**2*c**2)' --tol 0.10"
 check "oblique_alf_np1" "$PYTHON scripts/analyze_dispersion.py data_ObliqueAlfvenWave --inp inputfiles/ObliqueAlfvenWave.inp --field B --component z --method phase --phase-fit-points 5 --expected 'k*v_A*cos_kB' --tol 0.05"
 check "oblique_alf_np4" "$PYTHON scripts/analyze_dispersion.py data_ObliqueAlfvenWave_np4 --inp inputfiles/ObliqueAlfvenWave_np4.inp --field B --component z --method phase --phase-fit-points 5 --expected 'k*v_A*cos_kB' --tol 0.05"
+# Heating: --compare overlays the np=1 curve onto the np=4 plot for visual cross-check
 check "heating_np1"    "$PYTHON scripts/analyze_heating.py data_NumericalHeating --tol 0.05"
-check "heating_np4"    "$PYTHON scripts/analyze_heating.py data_NumericalHeating_np4 --tol 0.05"
+check "heating_np4"    "$PYTHON scripts/analyze_heating.py data_NumericalHeating_np4 --tol 0.05 --compare data_NumericalHeating --compare-label np=1"
+# Reconnection: peak dψ/dt / (B0·v_A) ∈ [0.05, 0.30] — GEM-challenge consensus band
+check "reconnection_np1" "$PYTHON scripts/analyze_reconnection.py data_Reconnection --inp inputfiles/Reconnection.inp"
+check "reconnection_np4" "$PYTHON scripts/analyze_reconnection.py data_Reconnection_np4 --inp inputfiles/Reconnection_np4.inp"
+
+# ── Movies (only tests with FieldOutputCycle > 0) ────────────────────────
+echo "Generating propagation movies (best-effort) → $OUTMOVIES/"
+movie "plane_em_np1"     data_PlaneEMWave         PlaneEMWave.inp        E y
+movie "plane_em_np4"     data_PlaneEMWave_np4     PlaneEMWave_np4.inp    E y
+movie "alfven_np1"       data_AlfvenWave          AlfvenWave.inp         B y
+movie "alfven_np4"       data_AlfvenWave_np4      AlfvenWave_np4.inp     B y
+movie "whistler_np1"     data_WhistlerPacket      WhistlerPacket.inp     B y
+movie "whistler_np4"     data_WhistlerPacket_np4  WhistlerPacket_np4.inp B y
+movie "oblique_alf_np1"  data_ObliqueAlfvenWave      ObliqueAlfvenWave.inp     B z
+movie "oblique_alf_np4"  data_ObliqueAlfvenWave_np4  ObliqueAlfvenWave_np4.inp B z
+# Reconnection: 2D xy slice of B_y reveals the islands and X-line collapse.
+movie "reconnection_np1" data_Reconnection           Reconnection.inp          B y
+movie "reconnection_np4" data_Reconnection_np4       Reconnection_np4.inp      B y
 
 # ── Summary table ────────────────────────────────────────────────────────
 
@@ -129,6 +170,9 @@ if [[ $fail -eq 0 ]]; then
 else
     echo "  FAILED — see logs in $OUTROOT/"
 fi
+n_plots=$(find "$OUTPLOTS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
+n_movies=$(find "$OUTMOVIES" -maxdepth 1 -name '*.mp4' 2>/dev/null | wc -l | tr -d ' ')
+echo "  artifacts: $n_plots plots → $OUTPLOTS,  $n_movies movies → $OUTMOVIES"
 echo
 
 exit $fail
