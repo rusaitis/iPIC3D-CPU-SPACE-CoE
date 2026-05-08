@@ -117,6 +117,11 @@ public:
     //* Initialise plane electromagnetic wave (vacuum or near-vacuum). δEy + δBz=δEy/c sinusoid → forward c-wave
     void init_PlaneEMWave();
 
+    //* Initialise longitudinal Langmuir wave for Landau-damping test. δEx=E0·cos(kx) seed, B=0,
+    //* uniform Maxwellian particles. Couples directly to the longitudinal eigenmode at ω≈ω_pe·√(1+3k²λ_D²)
+    //* with collisionless damping rate γ_L from the plasma dispersion function Z(ξ).
+    void init_LangmuirWave();
+
     //* Initialise traveling shear Alfvén wave. B0x guide + δBy=δB·sin(kx) seed → ω=k·v_A (forward+backward pair)
     void init_AlfvenWave();
 

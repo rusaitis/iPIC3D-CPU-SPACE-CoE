@@ -65,3 +65,4 @@ test-ksp-sweep = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --cy
 
 [dependencies]
 petsc4py = ">=3.22.2,<4"
+scipy = ">=1.17.1,<2"

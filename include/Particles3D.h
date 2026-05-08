@@ -80,6 +80,14 @@ class Particles3D:public Particles3Dcomm
     //* pair that damps before the FFT can lock onto ω = k·v_A·cos(θ_kB).
     void alfven_walen_seed(Field * EMf);
 
+    //* Particle init for Landau damping. Uniform Maxwellian sample plus a longitudinal
+    //* eigenmode seed: position shift  x_i → x_i + (A/k)·cos(k·x_i)  AND velocity shift
+    //* u_i → u_i + (ω_r·A/k)·sin(k·x_i) selecting the FORWARD-propagating Langmuir
+    //* branch (no backward partner, no |cos(ω_r t)| modulation). Equivalent to
+    //* alfven_walen_seed for the longitudinal-electrostatic mode; both excite a single
+    //* damping eigenmode rather than a standing wave.
+    void langmuir_seed(Field * EMf);
+
     /** pitch_angle_energy initialization (Assume B on z only) for test particles */
     void pitch_angle_energy(Field * EMf);
     /** Force Free initialization (JxB=0) for particles */

@@ -233,6 +233,7 @@ int c_Solver::Init(int argc, char **argv)
             else if (col->getCase()=="TaylorGreen")             EMf->initTaylorGreen();
             else if (col->getCase()=="KHI_FLR")                 EMf->init_KHI_FLR();
             else if (col->getCase()=="PlaneEMWave")             EMf->init_PlaneEMWave();
+            else if (col->getCase()=="LangmuirWave")            EMf->init_LangmuirWave();
             else if (col->getCase()=="AlfvenWave")              EMf->init_AlfvenWave();
             else if (col->getCase()=="ObliqueAlfvenWave")       EMf->init_ObliqueAlfvenWave();
             else if (col->getCase()=="WhistlerPacket")          EMf->init_WhistlerPacket();
@@ -326,6 +327,7 @@ int c_Solver::Init(int argc, char **argv)
                 else if (col->getCase()=="Maxwellian") 		                            particles[i].maxwellian(EMf);
                 else if (col->getCase()=="KHI_FLR")                                     particles[i].maxwellian_KHI_FLR(EMf);
                 else if (col->getCase()=="PlaneEMWave")                                 particles[i].maxwellian(EMf);
+                else if (col->getCase()=="LangmuirWave")                                (col->getQOM(i) < 0 ? particles[i].langmuir_seed(EMf) : particles[i].maxwellian(EMf));
                 else if (col->getCase()=="AlfvenWave")                                  particles[i].alfven_walen_seed(EMf);
                 else if (col->getCase()=="ObliqueAlfvenWave")                           particles[i].alfven_walen_seed(EMf);
                 else if (col->getCase()=="WhistlerPacket")                              particles[i].maxwellian(EMf);

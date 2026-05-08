@@ -1,36 +1,36 @@
-###! INPUT FILE — Numerical heating test (Test 6: CIC vs TSC stencil-order demo)
+###! INPUT FILE — Landau damping (Test 8: kinetic resonance damping)
 #
-# Cold quiet Maxwellian plasma at a grid that DEEPLY violates the Debye
-# resolution criterion. With B0 = 0 and no perturbation, the only "physics"
-# is quiet thermal motion — ω = ω_pe Langmuir oscillation if anything.
-# In a perfectly resolved code, total energy is conserved bit-exactly and KE
-# stays put. In a real PIC code at coarse grid, particle-grid aliasing
-# pumps KE into spurious E-field modes (numerical heating).
+# Single-mode Langmuir wave seeded as δEx(x, 0) = E0·cos(2π m_x x / Lx)
+# in unmagnetized warm e-i plasma.  The cosine field couples directly to
+# the longitudinal electrostatic eigenmode; the plasma responds via
+# Poisson, oscillates at ω_r, and damps at γ_L < 0 via wave-particle
+# resonance (the canonical kinetic effect, no fluid analog).
 #
-# This is the classical CIC-vs-TSC discriminator: the smoother B-spline of
-# TSC has a transfer function with much faster roll-off in k → less aliasing
-# from high-k particle features back into the resolved low-k grid → less
-# spurious E-field excitation → less KE drain.
+# Setup:  ω_pe = 1, vth_e = 0.1 → λ_D = vth_e/ω_pe = 0.1.
+# Choose kλ_D = 0.4: λ_D = 0.1 → k = 4 → Lx = 2π m_x / k = π for m_x = 2.
 #
-# Setup:
-#   Lx = 1, nxc = 16  → dx = 0.0625
-#   vth_e = 0.005     → λ_D = vth_e / ω_pe = 5e-4
-#   dx / λ_D = 125    → DEEP Debye violation (textbook says heating expected)
-#   ω_pe = √(rhoINIT · |qom_e|) = 10,  ω_pe·dt = 0.5 (Crank-Nicolson stable)
-#   ncycles = 400 → 20 ω_pe⁻¹.
+# Theory:
+#   ω_r² = ω_pe² · (1 + 3 k² λ_D²)  →  ω_r ≈ 1.2166 ω_pe   (Bohm-Gross)
+#   γ_L  = -√(π/8) · (ω_pe/(kλ_D)³) · exp[-1/(2k²λ_D²) - 3/2]
+#         ≈ -0.066 ω_pe                                     (textbook)
+# Solving the full plasma-dispersion relation
+#   ε(ω, k) = 1 + (1/(kλ_D)²)·(1 + ξ Z(ξ)) = 0,    ξ = ω/(k vth √2)
+# with scipy.special.wofz gives the same γ_L ≈ -0.066 to 3 digits.
 #
-# Pass criterion: max(E-field-energy) / KE_initial < 0.05 (5%). At TSC the
-# numerical heating should be ≪ 1%; at CIC it can run several percent.
-# Document the actual numbers in the summary table — that's the demo.
+# Time:  dt = 0.1, ncycles = 600 → t = 60 = 12 oscillation periods ≈
+#        4 e-foldings of γ_L (sufficient dynamic range to fit slope).
+# Output: FieldOutputCycle = 2 → 300 Ex snapshots for FFT-mode envelope.
+#
+# Pass criterion: |γ_meas - γ_L| / |γ_L| < 0.20.
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                TEST CASE                                   %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-Case                           = Maxwellian
-SimulationName                 = NumericalHeating
-SaveDirName                    = data_NumericalHeating
-RestartDirName                 = data_NumericalHeating
+Case                           = LangmuirWave
+SimulationName                 = LangmuirWave
+SaveDirName                    = data_LangmuirWave
+RestartDirName                 = data_LangmuirWave
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                    OUTPUT                                  %
@@ -43,7 +43,7 @@ restart_status                 = 0
 
 DiagnosticsOutputCycle         = 1
 RestartOutputCycle             = 0
-FieldOutputCycle               = 25                                             # 16 E_x snapshots → noise-spectrum movie (marginal value, mostly for completeness)
+FieldOutputCycle               = 2                                              # 300 Ex snapshots → FFT-envelope fit
 ParticlesOutputCycle           = 0
 ParticlesDownsampleOutputCycle = 0
 ParticlesDownsampleFactor      = 1
@@ -56,14 +56,16 @@ ParticlesDownsampleOutputTag   = position_DS + velocity_DS + q_DS
 # %                             PHYSICS and GEOMETRY                           %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-###? No custom parameters needed (Case=Maxwellian uses standard init)
-nparam                         = 0
+###* input_param[0] = displacement amplitude A (small, sets δn/n ~ A)
+###* input_param[1] = mode m_x  (k = 2π m_x / Lx)
+nparam                         = 2
+custom_parameters              = 0.005       2
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                         ELECTRIC and MAGNETIC FIELD                        %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-B0x                            = 0.0                                            # Unmagnetized — pure electrostatic test
+B0x                            = 0.0                                            # Unmagnetized plasma — Langmuir is electrostatic
 B0y                            = 0.0
 B0z                            = 0.0
 
@@ -71,17 +73,17 @@ B0z                            = 0.0
 # %                                     TIME                                   %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-dt                             = 0.05                                           # ω_pe·dt = 0.5 (CN stable, 13 steps per Langmuir period)
-ncycles                        = 400                                            # 20 ω_pe⁻¹ — long enough for heating to integrate
+dt                             = 0.1
+ncycles                        = 600                                            # ~4 e-foldings of γ_L = -0.066
 th                             = 0.5
 c                              = 1.0
-GMREStol                       = 1E-10
+GMREStol                       = 1E-12
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                   SMOOTHING                                %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-Smooth                         = 0                                              # No smoothing — measure raw stencil heating
+Smooth                         = 0                                              # NO smoothing — measure raw kinetic damping
 num_smoothings                 = 0
 SmoothCycle                    = 1
 
@@ -91,13 +93,13 @@ MaxwellOperator                = lap_graddiv
 # %                                    BOX SIZE                                %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-Lx                             = 1.0                                            # Coarse grid: dx = 0.0625, dx / λ_D = 125
-Ly                             = 0.5
-Lz                             = 0.5
+Lx                             = 3.14159265358979323846                         # = π so m_x=2 → k=4 → kλ_D=0.4
+Ly                             = 1.0
+Lz                             = 1.0
 
-nxc                            = 16
-nyc                            = 8
-nzc                            = 8
+nxc                            = 128                                            # k_max·dx = 4·π/128 ≈ 0.098 (well under Nyquist)
+nyc                            = 4
+nzc                            = 4
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                  MPI TOPOLOGY                              %
@@ -110,25 +112,27 @@ ZLEN                           = 1
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                   PARTICLES                                %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# Cold electron-ion plasma. m_i/m_e = 25.
+# 2 species: warm electrons + cold heavy ions (m_i/m_e = 100, ions are
+# essentially a stationary neutralizing background on the electron timescale).
+# rhoINIT_e · |qom_e| = 1 → ω_pe = 1 exactly.
 
 ns                  = 2
 
-rhoINIT             = 100.0         100.0                                       # ω_pe = √(rhoINIT·|qom|) = 10
+rhoINIT             = 1.0           1.0
 rhoINJECT           = 0.0           0.0
 
-npcelx              = 4             4                                            # ppc = 64 → 65,536 particles/rank — high enough for low shot-noise floor
+npcelx              = 8             8                                           # ppc=8/species → 16/cell, low shot noise on m=2
 npcely              = 4             4
 npcelz              = 4             4
 NpMaxNpRatio        = 5.0
 
-qom                 = -25.0         1.0
+qom                 = -1.0          0.01                                        # m_i/m_e = 100
 
-uth                 = 0.005         0.001                                        # Cold: vth_e/c = 5e-3, vth_i/c = 1e-3
-vth                 = 0.005         0.001
-wth                 = 0.005         0.001
+uth                 = 0.1           0.01                                        # vth_e = 0.1 → λ_D = 0.1, kλ_D = 0.4
+vth                 = 0.1           0.01
+wth                 = 0.1           0.01
 
-u0                  = 0.0           0.0                                          # No drift — pure thermal Maxwellian
+u0                  = 0.0           0.0
 v0                  = 0.0           0.0
 w0                  = 0.0           0.0
 

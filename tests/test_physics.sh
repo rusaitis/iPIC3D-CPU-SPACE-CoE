@@ -10,6 +10,8 @@
 #   E. Oblique shear Alfvén wave  ω = k·v_A·cos(θ_kB)    (analyze_dispersion.py)
 #   F. Numerical heating          peak(EE)/KE₀ < tol     (analyze_heating.py)
 #   G. Magnetic reconnection      dψ/dt ~ 0.1·B0·v_A     (analyze_reconnection.py)
+#   H. Landau damping             γ_L from Z(ξ)          (analyze_landau.py)
+#   I. Weibel filamentation       γ_W ≈ ω_pe·u_b/c       (analyze_growth_rate.py --field magnetic)
 #
 # Tests A–D run at np=1 (single-rank periodic-self halo path) and np=4
 # X-decomp (cross-rank periodic halo on one axis). Test E runs at np=1 and
@@ -56,7 +58,7 @@ mkdir -p "$OUTROOT"
 
 cd "$REPO"
 
-# ── Run all 10 simulations (5 tests × 2 decompositions) ──────────────────
+# ── Run all 18 simulations (9 tests × 2 decompositions) ──────────────────
 
 run_sim() {
     local label=$1 np=$2 inp=$3 outdir=$4
@@ -80,6 +82,10 @@ run_sim heating_np1      1 NumericalHeating.inp      "$REPO/data_NumericalHeatin
 run_sim heating_np4      4 NumericalHeating_np4.inp  "$REPO/data_NumericalHeating_np4"
 run_sim reconnection_np1 1 Reconnection.inp          "$REPO/data_Reconnection"
 run_sim reconnection_np4 4 Reconnection_np4.inp      "$REPO/data_Reconnection_np4"
+run_sim landau_np1       1 LangmuirWave.inp          "$REPO/data_LangmuirWave"
+run_sim landau_np4       4 LangmuirWave_np4.inp      "$REPO/data_LangmuirWave_np4"
+run_sim weibel_np1       1 Weibel.inp                "$REPO/data_Weibel"
+run_sim weibel_np4       4 Weibel_np4.inp            "$REPO/data_Weibel_np4"
 
 # ── Run analyzers, capture pass/fail ──────────────────────────────────────
 
@@ -106,9 +112,11 @@ check() {
     # Extract the headline number for the summary (different per analyzer):
     #   dispersion → |Δω/ω|,  growth → |Δγ/γ|,  heating → |EE|/KE₀,
     #   reconnection → "peak / (B0·v_A)"
+    # `|| true` keeps a non-matching grep from triggering set-e+pipefail.
     local rel
-    rel=$(echo "$out" | grep -E '\|Δω/ω\||\|Δγ/γ\||\|EE\|/KE|peak / \(B0' | sed -E 's/.*: *([0-9.e+-]+).*/\1/' | head -1)
+    rel=$(echo "$out" | grep -E '\|Δω/ω\||\|Δγ/γ\||\|EE\|/KE|peak / \(B0' | sed -E 's/.*: *([0-9.e+-]+).*/\1/' | head -1 || true)
     RESULTS+=("$tag|$label|$rel")
+    echo "  [$tag]  $label  $rel"
 }
 
 # Generate a propagation movie (best-effort — never fails the suite).
@@ -138,6 +146,14 @@ check "heating_np4"    "$PYTHON scripts/analyze_heating.py data_NumericalHeating
 # Reconnection: peak dψ/dt / (B0·v_A) ∈ [0.05, 0.30] — GEM-challenge consensus band
 check "reconnection_np1" "$PYTHON scripts/analyze_reconnection.py data_Reconnection --inp inputfiles/Reconnection.inp"
 check "reconnection_np4" "$PYTHON scripts/analyze_reconnection.py data_Reconnection_np4 --inp inputfiles/Reconnection_np4.inp"
+# Landau damping: γ_L from full Z-function dispersion, kλ_D = 0.4 → γ_L/ω_pe ≈ -0.066
+check "landau_np1"       "$PYTHON scripts/analyze_landau.py data_LangmuirWave --inp inputfiles/LangmuirWave.inp --tol 0.20"
+check "landau_np4"       "$PYTHON scripts/analyze_landau.py data_LangmuirWave_np4 --inp inputfiles/LangmuirWave_np4.inp --tol 0.20"
+# Weibel filamentation: γ_W(k_y) at the fundamental mode k_y = 2π/Ly. Cold-fluid
+# Weibel γ_W = k·u_b·ω_pe/√(k²c²+ω_pe²); the integrated B-energy rate is dominated
+# by the lowest unstable mode (highest k modes saturate first via filament merging).
+check "weibel_np1"       "$PYTHON scripts/analyze_growth_rate.py data_Weibel --inp inputfiles/Weibel.inp --field magnetic --expected 'k_y*u_b*omega_pe/sqrt(k_y**2*c**2 + omega_pe**2)' --tol 0.20"
+check "weibel_np4"       "$PYTHON scripts/analyze_growth_rate.py data_Weibel_np4 --inp inputfiles/Weibel_np4.inp --field magnetic --expected 'k_y*u_b*omega_pe/sqrt(k_y**2*c**2 + omega_pe**2)' --tol 0.20"
 
 # ── Movies (only tests with FieldOutputCycle > 0) ────────────────────────
 echo "Generating propagation movies (best-effort) → $OUTMOVIES/"
@@ -152,6 +168,17 @@ movie "oblique_alf_np4"  data_ObliqueAlfvenWave_np4  ObliqueAlfvenWave_np4.inp B
 # Reconnection: 2D xy slice of B_y reveals the islands and X-line collapse.
 movie "reconnection_np1" data_Reconnection           Reconnection.inp          B y
 movie "reconnection_np4" data_Reconnection_np4       Reconnection_np4.inp      B y
+# Landau: 1D Hovmöller of E_x — see initial cosine seed Landau-damp away.
+movie "landau_np1"       data_LangmuirWave           LangmuirWave.inp          E x
+movie "landau_np4"       data_LangmuirWave_np4       LangmuirWave_np4.inp      E x
+# Weibel: 2D pcolor of B_z — filament formation + merging.
+movie "weibel_np1"       data_Weibel                 Weibel.inp                B z
+movie "weibel_np4"       data_Weibel_np4             Weibel_np4.inp            B z
+# TwoStream + Heating: newly enabled field output, 1D E_x movies.
+movie "twostream_np1"    data_TwoStream              TwoStream.inp             E x
+movie "twostream_np4"    data_TwoStream_np4          TwoStream_np4.inp         E x
+movie "heating_np1"      data_NumericalHeating       NumericalHeating.inp      E x
+movie "heating_np4"      data_NumericalHeating_np4   NumericalHeating_np4.inp  E x
 
 # ── Summary table ────────────────────────────────────────────────────────
 
@@ -170,8 +197,8 @@ if [[ $fail -eq 0 ]]; then
 else
     echo "  FAILED — see logs in $OUTROOT/"
 fi
-n_plots=$(find "$OUTPLOTS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
-n_movies=$(find "$OUTMOVIES" -maxdepth 1 -name '*.mp4' 2>/dev/null | wc -l | tr -d ' ')
+n_plots=$(find "$OUTPLOTS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ' || true)
+n_movies=$(find "$OUTMOVIES" -maxdepth 1 -name '*.mp4' 2>/dev/null | wc -l | tr -d ' ' || true)
 echo "  artifacts: $n_plots plots → $OUTPLOTS,  $n_movies movies → $OUTMOVIES"
 echo
 

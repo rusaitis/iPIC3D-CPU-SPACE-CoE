@@ -23,7 +23,7 @@ restart_status                 = 0
 
 DiagnosticsOutputCycle         = 1
 RestartOutputCycle             = 0
-FieldOutputCycle               = 0
+FieldOutputCycle               = 25                                             # 16 E_x snapshots → noise-spectrum movie (marginal value, mostly for completeness)
 ParticlesOutputCycle           = 0
 ParticlesDownsampleOutputCycle = 0
 ParticlesDownsampleFactor      = 1

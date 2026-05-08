@@ -23,6 +23,7 @@ def parse_input_file(path):
     """Pull simulation parameters from an iPIC3D .inp file."""
     keys = {'dt', 'ncycles', 'c', 'Lx', 'Ly', 'Lz', 'B0x', 'B0y', 'B0z',
             'DiagnosticsOutputCycle'}
+    arr_keys = ('rhoINIT', 'qom', 'u0', 'v0', 'w0', 'custom_parameters')
     out = {}
     with open(path) as f:
         for line in f:
@@ -35,7 +36,7 @@ def parse_input_file(path):
                     out[lhs] = float(rhs.split()[0])
                 except ValueError:
                     out[lhs] = rhs
-            elif lhs in ('rhoINIT', 'qom', 'u0'):
+            elif lhs in arr_keys:
                 try:
                     out[lhs] = [float(x) for x in rhs.split()]
                 except ValueError:
@@ -86,6 +87,8 @@ def main():
     ap.add_argument('--window', default=None,
                     help='Fit window as "i_start,i_end" diagnostic-row indices (default: auto)')
     ap.add_argument('--label', default=None, help='Test label for the printout')
+    ap.add_argument('--field', choices=('electric', 'magnetic'), default='electric',
+                    help='Energy series to fit: electric (default, two-stream/Langmuir) or magnetic (Weibel).')
     ap.add_argument('--save-plot', default=None, dest='save_plot',
                     help='Optional path to save log(E)-vs-t diagnostic PNG.')
     ap.add_argument('--light', action='store_true',
@@ -107,9 +110,13 @@ def main():
         sys.exit(1)
 
     cycles = np.array(cq['cycle'], dtype=float)
-    e_energy = np.array(cq['E_energy'], dtype=float)
-    e_energy = np.clip(e_energy, 1e-300, None)              # log domain
-    log_energy = np.log(e_energy)
+    series_key = 'E_energy' if args.field == 'electric' else 'B_energy'
+    if series_key not in cq:
+        print(f"FAIL: ConservedQuantities missing column '{series_key}'")
+        sys.exit(1)
+    energy = np.array(cq[series_key], dtype=float)
+    energy = np.clip(energy, 1e-300, None)                  # log domain
+    log_energy = np.log(energy)
     t = cycles * sim['dt']
 
     if args.window is not None:
@@ -128,6 +135,8 @@ def main():
     rho = sim.get('rhoINIT', [])
     qom = sim.get('qom', [])
     u0 = sim.get('u0', [])
+    v0 = sim.get('v0', [])
+    w0 = sim.get('w0', [])
     if not (rho and qom):
         print("FAIL: missing rhoINIT/qom in input file")
         sys.exit(1)
@@ -136,20 +145,28 @@ def main():
     # Heuristic: electrons are species with qom < 0.
     omega_pe2 = sum(abs(r) * abs(q) for r, q in zip(rho, qom) if q < 0)
     omega_pe = math.sqrt(omega_pe2) if omega_pe2 > 0 else 0.0
-    v_drift = max((abs(d) for d in u0), default=0.0)
+    # Drift velocity: max |drift| over all axes (Weibel beams may use w0 instead of u0).
+    drifts = list(u0) + list(v0) + list(w0)
+    v_drift = max((abs(d) for d in drifts), default=0.0)
+    Ly = sim.get('Ly', 1.0)
+    custom = sim.get('custom_parameters', [])
+    m_y = float(custom[0]) if custom else 1.0
 
     ctx = {
         'wpe': omega_pe, 'omega_pe': omega_pe,
-        'v_d': v_drift, 'vd': v_drift,
+        'v_d': v_drift, 'vd': v_drift, 'u_b': v_drift, 'u_d': v_drift,
         'c': sim.get('c', 1.0),
+        'Ly': Ly, 'm_y': m_y,
+        'k_y': 2.0 * math.pi * m_y / Ly if Ly > 0 else 0.0,
     }
     gamma_expected = evaluate_expected(args.expected, ctx)
     rel = abs(gamma_measured - gamma_expected) / abs(gamma_expected) if gamma_expected else float('inf')
     ok = rel < args.tol
 
     label = args.label or os.path.basename(args.output_dir.rstrip('/'))
+    field_label = 'E-field' if args.field == 'electric' else 'B-field'
     print()
-    print(f"Growth-rate check — {label}")
+    print(f"Growth-rate check — {label}  ({field_label})")
     print('─' * 56)
     print(f"  Conserved-quantity rows: {len(cycles)}")
     print(f"  Linear-fit window      : cycles {int(cycles[i_start])}..{int(cycles[i_end-1])}  (rows {i_start}..{i_end-1})")
@@ -183,7 +200,7 @@ def main():
             i_plot0 = max(1, i_start // 4)
             ax.plot(t[i_plot0:], log_energy[i_plot0:],
                     color=theme.text_color, lw=1.1,
-                    label='log E-field energy', alpha=0.85)
+                    label=f'log {field_label} energy', alpha=0.85)
             ax.axvspan(t[i_start], t[i_end - 1], color=theory_color, alpha=0.18,
                        label=f'fit window  (cyc {int(cycles[i_start])}..{int(cycles[i_end-1])})')
 
@@ -203,7 +220,7 @@ def main():
             ax.set_ylim(ymin - pad, ymax + pad)
 
             ax.set_xlabel('t [code time]')
-            ax.set_ylabel('log E-field energy')
+            ax.set_ylabel(f'log {field_label} energy')
             ax.legend(loc='lower right', fontsize=9)
             ax.text(0.02, 0.98,
                     f'|Δγ/γ| = {rel:.2e}\nω_pe = {omega_pe:.4g}\nv_drift = {v_drift:.4g}',

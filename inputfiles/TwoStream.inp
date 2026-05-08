@@ -43,7 +43,7 @@ restart_status                 = 0
 
 DiagnosticsOutputCycle         = 1                                              # Per-cycle ConservedQuantities → fit γ
 RestartOutputCycle             = 0
-FieldOutputCycle               = 0                                              # No HDF5 field snapshots needed
+FieldOutputCycle               = 5                                              # 120 E_x snapshots → beam-mode growth movie
 ParticlesOutputCycle           = 0
 ParticlesDownsampleOutputCycle = 0
 ParticlesDownsampleFactor      = 1

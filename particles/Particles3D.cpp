@@ -325,6 +325,74 @@ void Particles3D::alfven_walen_seed(Field * EMf)
     fixPosition();
 }
 
+//* Particle init for Landau damping. Excites the FORWARD Langmuir eigenmode at
+//* mode m via combined position+velocity perturbation:
+//*   x_i → x_i + (A/k)·cos(k·x_i)        — gives δn = -A·sin(kx)·n in linear limit
+//*   u_i → u_i - (ω_r·A/k)·sin(k·x_i)    — phase-velocity-matched δv (forward branch)
+//* Together these excite a single forward-propagating wave (no |cos(ω_r·t)|
+//* modulation in |E_x(m, t)|). The plasma develops a matching E_x(x, 0) =
+//* (4π·n·q·A/k)·sin(k·x) via Poisson during the first ECSIM solve.
+//* input_param[0] = displacement amplitude A (small, e.g. 0.005)
+//* input_param[1] = mode m_x
+void Particles3D::langmuir_seed(Field * EMf)
+{
+    long long seed = (vct->getCartesian_rank() + 1) * 20 + ns;
+    srand(seed);
+    srand48(seed);
+
+    assert_eq(_pcls.size(), 0);
+
+    const double A_disp = input_param[0];
+    const int    mx     = static_cast<int>(input_param[1]);
+    const double k_wave = 2.0 * M_PI * mx / Lx;
+
+    //* Bohm-Gross dispersion: ω_r ≈ ω_pe·√(1 + 3·(k·λ_D)²).  ω_pe² = Σ_e ρ_init·|q/m|;
+    //* λ_D = v_th_e / ω_pe.  Sums over electron species (qom < 0).
+    double omega_pe2 = 0.0;
+    for (int s = 0; s < col->getNs(); s++) {
+        const double q = col->getQOM(s);
+        if (q < 0.0)
+            omega_pe2 += fabs(col->getRHOinit(s)) * fabs(q);
+    }
+    const double omega_pe = (omega_pe2 > 0.0) ? sqrt(omega_pe2) : 1.0;
+    const double lambda_D = uth / omega_pe;
+    const double kD       = k_wave * lambda_D;
+    const double omega_r  = omega_pe * sqrt(1.0 + 3.0 * kD * kD);
+    const double dv_amp   = -omega_r * A_disp / k_wave;
+
+    const double q_sgn = (qom / fabs(qom));
+    const double q_factor = q_sgn * grid->getVOL() / npcel;
+
+    const int ng = grid->getNGhost();
+    for (int i = ng; i < grid->getNXC() - ng; i++)
+        for (int j = ng; j < grid->getNYC() - ng; j++)
+            for (int k = ng; k < grid->getNZC() - ng; k++)
+            {
+                const double q = q_factor * fabs(EMf->getRHOcs(i, j, k, ns));
+
+                for (int ii = 0; ii < npcelx; ii++)
+                    for (int jj = 0; jj < npcely; jj++)
+                        for (int kk = 0; kk < npcelz; kk++)
+                        {
+                            const double x_uniform = (ii + .5) * (dx / npcelx) + grid->getXN(i, j, k);
+                            const double y         = (jj + .5) * (dy / npcely) + grid->getYN(i, j, k);
+                            const double z         = (kk + .5) * (dz / npcelz) + grid->getZN(i, j, k);
+
+                            //* Eigenmode perturbation evaluated at the uniform position.
+                            const double phase = k_wave * x_uniform;
+                            const double x     = x_uniform + (A_disp / k_wave) * cos(phase);
+                            const double dvx   = dv_amp * sin(phase);
+
+                            double u, v, w;
+                            sample_maxwellian(u, v, w, uth, vth, wth, u0 + dvx, v0, w0);
+
+                            create_new_particle(u, v, w, q, x, y, z);
+                        }
+            }
+
+    fixPosition();
+}
+
 /** Maxellian velocity from currents and uniform spatial distribution */
 void Particles3D::maxwellianNullPoints(Field * EMf)
 {

@@ -6050,6 +6050,74 @@ void EMfields3D::init_PlaneEMWave()
         init();  //! READ FROM RESTART
 }
 
+//* Longitudinal Langmuir wave for Landau-damping test. Seeds δEx(x,0) = E0·cos(k·x)
+//* in unmagnetized warm plasma (B = 0). Plasma responds via Poisson, oscillates at
+//* ω_r ≈ ω_pe·√(1 + 3k²λ_D²) (Bohm-Gross), and damps at γ_L from Z(ξ).
+//* Pairs with Particles3D::maxwellian (uniform thermal sample, no perturbation).
+//* input_param[0] = E0, input_param[1] = mode m_x.
+void EMfields3D::init_LangmuirWave()
+{
+    const Collective *col = &get_col();
+    const VirtualTopology3D *vct = &get_vct();
+    const Grid *grid = &get_grid();
+
+    const double amplitude = input_param[0];
+    const int    mode      = static_cast<int>(input_param[1]);
+    const double k_wave    = 2.0 * M_PI * mode / Lx;
+
+    if (restart_status == 0)
+    {
+        if (vct->getCartesian_rank() == 0)
+        {
+            cout << "------------------------------------------" << endl;
+            cout << "  Initialising Langmuir wave (B = 0)      " << endl;
+            cout << "------------------------------------------" << endl;
+            cout << "δEx amplitude (E0)               = " << amplitude << endl;
+            cout << "Mode m (k = 2π m / Lx)           = " << mode << endl;
+            cout << "k                                = " << k_wave << endl;
+            cout << "------------------------------------------" << endl;
+        }
+
+        for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+                for (int k = 0; k < nzn; k++)
+                {
+                    const double x_node = grid->getXN(i, j, k);
+
+                    Ex[i][j][k] = amplitude * cos(k_wave * x_node);
+                    Ey[i][j][k] = 0.0;
+                    Ez[i][j][k] = 0.0;
+
+                    Bxn[i][j][k] = B0x;
+                    Byn[i][j][k] = B0y;
+                    Bzn[i][j][k] = B0z;
+
+                    for (int is = 0; is < ns; is++)
+                        rhons[is][i][j][k] = rhoINIT[is] / FourPI;
+                }
+
+        grid->interpN2C(Bxc, Bxn);
+        grid->interpN2C(Byc, Byn);
+        grid->interpN2C(Bzc, Bzn);
+
+        //* Halo exchange — only Ex carries the perturbation; B is uniform, but exchange anyway for consistency
+        communicateNodeBC(nxn, nyn, nzn, Ex,  col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Ey,  col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Ez,  col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+        for (int is = 0; is < ns; is++)
+            grid->interpN2C(rhocs, is, rhons);
+    }
+    else
+        init();  //! READ FROM RESTART
+}
+
 //* Traveling shear Alfvén wave: guide field B0x along propagation direction
 //* with sinusoidal transverse seed δBy(x,0) = δB·sin(kx). Pairs with
 //* Particles3D::alfven_walen_seed (m_y = 0 in input_param[2]) for δv_y =
