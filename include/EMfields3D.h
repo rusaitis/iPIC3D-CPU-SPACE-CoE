@@ -739,12 +739,20 @@ private:
 };
 
 //* Add an amount of charge density to charge density field at node X,Y,Z
-inline void EMfields3D::add_Rho(double weight[8], int X, int Y, int Z, int is) 
+//* Race guard: the ECSIM moment gather runs inside `#pragma omp parallel for`
+//* over particles (Particles3D::computeMoments); neighbouring particles scatter
+//* into shared grid nodes. Without `atomic update` the read-modify-write `+=`
+//* loses contributions, corrupting the deposited moments. With OpenMP threads
+//* this is the dominant energy-conservation leak (|dE/E0| ~1e-5 at high thread
+//* counts -> machine precision once guarded). Single-thread runs are unaffected.
+inline void EMfields3D::add_Rho(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 rhons[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k] * invVOL;
+            }
 }
 
 //* Add an amount of current density to current density field at node X,Y,Z
@@ -752,22 +760,28 @@ inline void EMfields3D::add_Jxh(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 Jxhs[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k];
+            }
 }
 inline void EMfields3D::add_Jyh(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 Jyhs[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k];
+            }
 }
 inline void EMfields3D::add_Jzh(double weight[8], int X, int Y, int Z, int is)
 {
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k < 2; k++) {
+                #pragma omp atomic update
                 Jzhs[is][X - i][Y - j][Z - k] += weight[i * 4 + j * 2 + k];
+            }
 }
 
 inline void EMfields3D::add_Jx(double weight[8], int X, int Y, int Z, int is) 
@@ -955,16 +969,27 @@ inline void EMfields3D::add_Qyyz(double weight[8], int X, int Y, int Z, int is)
 }
 
 //* Add an amount of current density to mass matrix field at node X,Y *//
-inline void EMfields3D::add_Mass(double value[3][3], int X, int Y, int Z, int ind) 
+//* See add_Rho for the atomic-update rationale. This is the hottest gather site
+//* (called per node-pair in the mass-matrix assembly).
+inline void EMfields3D::add_Mass(double value[3][3], int X, int Y, int Z, int ind)
 {
+    #pragma omp atomic update
     Mxx[ind][X][Y][Z] += value[0][0];
+    #pragma omp atomic update
     Mxy[ind][X][Y][Z] += value[0][1];
+    #pragma omp atomic update
     Mxz[ind][X][Y][Z] += value[0][2];
+    #pragma omp atomic update
     Myx[ind][X][Y][Z] += value[1][0];
+    #pragma omp atomic update
     Myy[ind][X][Y][Z] += value[1][1];
+    #pragma omp atomic update
     Myz[ind][X][Y][Z] += value[1][2];
+    #pragma omp atomic update
     Mzx[ind][X][Y][Z] += value[2][0];
+    #pragma omp atomic update
     Mzy[ind][X][Y][Z] += value[2][1];
+    #pragma omp atomic update
     Mzz[ind][X][Y][Z] += value[2][2];
 }
 
