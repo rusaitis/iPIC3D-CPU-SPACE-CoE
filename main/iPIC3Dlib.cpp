@@ -105,6 +105,10 @@ int c_Solver::Init(int argc, char **argv)
         assert_eq(DVECWIDTH, 8);
     #endif
 
+    #ifndef NO_HDF5
+        H5Eset_auto(H5E_DEFAULT, NULL, NULL);
+    #endif
+
     Parameters::init_parameters();
     nprocs = MPIdata::get_nprocs();
     myrank = MPIdata::get_rank();
@@ -117,7 +121,7 @@ int c_Solver::Init(int argc, char **argv)
     ns              = col->getNs();                 // get the number of species of particles involved in simulation
 
     if (restart_status == 0)
-        first_cycle = col->getLast_cycle() + 1;     
+        first_cycle = 0;     
     else if (restart_status == 1 || restart_status == 2)
         first_cycle = col->getLast_cycle();         // get the last cycle from the restart
 
@@ -151,7 +155,6 @@ int c_Solver::Init(int argc, char **argv)
 
             if (SaveDirName != RestartDirName)
                 checkOutputFolder(RestartDirName);  //* Create restart directory
-                
         }
 
         MPIdata::instance().Print();
