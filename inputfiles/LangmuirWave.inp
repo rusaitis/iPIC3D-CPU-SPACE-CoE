@@ -10,18 +10,25 @@
 # Choose kλ_D = 0.4: λ_D = 0.1 → k = 4 → Lx = 2π m_x / k = π for m_x = 2.
 #
 # Theory:
-#   ω_r² = ω_pe² · (1 + 3 k² λ_D²)  →  ω_r ≈ 1.2166 ω_pe   (Bohm-Gross)
-#   γ_L  = -√(π/8) · (ω_pe/(kλ_D)³) · exp[-1/(2k²λ_D²) - 3/2]
-#         ≈ -0.066 ω_pe                                     (textbook)
-# Solving the full plasma-dispersion relation
-#   ε(ω, k) = 1 + (1/(kλ_D)²)·(1 + ξ Z(ξ)) = 0,    ξ = ω/(k vth √2)
-# with scipy.special.wofz gives the same γ_L ≈ -0.066 to 3 digits.
+#   ω_r² = ω_pe²·(1 + 3 k² λ_D²)  →  ω_r ≈ 1.2166 ω_pe       (Bohm-Gross)
+#   γ_L (asymptotic Landau rate, Fitzpatrick "Plasma Physics: An
+#        Introduction" CRC Press 2014, eq. 8.32 §8.9; valid kλ_D ≪ 1):
+#       -√(π/8) · (ω_pe/(kλ_D)³) · exp[-1/(2k²λ_D²) - 3/2]
+#       (the -3/2 in the exponent comes from substituting Bohm-Gross
+#        ω² = ω_pe²·(1 + 3k²λ_D²) into the bare exponent -ω²/(2k²v_th²);
+#        Fitzpatrick eq. 8.32 keeps the bare form exp[-1/(2k²λ_D²)].)
+#       ≈ -0.096 ω_pe at kλ_D = 0.4 (overshoots true value by ~45%; the
+#       asymptotic series breaks down once kλ_D approaches 0.5).
+#   Full plasma-dispersion relation (Stix, "Waves in Plasmas" 1992, §8):
+#       ε(ω, k) = 1 + (1/(kλ_D)²)·(1 + ξ Z(ξ)) = 0,    ξ = ω/(k vth √2)
+#   solved numerically with scipy.special.wofz (Faddeeva) →
+#       γ_L ≈ -0.066 ω_pe   ← what the analyzer compares the measurement to.
 #
 # Time:  dt = 0.1, ncycles = 600 → t = 60 = 12 oscillation periods ≈
 #        4 e-foldings of γ_L (sufficient dynamic range to fit slope).
 # Output: FieldOutputCycle = 2 → 300 Ex snapshots for FFT-mode envelope.
 #
-# Pass criterion: |γ_meas - γ_L| / |γ_L| < 0.20.
+# Pass criterion: |γ_meas - γ_L| / |γ_L| < 0.20  AND  |ω_meas - ω_r| / ω_r < 0.05.
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                TEST CASE                                   %

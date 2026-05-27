@@ -12,12 +12,15 @@
 # from high-k particle features back into the resolved low-k grid → less
 # spurious E-field excitation → less KE drain.
 #
-# Setup:
+# Setup (rhoINIT_e = 100, |qom_e| = 25, vth_e = 0.005):
+#   ω_pe = √(rhoINIT_e · |qom_e|) = √2500 = 50
+#   λ_D  = vth_e / ω_pe = 1e-4
 #   Lx = 1, nxc = 16  → dx = 0.0625
-#   vth_e = 0.005     → λ_D = vth_e / ω_pe = 5e-4
-#   dx / λ_D = 125    → DEEP Debye violation (textbook says heating expected)
-#   ω_pe = √(rhoINIT · |qom_e|) = 10,  ω_pe·dt = 0.5 (Crank-Nicolson stable)
-#   ncycles = 400 → 20 ω_pe⁻¹.
+#   dx / λ_D = 625    → DEEP Debye violation (textbook says heating expected)
+#   ω_pe·dt = 50·0.05 = 2.5 (Crank-Nicolson is unconditionally stable; the
+#                             Langmuir oscillation is intentionally under-resolved
+#                             since this test measures grid-aliasing noise, not ω_pe).
+#   ncycles = 400 → t = 20 code = 1000 ω_pe⁻¹.
 #
 # Pass criterion: max(E-field-energy) / KE_initial < 0.05 (5%). At TSC the
 # numerical heating should be ≪ 1%; at CIC it can run several percent.
@@ -71,8 +74,8 @@ B0z                            = 0.0
 # %                                     TIME                                   %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-dt                             = 0.05                                           # ω_pe·dt = 0.5 (CN stable, 13 steps per Langmuir period)
-ncycles                        = 400                                            # 20 ω_pe⁻¹ — long enough for heating to integrate
+dt                             = 0.05                                           # ω_pe·dt = 2.5 (CN unconditionally stable; Langmuir oscillation under-resolved by design)
+ncycles                        = 400                                            # 1000 ω_pe⁻¹ — long enough for heating to integrate
 th                             = 0.5
 c                              = 1.0
 GMREStol                       = 1E-10
@@ -91,7 +94,7 @@ MaxwellOperator                = lap_graddiv
 # %                                    BOX SIZE                                %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-Lx                             = 1.0                                            # Coarse grid: dx = 0.0625, dx / λ_D = 125
+Lx                             = 1.0                                            # Coarse grid: dx = 0.0625, dx / λ_D = 625
 Ly                             = 0.5
 Lz                             = 0.5
 
@@ -114,7 +117,7 @@ ZLEN                           = 1
 
 ns                  = 2
 
-rhoINIT             = 100.0         100.0                                       # ω_pe = √(rhoINIT·|qom|) = 10
+rhoINIT             = 100.0         100.0                                       # ω_pe = √(rhoINIT_e·|qom_e|) = √2500 = 50
 rhoINJECT           = 0.0           0.0
 
 npcelx              = 4             4                                            # ppc = 64 → 65,536 particles/rank — high enough for low shot-noise floor

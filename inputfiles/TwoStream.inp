@@ -10,14 +10,18 @@
 #   2:  ion neutralizer     qom = 0.01   rhoINIT = 1.0   (m_i/m_e = 100)
 # Total ω_pe² = (rhoINIT₀+rhoINIT₁)·|qom_e| = 1 → ω_pe = 1, ω_pi = 0.1.
 #
-# Cold-Vlasov dispersion (cold-beam limit, equal ±u_d):
-#   γ_max = ω_pe / (2√2) ≈ 0.3536    at  k_max = √3/2 · ω_pe / v_d = 8.66
-#   unstable band: 0 < k·v_d < √2 · ω_pe   →   k ∈ (0, 14.14)
+# Cold-Vlasov dispersion (Birdsall & Langdon §5-6; equal symmetric beams,
+# each density n₀/2, drift ±v_d):
+#   (ω² − k²v_d²)² = ω_pe²·(ω² + k²v_d²)
+#   ⇒ unstable band:  k·v_d < ω_pe                 →  k ∈ (0, 10)
+#   ⇒ k_max·v_d = √(3/8)·ω_pe ≈ 0.612·ω_pe         →  k_max ≈ 6.12 (m≈5.85)
+#   ⇒ γ_max = ω_pe / (2√2) ≈ 0.3536·ω_pe
 #
-# Domain & mode resolution: Lx = 6 → k_min = 1.05 (m=1), k_max = 8.66 (m≈8.27),
-# unstable harmonics m = 1..13. Maxwellian noise excites the band; the
-# fastest-growing mode dominates after ~3 e-foldings. Nxc = 128 → dx = 0.047,
-# k_max·dx ≈ 0.41 (well under Nyquist).
+# Domain & mode resolution: Lx = 6 → k_min = 2π/Lx ≈ 1.047 (m=1).
+# Unstable harmonics m = 1..9 (m=10 corresponds to k=10.47 just past band).
+# Maxwellian noise excites the band; the fastest-growing mode (m≈6) dominates
+# after ~3 e-foldings. Nxc = 128 → dx = 0.047, k_max·dx ≈ 0.29 (well under
+# Nyquist).
 #
 # Time: dt = 0.05; ncycles = 600 → 30 code time ≈ 10.6 · γ_max⁻¹ e-foldings
 # (linear regime then saturation). DiagnosticsOutputCycle = 1 → per-cycle

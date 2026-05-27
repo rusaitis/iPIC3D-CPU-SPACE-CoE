@@ -2,6 +2,9 @@
 #
 # A scaled-down version of the Birn et al. (2001) GEM challenge double-Harris
 # current sheet, sized to fit in the physics-validation suite (~5-15 min).
+#   Birn, J., et al. (2001), "Geospace Environmental Modeling (GEM) magnetic
+#   reconnection challenge", J. Geophys. Res., 106(A3), 3715-3719.
+#   doi:10.1029/1999JA900449
 # Triggers fast collisionless reconnection at the lower X-point seeded by the
 # canonical cos(2πx/Lx)·sin(πy/Ly) perturbation in init_double_Harris().
 #
