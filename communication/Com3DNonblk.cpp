@@ -66,9 +66,6 @@ constexpr HaloFlagBits to_flags(HaloKind k) {
 //*
 //*   kind           Which behavioural flag combination to apply (see
 //*                  HaloKind / to_flags above).
-//*   vectors_c      Optional Kahan-compensation companion array (per
-//*                  field). nullptr → plain +=. Non-null → Neumaier
-//*                  sum-on-receive with residuals landing in vectors_c.
 //*   unify_ps_dups  At periodic-self axes, fold the LO=HI strict
 //*                  duplicate before the cross-rank pack so neighbours
 //*                  inherit post-unify strict (mass-matrix / ECSIM).
@@ -76,7 +73,6 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
                                 HaloKind kind,
-                                double ****vectors_c = nullptr,
                                 bool unify_ps_dups = false);
 
 
@@ -1489,7 +1485,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 int n_fields, double ****vectors,
                                 const VirtualTopology3D * vct, EMfields3D *EMf,
                                 HaloKind kind,
-                                double ****vectors_c, bool unify_ps_dups)
+                                bool unify_ps_dups)
 {
     const auto [isCenterFlag, isFaceOnlyFlag, needInterp, isParticle] = to_flags(kind);
     //* Single-source-of-truth halo state shared across all phase helpers.
@@ -1526,16 +1522,14 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
     //* CIC moments-interp trailing addFace family — sum each ghost layer
     //* into the matching interior layer. skip_self=false so periodic-self
     //* axes get their dup-pair unify here (see step-2 invariant above).
-    //* Neumaier-compensated when vectors_c[f] is supplied.
     if (cic_interp) {
         const bool skip_self = false;
         for (int f = 0; f < n_fields; ++f) {
-            double ***vc = (vectors_c != nullptr) ? vectors_c[f] : nullptr;
-            addFace  (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
-            addEdgeZ (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
-            addEdgeY (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
-            addEdgeX (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
-            addCorner(nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self, vc);
+            addFace  (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self);
+            addEdgeZ (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self);
+            addEdgeY (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self);
+            addEdgeX (nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self);
+            addCorner(nx, ny, nz, vectors[f], vct, ctx.n_ghost, skip_self);
         }
     }
 
@@ -1699,31 +1693,15 @@ static inline AxisSkip axis_skip(const VirtualTopology3D * vct, bool skip_self_p
     };
 }
 
-//* Sum-on-receive helper. When `vc == nullptr` the update is a plain
-//* `dst += term`; when `vc` is supplied, a Neumaier-compensated step
-//* lands the round-off residual in `vc[di][dj][dk]`. The caller folds
-//* `vc` back into `v` after the halo exchange. Branch on the constant
-//* `vc` pointer is hoisted by the compiler — these slabs are not hot.
-static inline void halo_add(double ***v, double ***vc,
+//* Sum-on-receive helper: dst += src. Not hot (boundary slabs only).
+static inline void halo_add(double ***v,
                             int di, int dj, int dk,
                             int si, int sj, int sk)
 {
-    const double term = v[si][sj][sk];
-    if (vc != nullptr) {
-        double &sum  = v [di][dj][dk];
-        double &comp = vc[di][dj][dk];
-        const double t = sum + term;
-        if (std::fabs(sum) >= std::fabs(term))
-            comp += (sum - t) + term;
-        else
-            comp += (term - t) + sum;
-        sum = t;
-    } else {
-        v[di][dj][dk] += term;
-    }
+    v[di][dj][dk] += v[si][sj][sk];
 }
 
-void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic, double ***vector_c)
+void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
     //* Perpendicular ranges widened to [1, n-2] to match the widened MPI face
     //  types. At n_ghost==1 this is [1, n-2] — unchanged. At n_ghost==2 it
@@ -1740,27 +1718,27 @@ void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D *
         if (do_xR)
             for (int j = 1; j <= ny - 2; j++)
                 for (int k = 1; k <= nz - 2; k++)
-                    halo_add(vector, vector_c, nx - 1 - n_ghost - g, j, k,   nx - 1 - g, j, k);
+                    halo_add(vector,nx - 1 - n_ghost - g, j, k,   nx - 1 - g, j, k);
         if (do_xL)
             for (int j = 1; j <= ny - 2; j++)
                 for (int k = 1; k <= nz - 2; k++)
-                    halo_add(vector, vector_c, n_ghost + g, j, k,   g, j, k);
+                    halo_add(vector,n_ghost + g, j, k,   g, j, k);
         if (do_yR)
             for (int i = 1; i <= nx - 2; i++)
                 for (int k = 1; k <= nz - 2; k++)
-                    halo_add(vector, vector_c, i, ny - 1 - n_ghost - g, k,   i, ny - 1 - g, k);
+                    halo_add(vector,i, ny - 1 - n_ghost - g, k,   i, ny - 1 - g, k);
         if (do_yL)
             for (int i = 1; i <= nx - 2; i++)
                 for (int k = 1; k <= nz - 2; k++)
-                    halo_add(vector, vector_c, i, n_ghost + g, k,   i, g, k);
+                    halo_add(vector,i, n_ghost + g, k,   i, g, k);
         if (do_zR)
             for (int i = 1; i <= nx - 2; i++)
                 for (int j = 1; j <= ny - 2; j++)
-                    halo_add(vector, vector_c, i, j, nz - 1 - n_ghost - g,   i, j, nz - 1 - g);
+                    halo_add(vector,i, j, nz - 1 - n_ghost - g,   i, j, nz - 1 - g);
         if (do_zL)
             for (int i = 1; i <= nx - 2; i++)
                 for (int j = 1; j <= ny - 2; j++)
-                    halo_add(vector, vector_c, i, j, n_ghost + g,   i, j, g);
+                    halo_add(vector,i, j, n_ghost + g,   i, j, g);
     }
 }
 
@@ -1768,7 +1746,7 @@ void addFace(int nx, int ny, int nz, double ***vector, const VirtualTopology3D *
 //  Z-aligned edge: ghost block lives in the (x, y) cross-section.
 //  Same shift convention as addFace: (src ghost, dst interior) pairs are
 //  independent — no chained accumulation.
-void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic, double ***vector_c)
+void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
     //* For an edge to need addEdge, BOTH cross-section axes must contribute a
     //* halo overlap. If either axis is periodic-self, the upstream periodic-self
@@ -1786,21 +1764,21 @@ void addEdgeZ(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
     {
         if (do_RR)
             for (int i = 1; i < (nz - 1); i++)
-                halo_add(vector, vector_c, nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, i,   nx - 1 - gx, ny - 1 - gy, i);
+                halo_add(vector,nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, i,   nx - 1 - gx, ny - 1 - gy, i);
         if (do_LL)
             for (int i = 1; i < (nz - 1); i++)
-                halo_add(vector, vector_c, n_ghost + gx, n_ghost + gy, i,   gx, gy, i);
+                halo_add(vector,n_ghost + gx, n_ghost + gy, i,   gx, gy, i);
         if (do_RL)
             for (int i = 1; i < (nz - 1); i++)
-                halo_add(vector, vector_c, nx - 1 - n_ghost - gx, n_ghost + gy, i,   nx - 1 - gx, gy, i);
+                halo_add(vector,nx - 1 - n_ghost - gx, n_ghost + gy, i,   nx - 1 - gx, gy, i);
         if (do_LR)
             for (int i = 1; i < (nz - 1); i++)
-                halo_add(vector, vector_c, n_ghost + gx, ny - 1 - n_ghost - gy, i,   gx, ny - 1 - gy, i);
+                halo_add(vector,n_ghost + gx, ny - 1 - n_ghost - gy, i,   gx, ny - 1 - gy, i);
     }
 }
 /** add the ghost cell values Edge Y to the 3D physical vector */
 //  Y-aligned edge: ghost block lives in the (x, z) cross-section.
-void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic, double ***vector_c)
+void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
     const AxisSkip skip = axis_skip(vct, skip_self_periodic);
     if (skip.x || skip.z) return;
@@ -1814,22 +1792,22 @@ void addEdgeY(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
     {
         if (do_RR)
             for (int i = 1; i < (ny - 1); i++)
-                halo_add(vector, vector_c, nx - 1 - n_ghost - gx, i, nz - 1 - n_ghost - gz,   nx - 1 - gx, i, nz - 1 - gz);
+                halo_add(vector,nx - 1 - n_ghost - gx, i, nz - 1 - n_ghost - gz,   nx - 1 - gx, i, nz - 1 - gz);
         if (do_LL)
             for (int i = 1; i < (ny - 1); i++)
-                halo_add(vector, vector_c, n_ghost + gx, i, n_ghost + gz,   gx, i, gz);
+                halo_add(vector,n_ghost + gx, i, n_ghost + gz,   gx, i, gz);
         if (do_LR)
             for (int i = 1; i < (ny - 1); i++)
-                halo_add(vector, vector_c, n_ghost + gx, i, nz - 1 - n_ghost - gz,   gx, i, nz - 1 - gz);
+                halo_add(vector,n_ghost + gx, i, nz - 1 - n_ghost - gz,   gx, i, nz - 1 - gz);
         if (do_RL)
             for (int i = 1; i < (ny - 1); i++)
-                halo_add(vector, vector_c, nx - 1 - n_ghost - gx, i, n_ghost + gz,   nx - 1 - gx, i, gz);
+                halo_add(vector,nx - 1 - n_ghost - gx, i, n_ghost + gz,   nx - 1 - gx, i, gz);
     }
 }
 
 /** add the ghost values Edge X to the 3D physical vector */
 //  X-aligned edge: ghost block lives in the (y, z) cross-section.
-void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic, double ***vector_c)
+void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
     const AxisSkip skip = axis_skip(vct, skip_self_periodic);
     if (skip.y || skip.z) return;
@@ -1843,16 +1821,16 @@ void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
     {
         if (do_RR)
             for (int i = 1; i < (nx - 1); i++)
-                halo_add(vector, vector_c, i, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   i, ny - 1 - gy, nz - 1 - gz);
+                halo_add(vector,i, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   i, ny - 1 - gy, nz - 1 - gz);
         if (do_LL)
             for (int i = 1; i < (nx - 1); i++)
-                halo_add(vector, vector_c, i, n_ghost + gy, n_ghost + gz,   i, gy, gz);
+                halo_add(vector,i, n_ghost + gy, n_ghost + gz,   i, gy, gz);
         if (do_LR)
             for (int i = 1; i < (nx - 1); i++)
-                halo_add(vector, vector_c, i, n_ghost + gy, nz - 1 - n_ghost - gz,   i, gy, nz - 1 - gz);
+                halo_add(vector,i, n_ghost + gy, nz - 1 - n_ghost - gz,   i, gy, nz - 1 - gz);
         if (do_RL)
             for (int i = 1; i < (nx - 1); i++)
-                halo_add(vector, vector_c, i, ny - 1 - n_ghost - gy, n_ghost + gz,   i, ny - 1 - gy, gz);
+                halo_add(vector,i, ny - 1 - n_ghost - gy, n_ghost + gz,   i, ny - 1 - gy, gz);
     }
 }
 
@@ -1860,7 +1838,7 @@ void addEdgeX(int nx, int ny, int nz, double ***vector, const VirtualTopology3D 
 //  Each corner is a single node for n_ghost == 1; for n_ghost > 1 it expands
 //  to a (gx, gy, gz) cube of nodes that are summed back into the matching
 //  inner interior corner.
-void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic, double ***vector_c)
+void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost, bool skip_self_periodic)
 {
     //* A corner participates only when ALL three axes contribute halo overlap;
     //* if any of those axes is periodic-self, the upstream fold + copy already
@@ -1885,46 +1863,37 @@ void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D
     for (int gz = 0; gz < n_ghost; gz++)
     {
         if (do_RRR)
-            halo_add(vector, vector_c, nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   nx - 1 - gx, ny - 1 - gy, nz - 1 - gz);
+            halo_add(vector,nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   nx - 1 - gx, ny - 1 - gy, nz - 1 - gz);
         if (do_LRR)
-            halo_add(vector, vector_c, n_ghost + gx, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   gx, ny - 1 - gy, nz - 1 - gz);
+            halo_add(vector,n_ghost + gx, ny - 1 - n_ghost - gy, nz - 1 - n_ghost - gz,   gx, ny - 1 - gy, nz - 1 - gz);
         if (do_RLR)
-            halo_add(vector, vector_c, nx - 1 - n_ghost - gx, n_ghost + gy, nz - 1 - n_ghost - gz,   nx - 1 - gx, gy, nz - 1 - gz);
+            halo_add(vector,nx - 1 - n_ghost - gx, n_ghost + gy, nz - 1 - n_ghost - gz,   nx - 1 - gx, gy, nz - 1 - gz);
         if (do_LLR)
-            halo_add(vector, vector_c, n_ghost + gx, n_ghost + gy, nz - 1 - n_ghost - gz,   gx, gy, nz - 1 - gz);
+            halo_add(vector,n_ghost + gx, n_ghost + gy, nz - 1 - n_ghost - gz,   gx, gy, nz - 1 - gz);
         if (do_RRL)
-            halo_add(vector, vector_c, nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, n_ghost + gz,   nx - 1 - gx, ny - 1 - gy, gz);
+            halo_add(vector,nx - 1 - n_ghost - gx, ny - 1 - n_ghost - gy, n_ghost + gz,   nx - 1 - gx, ny - 1 - gy, gz);
         if (do_LRL)
-            halo_add(vector, vector_c, n_ghost + gx, ny - 1 - n_ghost - gy, n_ghost + gz,   gx, ny - 1 - gy, gz);
+            halo_add(vector,n_ghost + gx, ny - 1 - n_ghost - gy, n_ghost + gz,   gx, ny - 1 - gy, gz);
         if (do_RLL)
-            halo_add(vector, vector_c, nx - 1 - n_ghost - gx, n_ghost + gy, n_ghost + gz,   nx - 1 - gx, gy, gz);
+            halo_add(vector,nx - 1 - n_ghost - gx, n_ghost + gy, n_ghost + gz,   nx - 1 - gx, gy, gz);
         if (do_LLL)
-            halo_add(vector, vector_c, n_ghost + gx, n_ghost + gy, n_ghost + gz,   gx, gy, gz);
+            halo_add(vector,n_ghost + gx, n_ghost + gy, n_ghost + gz,   gx, gy, gz);
     }
 }
 
 /** communicate and sum shared ghost cells */
 
 //? Used for communicating moments
-//* Moment interpolation halo (sum-on-receive). Optional `vector_c`
-//* companion routes the receive through Neumaier-compensated adds —
-//* same idiom as the unified `addFace`/`addEdge*`/`addCorner` helpers.
-void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf, double*** vector_c)
+//* Moment interpolation halo (sum-on-receive).
+void communicateInterp(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
-    double*** vectors[1]   = {vector};
-    double*** vectors_c[1] = {vector_c};
-    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::Interp,
-                       vector_c != nullptr ? vectors_c : nullptr);
+    double*** vectors[1] = {vector};
+    NBDerivedHaloCommN(nx, ny, nz, 1, vectors, vct, EMf, HaloKind::Interp);
 }
 
 void communicateInterp(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf)
 {
     communicateInterp(nx, ny, nz, _vector.fetch_arr3(), vct, EMf);
-}
-
-void communicateInterp(int nx, int ny, int nz, arr3_double _vector, arr3_double _vector_c, const VirtualTopology3D * vct, EMfields3D *EMf)
-{
-    communicateInterp(nx, ny, nz, _vector.fetch_arr3(), vct, EMf, _vector_c.fetch_arr3());
 }
 
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf)
@@ -1942,16 +1911,15 @@ void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const Virtua
 //* and topology into one exchange per direction, cutting MPI message count N×.
 //* All forward to NBDerivedHaloCommN.
 
-//* Multi-field interpolation halo. Optional `vectors_c` companion array routes
-//* the receive through per-field Neumaier compensation. With unify_ps_dups=true
-//* the halo also does the periodic-self LO=HI unify before the cross-rank pack,
-//* so no trailing Node_P call is needed at the call site.
+//* Multi-field interpolation halo. With unify_ps_dups=true the halo also does
+//* the periodic-self LO=HI unify before the cross-rank pack, so no trailing
+//* Node_P call is needed at the call site.
 void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf,
-                              double ****vectors_c, bool unify_ps_dups)
+                              bool unify_ps_dups)
 {
     NBDerivedHaloCommN(nx, ny, nz, n_fields, vectors, vct, EMf,
-                       HaloKind::Interp, vectors_c, unify_ps_dups);
+                       HaloKind::Interp, unify_ps_dups);
 }
 
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,

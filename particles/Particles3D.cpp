@@ -1140,12 +1140,7 @@ void Particles3D::Shock1D_DoublePiston(Field * EMf)
 //! ECSIM - energy conserving semi-implicit method !//
 void Particles3D::ECSIM_velocity(Field *EMf)
 {
-    //* same serialisation clause as in computeMoments. Mover per-particle
-    //* loops have no atomics, but OMP thread scheduling still perturbs downstream
-    //* state enough to lose bit-reproducibility vs OMP_NUM_THREADS=1.
-    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
-
-    #pragma omp parallel num_threads(det_num_threads)
+    #pragma omp parallel
     {
         convertParticlesToAoS();
 
@@ -1454,8 +1449,7 @@ void Particles3D::RelSIM_velocity(Field *EMf)
 
 void Particles3D::ECSIM_position(Field *EMf)
 {
-    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
-    #pragma omp parallel num_threads(det_num_threads)
+    #pragma omp parallel
     {
         convertParticlesToAoS();
 
@@ -1638,8 +1632,7 @@ void Particles3D::ECSIM_position(Field *EMf)
 //   (d) No charge-conservation position correction (dxp,dyp,dzp) — matching ECSIM.
 void Particles3D::mover_PC_sub(Field *EMf)
 {
-    const int det_num_threads = col->getDeterministicThreadMoments() ? 1 : omp_get_max_threads();
-    #pragma omp parallel num_threads(det_num_threads)
+    #pragma omp parallel
     {
         convertParticlesToAoS();
 
@@ -1846,18 +1839,15 @@ void Particles3D::computeMoments(Field *EMf)
     if (vct->getCartesian_rank() == 0)
         cout << "Number of particles of species " << ns << " per MPI process: " << getNOP() << endl;
 
-    //* when DeterministicThreadMoments=true, clamp the gather's parallel
-    //* region to a single thread. Deposit helpers (add_Rho_node/add_Jxh_node/
-    //* add_Mass) use `#pragma omp atomic update` to avoid races, but the landing
-    //* order of atomic writes to the same node still varies with the OpenMP
-    //* schedule, introducing ±1 ULP run-to-run noise. Serialising the loop makes
-    //* the deposit order deterministic at the cost of losing OpenMP speedup on
-    //* computeMoments. MPI parallelism is unaffected.
-    //* `KahanGather=true` uses the non-atomic `*_kahan` deposit
-    //* variants, which are only safe in a single-thread region — so force
-    //* num_threads=1 whenever the flag is on.
+    //* The default deposit helpers (add_Rho_node/add_Jxh_node/add_Mass) use
+    //* `#pragma omp atomic update`, so the gather is race-free at any thread
+    //* count; its only thread-count sensitivity is ±1 ULP from atomic-write
+    //* ordering. `KahanGather=true` removes that by switching to the non-atomic
+    //* `*_kahan` deposit variants, which are only safe single-threaded — so
+    //* clamp the gather to one thread whenever the flag is on. MPI parallelism
+    //* is unaffected either way.
     const bool kahan_gather   = col->getKahanGather();
-    const int det_num_threads = (col->getDeterministicThreadMoments() || kahan_gather) ? 1 : omp_get_max_threads();
+    const int det_num_threads = kahan_gather ? 1 : omp_get_max_threads();
 
     #pragma omp parallel num_threads(det_num_threads)
     {

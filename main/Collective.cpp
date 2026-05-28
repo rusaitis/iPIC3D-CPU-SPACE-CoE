@@ -239,20 +239,10 @@ void Collective::ReadInput(string inputfile)
         SaveDirName     = config.read<string>    ("SaveDirName", "data");
         RestartDirName  = config.read<string>    ("RestartDirName", "data");
 
-        //* Composite knob: lifts the determinism + Kahan flags below so np=1 and
-        //* np=4 match within ~2 ULPs on conserved quantities (a ~2-ULP MPI-tree-
-        //* order residual remains; not strict byte reproducibility).
-        const bool eps_repro = config.read<bool>("EpsilonReproducibility", false);
-
-        //* Bit-determinism knobs, default off for performance. DeterministicThreadMoments
-        //* is NOT lifted by eps_repro — KahanGather already gives multi-thread bit-identity.
-        DeterministicMPIReductions = config.read<bool>("DeterministicMPIReductions", eps_repro);
-        DeterministicThreadMoments = config.read<bool>("DeterministicThreadMoments", false);
-        DeterministicParticleComm  = config.read<bool>("DeterministicParticleComm", eps_repro);
-        KahanParticleSums   = config.read<bool>("KahanParticleSums",   eps_repro);
-        KahanGather         = config.read<bool>("KahanGather",         eps_repro);
-        KahanFieldEnergy    = config.read<bool>("KahanFieldEnergy",    eps_repro);
-        KahanHalo           = config.read<bool>("KahanHalo",           eps_repro);
+        //* Opt-in Kahan-compensated, single-threaded moment gather. Default off
+        //* (~10-20% slower gather); on, the particle→grid deposit is bit-identical
+        //* across OpenMP thread counts and run-to-run at OMP>1.
+        KahanGather = config.read<bool>("KahanGather", false);
         ns              = config.read<int>       ("ns");
         nstestpart      = config.read<int>       ("nsTestPart", 0);
         NpMaxNpRatio    = config.read<double>    ("NpMaxNpRatio", 1.5);

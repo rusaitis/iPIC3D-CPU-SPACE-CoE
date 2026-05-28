@@ -217,13 +217,7 @@ class Collective
     int    getHelmholtzNiter()          const { return HelmholtzNiter; }
     bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
-    bool   getDeterministicMPIReductions()   const { return DeterministicMPIReductions; }
-    bool   getDeterministicThreadMoments()   const { return DeterministicThreadMoments; }
-    bool   getDeterministicParticleComm()    const { return DeterministicParticleComm; }
-    bool   getKahanParticleSums()            const { return KahanParticleSums; }
     bool   getKahanGather()                  const { return KahanGather; }
-    bool   getKahanFieldEnergy()             const { return KahanFieldEnergy; }
-    bool   getKahanHalo()                    const { return KahanHalo; }
     int getCurrentCycle()               const { return CurrentCycle; }
     void setCurrentCycle(int cycle)           { CurrentCycle = cycle; }
 
@@ -285,44 +279,12 @@ class Collective
     //* ECSIM_velocity+ECSIM_position path is the production path.
     bool   SubcycleMover;
 
-    //* Bit-determinism opt-ins (default off). All trade some performance for
-    //* run-to-run / cross-decomposition reproducibility; see EpsilonReproducibility
-    //* for a one-flag composite.
-
-    //* rank-order gather+sum+broadcast for scalar MPI_SUM reductions (GMRES dot
-    //* products, energy diagnostics). Plain MPI_Allreduce trees reassociate by
-    //* process layout and drift by ±1 ULP cross-run.
-    bool   DeterministicMPIReductions;
-
-    //* serialize `computeMoments`' OpenMP region (num_threads=1). Atomics protect
-    //* against races but the landing order of thread writes drifts by ±1 ULP per
-    //* node. Trades OMP gather speedup for cross-thread-count reproducibility.
-    bool   DeterministicThreadMoments;
-
-    //* drain incoming particle blocks in fixed direction order [XDN..ZUP] with
-    //* per-direction `MPI_Wait` instead of OS-scheduled `MPI_Waitany` completion.
-    //* Removes the last cross-run non-determinism at np>1.
-    bool   DeterministicParticleComm;
-
-    //* Neumaier-compensated per-particle sums in `get_kinetic_energy`,
-    //* `get_total_charge`, `get_momentum`. ε²-accurate regardless of particle order.
-    bool   KahanParticleSums;
-
-    //* Neumaier-compensated particle→grid gather. Allocates a companion array per
-    //* deposited field and folds compensation back before halo exchange. Forces
-    //* num_threads=1 inside the gather (atomics replaced by sequential adds).
+    //* Opt-in (default off). Neumaier-compensated, single-threaded particle→grid
+    //* gather: allocates a companion array per deposited field and folds the
+    //* compensation back before the halo exchange. Makes the moment deposit
+    //* bit-reproducible across OpenMP thread counts and run-to-run at OMP>1, at
+    //* the cost of the multi-threaded gather speedup.
     bool   KahanGather;
-
-    //* Neumaier-compensated grid field-energy reductions (E/B and per-axis).
-    //* Brings per-rank partials to ε² so `DeterministicMPIReductions` can combine
-    //* cross-rank without adding noise.
-    bool   KahanFieldEnergy;
-
-    //* Neumaier-aware halo exchange. `NBDerivedHaloCommN` takes an optional
-    //* companion-array pointer and dispatches sum-on-receive to `*_kahan`
-    //* variants; a second fold merges halo-add residuals into the primary.
-    //* Off-path is byte-identical to legacy.
-    bool   KahanHalo;
 
     int CurrentCycle;
     int zeroCurrent;

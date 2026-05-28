@@ -263,10 +263,11 @@ public:
     //* The 8-corner add_Rho/add_Jxh/... helpers above hardcode a 2x2x2 pattern,
     //* which is too rigid for the 27-node TSC support. These accept a single
     //* (value, node) pair so the per-particle TSC code can call them in a 27-loop.
-    // Race guard: ECSIM gather runs inside `#pragma omp parallel for` over particles
-    // (Particles3D.cpp:1518,1530); multiple threads scatter into the same grid nodes.
-    // atomic update fixes the read-modify-write race (no lost contributions); FP order
-    // remains thread-schedule-dependent so run-to-run results still vary at ULP.
+    // Race guard: the ECSIM gather runs inside `#pragma omp parallel for` over
+    // particles (Particles3D::computeMoments); multiple threads scatter into the
+    // same grid nodes. atomic update fixes the read-modify-write race (no lost
+    // contributions); FP order remains thread-schedule-dependent so run-to-run
+    // results still vary at ULP (KahanGather pins the gather to one thread to fix this).
     inline void add_Rho_node(double value, int X, int Y, int Z, int is)
     {
         #pragma omp atomic update

@@ -67,7 +67,14 @@ using namespace iPic3D;
 // in particular, nxc, nyc, nzc and nxn, nyn, nzn are assumed
 // initialized when subsequently used.
 
-EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) : 
+// Kahan-gather companion arrays carry data only when KahanGather is enabled;
+// otherwise they are allocated as 1^4 stubs (cf. the unused E_ext/B_ext fields
+// below) so the default path pays no memory for them. The stubs are never
+// indexed: every companion read/write is gated on KahanGather.
+static inline size_t kahan_dim(const Collective* col, size_t n)
+{ return col->getKahanGather() ? n : 1; }
+
+EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     _col(*col),
     _grid(*grid),
     _vct(*vct),
@@ -162,16 +169,16 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Myz (ne_mass_, nxn, nyn, nzn),
     Mzy (ne_mass_, nxn, nyn, nzn),
 
-    //! Kahan companions for the mass matrix (same shape).
-    Mxx_c (ne_mass_, nxn, nyn, nzn),
-    Myy_c (ne_mass_, nxn, nyn, nzn),
-    Mzz_c (ne_mass_, nxn, nyn, nzn),
-    Mxy_c (ne_mass_, nxn, nyn, nzn),
-    Myx_c (ne_mass_, nxn, nyn, nzn),
-    Mxz_c (ne_mass_, nxn, nyn, nzn),
-    Mzx_c (ne_mass_, nxn, nyn, nzn),
-    Myz_c (ne_mass_, nxn, nyn, nzn),
-    Mzy_c (ne_mass_, nxn, nyn, nzn),
+    //! Kahan companions for the mass matrix (full size only when KahanGather on; else 1^4 stub).
+    Mxx_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Myy_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Mzz_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Mxy_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Myx_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Mxz_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Mzx_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Myz_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Mzy_c (kahan_dim(col,ne_mass_), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
 
     //! Species-specific quantities
     rhocs_avg (ns, nxc, nyc, nzc),
@@ -184,11 +191,11 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
     Jyhs      (ns, nxn, nyn, nzn),
     Jzhs      (ns, nxn, nyn, nzn),
 
-    //! Kahan companions for species gather accumulators.
-    rhons_c   (ns, nxn, nyn, nzn),
-    Jxhs_c    (ns, nxn, nyn, nzn),
-    Jyhs_c    (ns, nxn, nyn, nzn),
-    Jzhs_c    (ns, nxn, nyn, nzn),
+    //! Kahan companions for species gather accumulators (full size only when KahanGather on; else 1^4 stub).
+    rhons_c   (kahan_dim(col,ns), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Jxhs_c    (kahan_dim(col,ns), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Jyhs_c    (kahan_dim(col,ns), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
+    Jzhs_c    (kahan_dim(col,ns), kahan_dim(col,nxn), kahan_dim(col,nyn), kahan_dim(col,nzn)),
     E_flux_xs      (ns, nxn, nyn, nzn),
     E_flux_ys      (ns, nxn, nyn, nzn),
     E_flux_zs      (ns, nxn, nyn, nzn),
@@ -2307,33 +2314,16 @@ void EMfields3D::communicateGhostP2G_ecsim(int is)
     double ***moment_Jyhs  = convert_to_arr3(Jyhs[is]);
     double ***moment_Jzhs  = convert_to_arr3(Jzhs[is]);
 
-    //* Kahan-aware halo sum (companions zeroed before halo exchange).
-    const bool kahan_halo = _col.getKahanHalo();
-
     //* Batched halo: all 7 fields (3 Jh aggregates + 4 per-species Jhs/rhons)
     //* in one multi call with unify_ps_dups=true so the periodic-self LO=HI
     //* strict unify happens inside the halo before the cross-rank pack —
     //* cross-rank ghosts inherit post-unify strict and no trailing copy
     //* refresh is needed. Jxh/Jyh/Jzh aggregates are still 0 here
     //* (sumOverSpecies runs later) — kept for parity with legacy structure.
-    //* At kahan_halo=true the per-species fields get companion arrays; the
-    //* three aggregate Jh slots use nullptr companion (Kahan equivalent to
-    //* legacy on zero-valued data).
     double ***moments[7] = { Jxh.fetch_arr3(), Jyh.fetch_arr3(), Jzh.fetch_arr3(),
                               moment_Jxhs, moment_Jyhs, moment_Jzhs, moment_rhons };
-    if (kahan_halo) {
-        double ***moment_rhons_c = convert_to_arr3(rhons_c[is]);
-        double ***moment_Jxhs_c  = convert_to_arr3(Jxhs_c[is]);
-        double ***moment_Jyhs_c  = convert_to_arr3(Jyhs_c[is]);
-        double ***moment_Jzhs_c  = convert_to_arr3(Jzhs_c[is]);
-        double ***moments_c[7] = { nullptr, nullptr, nullptr,
-                                    moment_Jxhs_c, moment_Jyhs_c, moment_Jzhs_c, moment_rhons_c };
-        communicateInterp_multi(nxn, nyn, nzn, 7, moments, vct, this,
-                                 moments_c, /*unify_ps_dups=*/true);
-    } else {
-        communicateInterp_multi(nxn, nyn, nzn, 7, moments, vct, this,
-                                 /*vectors_c=*/nullptr, /*unify_ps_dups=*/true);
-    }
+    communicateInterp_multi(nxn, nyn, nzn, 7, moments, vct, this,
+                             /*unify_ps_dups=*/true);
 }
 
 void EMfields3D::communicateGhostP2G_mass_matrix()
@@ -2346,9 +2336,6 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     //  Each Mxx[m] is a contiguous (nxn x nyn x nzn) slab of the underlying
     //  array4_double, so convert_to_arr3 yields a valid 3D view per stencil
     //  group m in [0, ne_mass_).
-    //* Kahan-aware halo sum.
-    const bool kahan_halo = _col.getKahanHalo();
-
     //* Pack all 9 components × ne_mass_ stencil groups into one flat array and
     //* post a single batched halo per phase, so the mass-matrix halo costs 2
     //* calls (interp + node_P) instead of 2 × ne_mass_, each carrying
@@ -2373,25 +2360,8 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     //* LO=HI strict unify into the halo before cross-rank pack so cross-rank
     //* ghosts inherit post-unify strict and no trailing Node_P refresh is
     //* needed. Same path as ECSIM's communicateGhostP2G_ecsim.
-    if (kahan_halo) {
-        std::vector<double***> comps_c_all(n_total);
-        for (int m = 0; m < ne_mass_; ++m) {
-            comps_c_all[m * 9 + 0] = convert_to_arr3(Mxx_c[m]);
-            comps_c_all[m * 9 + 1] = convert_to_arr3(Mxy_c[m]);
-            comps_c_all[m * 9 + 2] = convert_to_arr3(Mxz_c[m]);
-            comps_c_all[m * 9 + 3] = convert_to_arr3(Myx_c[m]);
-            comps_c_all[m * 9 + 4] = convert_to_arr3(Myy_c[m]);
-            comps_c_all[m * 9 + 5] = convert_to_arr3(Myz_c[m]);
-            comps_c_all[m * 9 + 6] = convert_to_arr3(Mzx_c[m]);
-            comps_c_all[m * 9 + 7] = convert_to_arr3(Mzy_c[m]);
-            comps_c_all[m * 9 + 8] = convert_to_arr3(Mzz_c[m]);
-        }
-        communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(),
-                                 vct, this, comps_c_all.data(), /*unify_ps_dups=*/true);
-    } else {
-        communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this,
-                                 /*vectors_c=*/nullptr, /*unify_ps_dups=*/true);
-    }
+    communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this,
+                             /*unify_ps_dups=*/true);
 }
 
 //! Communicate ghost data for ECSIM/RelSIM (output only) moments
@@ -4084,11 +4054,13 @@ void EMfields3D::setZeroKahanGatherCompensation()
                 }
 }
 
-//! Fold Kahan compensation back into the primary field and zero it.
+//! Fold Kahan compensation back into the primary field (add-only).
 //* Called just before halo exchange so `communicateInterp` / `communicateNode_P`
 //* ship a single ε²-accurate value per node rather than a (sum, comp) pair.
 //* Neumaier convention: companion = running FP residual of plain adds replaced
-//* by `kahan_add`, so final total is `sum + comp`.
+//* by `kahan_add`, so the final total is `sum + comp`. The companions are not
+//* zeroed here — `setZeroDensities` re-zeros them in lock-step with the
+//* primaries at the start of the next gather, and nothing reads them in between.
 void EMfields3D::foldKahanGatherCompensation()
 {
     for (int is = 0; is < ns; is++)
@@ -4096,10 +4068,10 @@ void EMfields3D::foldKahanGatherCompensation()
             for (int j = 0; j < nyn; j++)
                 for (int k = 0; k < nzn; k++)
                 {
-                    rhons[is][i][j][k] += rhons_c[is][i][j][k]; rhons_c[is][i][j][k] = 0.0;
-                    Jxhs [is][i][j][k] += Jxhs_c [is][i][j][k]; Jxhs_c [is][i][j][k] = 0.0;
-                    Jyhs [is][i][j][k] += Jyhs_c [is][i][j][k]; Jyhs_c [is][i][j][k] = 0.0;
-                    Jzhs [is][i][j][k] += Jzhs_c [is][i][j][k]; Jzhs_c [is][i][j][k] = 0.0;
+                    rhons[is][i][j][k] += rhons_c[is][i][j][k];
+                    Jxhs [is][i][j][k] += Jxhs_c [is][i][j][k];
+                    Jyhs [is][i][j][k] += Jyhs_c [is][i][j][k];
+                    Jzhs [is][i][j][k] += Jzhs_c [is][i][j][k];
                 }
 
     for (int c = 0; c < ne_mass_; c++)
@@ -4107,15 +4079,15 @@ void EMfields3D::foldKahanGatherCompensation()
             for (int j = 0; j < nyn; j++)
                 for (int k = 0; k < nzn; k++)
                 {
-                    Mxx[c][i][j][k] += Mxx_c[c][i][j][k]; Mxx_c[c][i][j][k] = 0.0;
-                    Mxy[c][i][j][k] += Mxy_c[c][i][j][k]; Mxy_c[c][i][j][k] = 0.0;
-                    Mxz[c][i][j][k] += Mxz_c[c][i][j][k]; Mxz_c[c][i][j][k] = 0.0;
-                    Myx[c][i][j][k] += Myx_c[c][i][j][k]; Myx_c[c][i][j][k] = 0.0;
-                    Myy[c][i][j][k] += Myy_c[c][i][j][k]; Myy_c[c][i][j][k] = 0.0;
-                    Myz[c][i][j][k] += Myz_c[c][i][j][k]; Myz_c[c][i][j][k] = 0.0;
-                    Mzx[c][i][j][k] += Mzx_c[c][i][j][k]; Mzx_c[c][i][j][k] = 0.0;
-                    Mzy[c][i][j][k] += Mzy_c[c][i][j][k]; Mzy_c[c][i][j][k] = 0.0;
-                    Mzz[c][i][j][k] += Mzz_c[c][i][j][k]; Mzz_c[c][i][j][k] = 0.0;
+                    Mxx[c][i][j][k] += Mxx_c[c][i][j][k];
+                    Mxy[c][i][j][k] += Mxy_c[c][i][j][k];
+                    Mxz[c][i][j][k] += Mxz_c[c][i][j][k];
+                    Myx[c][i][j][k] += Myx_c[c][i][j][k];
+                    Myy[c][i][j][k] += Myy_c[c][i][j][k];
+                    Myz[c][i][j][k] += Myz_c[c][i][j][k];
+                    Mzx[c][i][j][k] += Mzx_c[c][i][j][k];
+                    Mzy[c][i][j][k] += Mzy_c[c][i][j][k];
+                    Mzz[c][i][j][k] += Mzz_c[c][i][j][k];
                 }
 }
 
@@ -7083,80 +7055,66 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
 //*** Get energies ***//
 
 //! Electric field energy
-//* `use_kahan` hoisted as a runtime-constant bool; the inner-loop branch is
-//* predicted perfectly so the flag-off path is byte-identical to plain `+=`.
 double EMfields3D::get_E_field_energy(void)
 {
-    double localEenergy = 0.0, compEenergy = 0.0;
+    double localEenergy = 0.0;
     double totalEenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
                 const double term = .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k] + Ey[i][j][k] * Ey[i][j][k] + Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
-                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
-                else           localEenergy += term;
+                localEenergy += term;
             }
 
-    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
 double EMfields3D::get_Ex_field_energy(void)
 {
-    double localEenergy = 0.0, compEenergy = 0.0;
+    double localEenergy = 0.0;
     double totalEenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
                 const double term = .5 * dx * dy * dz * (Ex[i][j][k] * Ex[i][j][k]) / (FourPI);
-                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
-                else           localEenergy += term;
+                localEenergy += term;
             }
 
-    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
 double EMfields3D::get_Ey_field_energy(void)
 {
-    double localEenergy = 0.0, compEenergy = 0.0;
+    double localEenergy = 0.0;
     double totalEenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
                 const double term = .5 * dx * dy * dz * (Ey[i][j][k] * Ey[i][j][k]) / (FourPI);
-                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
-                else           localEenergy += term;
+                localEenergy += term;
             }
 
-    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
 
 double EMfields3D::get_Ez_field_energy(void)
 {
-    double localEenergy = 0.0, compEenergy = 0.0;
+    double localEenergy = 0.0;
     double totalEenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
             for (int k = n_ghost_; k < nzn - n_ghost_ - 1; k++) {
                 const double term = .5 * dx * dy * dz * (Ez[i][j][k] * Ez[i][j][k]) / (FourPI);
-                if (use_kahan) kahan_add(localEenergy, compEenergy, term);
-                else           localEenergy += term;
+                localEenergy += term;
             }
 
-    if (use_kahan) localEenergy += compEenergy;
     allreduce_sum(&localEenergy, &totalEenergy, 1, (&get_vct())->getFieldComm());
     return (totalEenergy);
 }
@@ -7164,9 +7122,8 @@ double EMfields3D::get_Ez_field_energy(void)
 //*! Get internal magnetic field energy
 double EMfields3D::get_B_field_energy(void)
 {
-    double localBenergy = 0.0, compBenergy = 0.0;
+    double localBenergy = 0.0;
     double totalBenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     //  Cells (B is on cell centers) are owned by exactly one rank, so the loop
     //  iterates [n_ghost_, nxc-n_ghost_) interior cells. For n_ghost_=1 this
@@ -7179,68 +7136,57 @@ double EMfields3D::get_B_field_energy(void)
                 const double Byt = Byc[i][j][k];
                 const double Bzt = Bzc[i][j][k];
                 const double term = .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
-                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
-                else           localBenergy += term;
+                localBenergy += term;
             }
 
-    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
 double EMfields3D::get_Bx_field_energy(void)
 {
-    double localBenergy = 0.0, compBenergy = 0.0;
+    double localBenergy = 0.0;
     double totalBenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++) {
                 const double term = .5 * dx * dy * dz * (Bxc[i][j][k] * Bxc[i][j][k])/(FourPI);
-                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
-                else           localBenergy += term;
+                localBenergy += term;
             }
 
-    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
 double EMfields3D::get_By_field_energy(void)
 {
-    double localBenergy = 0.0, compBenergy = 0.0;
+    double localBenergy = 0.0;
     double totalBenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++) {
                 const double term = .5 * dx * dy * dz * (Byc[i][j][k] * Byc[i][j][k])/(FourPI);
-                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
-                else           localBenergy += term;
+                localBenergy += term;
             }
 
-    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
 
 double EMfields3D::get_Bz_field_energy(void)
 {
-    double localBenergy = 0.0, compBenergy = 0.0;
+    double localBenergy = 0.0;
     double totalBenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
             for (int k = n_ghost_; k < nzc - n_ghost_; k++) {
                 const double term = .5 * dx * dy * dz * (Bzc[i][j][k] * Bzc[i][j][k])/(FourPI);
-                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
-                else           localBenergy += term;
+                localBenergy += term;
             }
 
-    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
@@ -7248,9 +7194,8 @@ double EMfields3D::get_Bz_field_energy(void)
 //*! Get external magnetic field energy
 double EMfields3D::get_Bext_energy(void)
 {
-    double localBenergy = 0.0, compBenergy = 0.0;
+    double localBenergy = 0.0;
     double totalBenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxc - n_ghost_; i++)
         for (int j = n_ghost_; j < nyc - n_ghost_; j++)
@@ -7260,11 +7205,9 @@ double EMfields3D::get_Bext_energy(void)
                 const double Byt = Byc_ext[i][j][k];
                 const double Bzt = Bzc_ext[i][j][k];
                 const double term = .5*dx*dy*dz*(Bxt*Bxt + Byt*Byt + Bzt*Bzt)/(FourPI);
-                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
-                else           localBenergy += term;
+                localBenergy += term;
             }
 
-    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy);
 }
@@ -7272,9 +7215,8 @@ double EMfields3D::get_Bext_energy(void)
 /*! get bulk kinetic energy*/
 double EMfields3D::get_bulk_energy(int is)
 {
-    double localBenergy = 0.0, compBenergy = 0.0;
+    double localBenergy = 0.0;
     double totalBenergy = 0.0;
-    const bool use_kahan = _col.getKahanFieldEnergy();
 
     for (int i = n_ghost_; i < nxn - n_ghost_ - 1; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_ - 1; j++)
@@ -7283,11 +7225,9 @@ double EMfields3D::get_bulk_energy(int is)
                 const double term = (fabs(rhons[is][i][j][k]) > 1.e-20)
                     ? (0.5 * dx * dy * dz * (Jxs[is][i][j][k] * Jxs[is][i][j][k] + Jys[is][i][j][k] * Jys[is][i][j][k] + Jzs[is][i][j][k] * Jzs[is][i][j][k]) / rhons[is][i][j][k])
                     : 0.0;
-                if (use_kahan) kahan_add(localBenergy, compBenergy, term);
-                else           localBenergy += term;
+                localBenergy += term;
             }
 
-    if (use_kahan) localBenergy += compBenergy;
     allreduce_sum(&localBenergy, &totalBenergy, 1, (&get_vct())->getFieldComm());
     return (totalBenergy / qom[is]);
 }

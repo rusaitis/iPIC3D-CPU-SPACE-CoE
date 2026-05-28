@@ -112,21 +112,14 @@ SmoothCycle                    = 1	                                           # 
 MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); curl_curl is not self-adjoint
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# %                       EPSILON REPRODUCIBILITY (CI)                         %
+# %                       GATHER REPRODUCIBILITY                               %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# Composite meta-flag: lifts the six Kahan + determinism knobs below so np=1 and
-# np=4 agree to ~2 ULPs on conserved quantities (off by default; ~10-20% slower).
-# Uncomment to enable, or set individual sub-flags to override:
-# EpsilonReproducibility         = 1
-# Sub-flags (all default = EpsilonReproducibility; set explicitly to override):
-#   DeterministicMPIReductions   = 1                                           # Rank-ordered Gather+sum+Bcast
-#   DeterministicParticleComm    = 1                                           # Fixed-direction MPI_Wait (no MPI_Waitany)
-#   KahanParticleSums            = 1                                           # Neumaier in get_{kinetic_energy,total_charge,momentum}
-#   KahanGather                  = 1                                           # Kahan deposit in computeMoments
-#   KahanFieldEnergy             = 1                                           # Kahan in get_{E,B,Bext,bulk}_field_energy
-#   KahanHalo                    = 1                                           # Kahan sum-on-receive in communicateInterp
-# Opt-in only (NOT lifted by EpsilonReproducibility):
-#   DeterministicThreadMoments   = 1                                           # Force num_threads=1 in computeMoments (legacy reproducibility path)
+# Kahan-compensated, single-threaded particle->grid moment gather. Off by default
+# (~10-20% slower gather). When on, the moment deposit is bit-identical across
+# OpenMP thread counts and run-to-run at OMP>1 (the gather's atomic-add ordering
+# is the one OpenMP nondeterminism source ECSIM exposes). Each decomposition still
+# conserves energy to machine epsilon either way; this only fixes deposit ordering.
+# KahanGather                    = 1
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                    BOX SIZE                                %

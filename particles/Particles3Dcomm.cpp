@@ -45,7 +45,7 @@ developers: Stefano Markidis, Giovanni Lapenta.
 #include "Particle.h"
 #include "Particles3Dcomm.h"
 #include "Parameters.h"
-#include "Basic.h"                   // allreduce_sum / g_deterministic_mpi_reductions
+#include "Basic.h"                   // allreduce_sum
 
 #include <fstream>
 #include <iomanip>
@@ -883,52 +883,6 @@ int Particles3Dcomm::handle_received_particles(int pclCommMode)
   // while there are still incoming particles
   // put them in the appropriate buffer
   //
-  //* opt-in deterministic reception. Drains each direction fully in
-  //* a fixed [XDN, XUP, YDN, YUP, ZDN, ZUP] order via `MPI_Wait` on the
-  //* streaming block communicator, eliminating the OS-scheduled reordering
-  //* introduced by `MPI_Waitany`. Particles appended to `_pcls` therefore
-  //* land in a run-independent order, so subsequent serial sums (kinetic
-  //* energy, gather) walk the same FP path every run. Legacy Waitany path is
-  //* preserved for default builds.
-  const bool deterministic_comm = col->getDeterministicParticleComm();
-  if (deterministic_comm)
-  {
-    auto process_block = [&](int d)
-    {
-      MPI_Status recv_status;
-      MPI_Wait(&recv_requests[d], &recv_status);
-      BlockCommunicator<SpeciesParticle>* recvBuff = recvBuffArr[d];
-      Block<SpeciesParticle>& recv_block = recvBuff->fetch_received_block(recv_status);
-      vector_SpeciesParticle& pcl_list = recv_block.fetch_block();
-      if (pclCommMode & do_apply_BCs_globally)
-        apply_BCs_globally(pcl_list);
-      else
-        apply_BCs_locally(pcl_list, direction[d], apply_shift[d], do_apply_BCs[d]);
-      recv_count[d] += recv_block.size();
-      num_pcls_recved += recv_block.size();
-      for (int pidx = 0; pidx < recv_block.size(); pidx++)
-      {
-        SpeciesParticle& pcl = recv_block[pidx];
-        bool was_sent = send_pcl_to_appropriate_buffer(pcl, send_count);
-        if (__builtin_expect(was_sent, false))
-        {
-          num_pcls_resent++;
-          if (pclCommMode & print_sent_pcls) print_pcl(pcl, ns);
-        }
-        else
-        {
-          _pcls.push_back(pcl);
-        }
-      }
-      recvBuff->release_received_block();
-      recv_requests[d] = recvBuff->get_curr_request();
-    };
-
-    for (int d = 0; d < num_recv_buffers; ++d)
-      while (!recvBuffArr[d]->comm_finished())
-        process_block(d);
-  }
-  else
   while(!(
     recvXleft.comm_finished() && recvXrght.comm_finished() &&
     recvYleft.comm_finished() && recvYrght.comm_finished() &&
@@ -1447,22 +1401,10 @@ double Particles3Dcomm::get_total_charge()
     double localQ = 0.0;
     double totalQ = 0.0;
 
-    //* opt-in Kahan accumulation — same rationale as get_kinetic_energy.
-    const bool use_kahan = col->getKahanParticleSums();
-    double q_c = 0.0;
-
     for (int i = 0; i < _pcls.size(); i++)
     {
         SpeciesParticle& pcl = _pcls[i];
-        const double q = pcl.get_q();
-        if (use_kahan) {
-            const double y = q - q_c;
-            const double t = localQ + y;
-            q_c    = (t - localQ) - y;
-            localQ = t;
-        } else {
-            localQ += q;
-        }
+        localQ += pcl.get_q();
     }
 
     allreduce_sum(&localQ, &totalQ, 1, MPI_COMM_WORLD);
@@ -1487,15 +1429,6 @@ double Particles3Dcomm::get_kinetic_energy()
     double totalKe = 0.0;
     double lorentz_factor = 0.0;
 
-    //* opt-in Kahan-compensated accumulation. The plain `+=` is
-    //* FP-non-associative, so the same particle set summed as one list
-    //* (np=1) vs as rank-partial sums (np>1) drifts by ~1 ULP per cycle.
-    //* Kahan drops the per-add error to O(ε²) which is below IEEE 754's
-    //* resolution, making the rank-partial sum bit-identical to the single
-    //* accumulator.
-    const bool use_kahan = col->getKahanParticleSums();
-    double ke_c = 0.0;   // Kahan compensation term
-
     for (int i = 0; i < _pcls.size(); i++)
     {
         SpeciesParticle& pcl = _pcls[i];
@@ -1515,14 +1448,7 @@ double Particles3Dcomm::get_kinetic_energy()
             term = 0.5 * (q/qom) * (u*u + v*v + w*w);
         }
 
-        if (use_kahan) {
-            const double y = term - ke_c;
-            const double t = localKe + y;
-            ke_c    = (t - localKe) - y;
-            localKe = t;
-        } else {
-            localKe += term;
-        }
+        localKe += term;
     }
 
     allreduce_sum(&localKe, &totalKe, 1, MPI_COMM_WORLD);
@@ -1548,8 +1474,6 @@ double Particles3Dcomm::get_momentum()
 {
     double localP = 0.0;
     double totalP = 0.0;
-    const bool use_kahan = col->getKahanParticleSums();
-    double p_c = 0.0;
     for (int i = 0; i < _pcls.size(); i++)
     {
         SpeciesParticle& pcl = _pcls[i];
@@ -1557,15 +1481,7 @@ double Particles3Dcomm::get_momentum()
         const double v = pcl.get_v();
         const double w = pcl.get_w();
         const double q = pcl.get_q();
-        const double term = (q/qom)*sqrt(u*u + v*v + w*w);
-        if (use_kahan) {
-            const double y = term - p_c;
-            const double t = localP + y;
-            p_c    = (t - localP) - y;
-            localP = t;
-        } else {
-            localP += term;
-        }
+        localP += (q/qom)*sqrt(u*u + v*v + w*w);
     }
     allreduce_sum(&localP, &totalP, 1, mpi_comm);
     return (totalP);

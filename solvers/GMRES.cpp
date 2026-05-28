@@ -121,14 +121,7 @@ void GMRES(FIELD_IMAGE FunctionImage, double *xkrylov, int xkrylovlen,  const do
 
             y[k+1] = norm2(w, xkrylovlen);
 
-            if (g_deterministic_mpi_reductions) {
-                //* Copy local values, sum in fixed rank order, broadcast result.
-                double y_local[m + 3];
-                for (int jj = 0; jj < k + 2; ++jj) y_local[jj] = y[jj];
-                det_allreduce_sum(y_local, y, k + 2, fieldcomm);
-            } else {
-                MPI_Allreduce(MPI_IN_PLACE, y, (k+2), MPI_DOUBLE, MPI_SUM, fieldcomm);
-            }
+            MPI_Allreduce(MPI_IN_PLACE, y, (k+2), MPI_DOUBLE, MPI_SUM, fieldcomm);
 
             for (int j = 0; j <= k; j++)
             {

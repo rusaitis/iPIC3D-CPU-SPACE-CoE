@@ -35,7 +35,7 @@
 #include "Timing.h"
 #include "ParallelIO.h"
 #include "outputPrepare.h"
-#include "Basic.h"                   // g_deterministic_mpi_reductions
+#include "Basic.h"
 
 #ifndef NO_HDF5
     #include "WriteOutputParallel.h"
@@ -182,10 +182,6 @@ int c_Solver::Init(int argc, char **argv)
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 #endif
-
-    //* propagate the deterministic-reduction flag into the Basic module
-    //* before any dotP/normP/norm2P call (first one is inside EMfields3D init).
-    g_deterministic_mpi_reductions = col->getDeterministicMPIReductions();
 
     //* Create local grid
     grid = new Grid3DCU(col, vct);          // Create the local grid
@@ -534,11 +530,6 @@ void c_Solver::CalculateMoments()
         EMf->communicateGhostP2G_ecsim(is);
 
     EMf->communicateGhostP2G_mass_matrix();
-
-    //* Second fold merges the Kahan-halo sum-on-receive residuals back into
-    //* the primaries. No-op when KahanGather is off.
-    if (col->getKahanHalo())
-        EMf->foldKahanGatherCompensation();
 
     #ifdef __PROFILING__
     time_com.stop();

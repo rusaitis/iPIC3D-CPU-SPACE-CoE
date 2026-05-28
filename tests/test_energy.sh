@@ -4,12 +4,12 @@
 # Three cases:
 #   gem       Double_Harris,  Smooth=1, num_smoothings=4   np=1 (production-default path)
 #   uniform   Maxwellian,     Smooth=0                     np=1 (unsmoothed energy floor)
-#   gem_np4   Double_Harris,  Smooth=1, EpsilonRepro=1     np=4 (MPI halo + cross-rank path)
+#   gem_np4   Double_Harris,  Smooth=1                     np=4 (MPI halo + cross-rank path)
 #
 # Measured baselines on a clean tree (Apple silicon, default flags):
-#   gem:     |dE/E0| = 6.48e-15
+#   gem:     |dE/E0| = 6.35e-15
 #   uniform: |dE/E0| = 5.49e-16
-#   gem_np4: |dE/E0| = 1.27e-16
+#   gem_np4: |dE/E0| = 5.08e-16
 #
 # Tolerances are ~15-80x the measured baseline. Any regression that pushes drift
 # past these will be caught; ULP-class FP fluctuations across builds will not.
@@ -55,7 +55,7 @@ run_case() {
 
 run_case gem     1 ci_energy_gem.inp
 run_case uniform 1 ci_energy_uniform.inp
-run_case gem_np4 4 ci_energy_gem.inp 2 2 EpsilonReproducibility=1
+run_case gem_np4 4 ci_energy_gem.inp 2 2
 
 # Inline check: read final |dE/E0| from each ConservedQuantities.txt and compare to tol.
 python3 - "$REPO/scripts" \
