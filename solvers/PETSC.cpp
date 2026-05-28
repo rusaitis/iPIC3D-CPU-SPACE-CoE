@@ -64,7 +64,9 @@ PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y)
  */
 PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct,
                          double tol, const std::string &precType, bool diagnostics,
-                         const std::string &simName, const std::string &saveDir)
+                         const std::string &simName, const std::string &saveDir,
+                         const std::string &helmInner, const std::string &helmAMGType,
+                         int helmVcycles, int helmSweeps, bool helmMassShift)
     : localSize_(localSize), petsc_x_(nullptr), petsc_b_(nullptr),
       usePrecMatrix_(precType == "Matrix"), needsReassembly_(false), diagnostics_(diagnostics),
       simName_(simName), saveDir_(saveDir),
@@ -76,7 +78,12 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
       c_(0), th_(0), dt_(0), FourPI_(0), invVOL_(0),
       useSmoothPC_(precType == "Smooth"),
       pcWorkX_(nullptr), pcWorkY_(nullptr), pcWorkZ_(nullptr),
-      diagInv_(nullptr)
+      diagInv_(nullptr),
+      useHelmholtzPC_(precType == "Helmholtz"),
+      hInner_(helmInner == "Chebyshev" ? HInner::Chebyshev : HInner::AMG),
+      hAMGType_(helmAMGType), hVcycles_(helmVcycles), hSweeps_(helmSweeps),
+      hMassShift_(helmMassShift),
+      H_(nullptr), helmKSP_(nullptr), helmR_(nullptr), helmPsi_(nullptr), helmDiag_(nullptr)
 {
     coords_[0] = coords_[1] = coords_[2] = 0;
     dims_[0] = dims_[1] = dims_[2] = 0;
@@ -89,8 +96,8 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
                        PETSC_DETERMINE, PETSC_DETERMINE, &ctx_, &A_));
     MatShellSetOperation(A_, MATOP_MULT, (void(*)(void))PetscMaxwellMatMult);
 
-    // Cache physics parameters (needed by both Matrix and Smooth preconditioner paths)
-    if (usePrecMatrix_ || useSmoothPC_) {
+    // Cache physics parameters (needed by Matrix, Smooth, and Helmholtz preconditioner paths)
+    if (usePrecMatrix_ || useSmoothPC_ || useHelmholtzPC_) {
         nxn_ = emf->get_nxn();
         nyn_ = emf->get_nyn();
         nzn_ = emf->get_nzn();
@@ -120,6 +127,22 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
         // Precompute curl-curl stencil (needed by both Matrix assembly and Smooth diagonal blocks)
         computeCurlCurlStencil();
         buildMassGroupLookup();
+
+        // Scalar node Laplacian stencil (Helmholtz preconditioner): discrete ∇² ≡ lapN2N
+        if (useHelmholtzPC_) {
+            computeScalarLaplacianStencil();
+            const double invdx2 = 1.0 / (dx_ * dx_);
+            const double invdy2 = 1.0 / (dy_ * dy_);
+            const double invdz2 = 1.0 / (dz_ * dz_);
+            // ∇² center = -½(1/dx²+1/dy²+1/dz²); rows of a Laplacian sum to zero (∇²·const = 0)
+            assert(std::abs(scalarLapStencil_[1][1][1] + 0.5 * (invdx2 + invdy2 + invdz2)) < 1e-12);
+            double lapSum = 0.0;
+            for (int di = 0; di < 3; di++)
+                for (int dj = 0; dj < 3; dj++)
+                    for (int dk = 0; dk < 3; dk++)
+                        lapSum += scalarLapStencil_[di][dj][dk];
+            assert(std::abs(lapSum) < 1e-12);
+        }
 
         // Verify curl-curl stencil against known analytical values
         {
@@ -196,6 +219,9 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
     } else if (useSmoothPC_) {
         PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(ksp_, A_, A_));
         setupSmoothPC();
+    } else if (useHelmholtzPC_) {
+        PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(ksp_, A_, A_));
+        setupHelmholtzPC();
     } else {
         PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(ksp_, A_, A_));
     }
@@ -228,6 +254,16 @@ PetscSolver::~PetscSolver()
         delete pcWorkY_;
         delete pcWorkZ_;
         delete[] diagInv_;
+    }
+    if (useHelmholtzPC_) {
+        delete pcWorkX_;
+        delete pcWorkY_;
+        delete pcWorkZ_;
+        if (helmKSP_) PetscCallAbort(PETSC_COMM_WORLD, KSPDestroy(&helmKSP_));
+        if (H_)       PetscCallAbort(PETSC_COMM_WORLD, MatDestroy(&H_));
+        if (helmR_)   PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&helmR_));
+        if (helmPsi_) PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&helmPsi_));
+        if (helmDiag_) PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&helmDiag_));
     }
 }
 
@@ -737,6 +773,285 @@ PetscErrorCode PetscSmoothPCApply(PC pc, Vec x, Vec y)
     PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+/*  Scalar node Laplacian stencil (discrete ∇², ≡ Grid3DCU::lapN2N on a uniform grid).
+ *
+ *  Same tensor-product construction as computeCurlCurlStencil(), but summing the
+ *  second derivative over ALL three directions (the curl-curl sums only q≠a):
+ *    ∇² = Σ_q ∂²/∂q²,   ∂²/∂q² = (1/16)·w_avg(other dims) ⊗ w_lap(q)/dq²
+ *  The 1/16 is (0.25)² from the two corner-averaging passes (gradN2C, divC2N).
+ */
+void PetscSolver::computeScalarLaplacianStencil()
+{
+    const double w_avg[3] = {1.0, 2.0, 1.0};
+    const double w_lap[3] = {1.0, -2.0, 1.0};
+    const double invd[3]  = {1.0 / dx_, 1.0 / dy_, 1.0 / dz_};
+
+    std::memset(scalarLapStencil_, 0, sizeof(scalarLapStencil_));
+
+    for (int n0 = 0; n0 < 3; n0++)
+        for (int n1 = 0; n1 < 3; n1++)
+            for (int n2 = 0; n2 < 3; n2++)
+            {
+                const int n[3] = {n0, n1, n2};
+                double val = 0.0;
+                for (int q = 0; q < 3; q++) {
+                    double prod = 1.0;
+                    for (int d = 0; d < 3; d++) {
+                        if (d == q) prod *= w_lap[n[d]] * invd[q] * invd[q];
+                        else        prod *= w_avg[n[d]];
+                    }
+                    val += prod / 16.0;
+                }
+                scalarLapStencil_[n0][n1][n2] = val;
+            }
+}
+
+/*  Assemble the scalar Helmholtz matrix H (one scalar DOF per interior node).
+ *
+ *    H = (1 + s·m̄)·I − α·∇²       α = (cθΔt)²,  s = θΔt·4π/V
+ *
+ *  Off-diagonals (constant, −α·∇²) and the constant part of the diagonal
+ *  (−α·∇²_self + 1) are set here; the cycle-dependent plasma shift s·m̄ is
+ *  applied to the diagonal each cycle via MatDiagonalSet in
+ *  updateHelmholtzDiagonal().  ADD_VALUES handles periodic self-wrap on thin
+ *  per-rank dimensions correctly.
+ */
+void PetscSolver::assembleHelmholtz()
+{
+    const double cthdt = c_ * th_ * dt_;
+    const double alpha = cthdt * cthdt;
+
+    PetscCallAbort(PETSC_COMM_WORLD, MatZeroEntries(H_));
+
+    for (int i = 1; i <= niX_; i++)
+        for (int j = 1; j <= niY_; j++)
+            for (int k = 1; k <= niZ_; k++)
+            {
+                PetscInt grow = globalBlockOffset_
+                              + (i - 1) * niY_ * niZ_ + (j - 1) * niZ_ + (k - 1);
+
+                for (int oi = -1; oi <= 1; oi++)
+                    for (int oj = -1; oj <= 1; oj++)
+                        for (int ok = -1; ok <= 1; ok++)
+                        {
+                            PetscInt gcol = nodeToGlobalBlock(i + oi, j + oj, k + ok);
+                            if (gcol < 0) continue;  // non-periodic boundary ghost (Dirichlet)
+
+                            double val = -alpha * scalarLapStencil_[oi + 1][oj + 1][ok + 1];
+                            if (oi == 0 && oj == 0 && ok == 0)
+                                val += 1.0;  // identity; s·m̄ shift added per-cycle
+
+                            PetscCallAbort(PETSC_COMM_WORLD,
+                                MatSetValues(H_, 1, &grow, 1, &gcol, &val, ADD_VALUES));
+                        }
+            }
+
+    PetscCallAbort(PETSC_COMM_WORLD, MatAssemblyBegin(H_, MAT_FINAL_ASSEMBLY));
+    PetscCallAbort(PETSC_COMM_WORLD, MatAssemblyEnd(H_, MAT_FINAL_ASSEMBLY));
+}
+
+/*  Refresh the Helmholtz diagonal (1 + s·m̄ − α·∇²_self) from the current mass
+ *  matrix; the off-diagonal Laplacian part is constant.  m̄ = ⅓ tr M[g=0] is the
+ *  isotropic plasma response (≈ (ωₚΔt)²) shared by all three E-components.
+ *  Local Vec order matches H's row order (i outer, k inner).
+ */
+void PetscSolver::updateHelmholtzDiagonal()
+{
+    const double cthdt = c_ * th_ * dt_;
+    const double alpha = cthdt * cthdt;
+    const double scale = dt_ * th_ * FourPI_ * invVOL_;
+    const double diagConst = -alpha * scalarLapStencil_[1][1][1] + 1.0;  // −α∇²_self + identity
+
+    const_arr4_double Mxx = emf_->getMxx();
+    const_arr4_double Myy = emf_->getMyy();
+    const_arr4_double Mzz = emf_->getMzz();
+
+    double *d;
+    PetscCallAbort(PETSC_COMM_WORLD, VecGetArray(helmDiag_, &d));
+    PetscInt idx = 0;
+    for (int i = 1; i <= niX_; i++)
+        for (int j = 1; j <= niY_; j++)
+            for (int k = 1; k <= niZ_; k++)
+            {
+                double mbar = hMassShift_
+                    ? (Mxx.get(0, i, j, k) + Myy.get(0, i, j, k) + Mzz.get(0, i, j, k)) / 3.0
+                    : 0.0;
+                d[idx++] = diagConst + scale * mbar;
+            }
+    PetscCallAbort(PETSC_COMM_WORLD, VecRestoreArray(helmDiag_, &d));
+
+    PetscCallAbort(PETSC_COMM_WORLD, MatDiagonalSet(H_, helmDiag_, INSERT_VALUES));
+}
+
+/*  Set up the scalar-Helmholtz preconditioner: assemble H, build the nested inner
+ *  solver (Richardson+AMG or Chebyshev+Jacobi), and register the outer PCShell.
+ *  The outer KSP switches to FGMRES — the nested KSPSolve is a variable preconditioner.
+ */
+void PetscSolver::setupHelmholtzPC()
+{
+    // Work arrays for unpack/pack (cannot reuse EMfields3D temps)
+    pcWorkX_ = new array3_double(nxn_, nyn_, nzn_);
+    pcWorkY_ = new array3_double(nxn_, nyn_, nzn_);
+    pcWorkZ_ = new array3_double(nxn_, nyn_, nzn_);
+
+    // Scalar (bs=1) global row offset — same per-rank node count as the bs=3 path,
+    // so nodeToGlobalBlock() doubles as the scalar index map.
+    PetscInt localBlockCount = nprocsBlocks_;
+    PetscInt offset = 0;
+    MPI_Exscan(&localBlockCount, &offset, 1, MPIU_INT, MPI_SUM, PETSC_COMM_WORLD);
+    int rank;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    if (rank == 0) offset = 0;
+    globalBlockOffset_ = offset;
+
+    PetscCallAbort(PETSC_COMM_WORLD, MatCreate(PETSC_COMM_WORLD, &H_));
+    PetscCallAbort(PETSC_COMM_WORLD,
+        MatSetSizes(H_, nprocsBlocks_, nprocsBlocks_, PETSC_DETERMINE, PETSC_DETERMINE));
+    PetscCallAbort(PETSC_COMM_WORLD, MatSetType(H_, MATMPIAIJ));
+    PetscCallAbort(PETSC_COMM_WORLD, MatMPIAIJSetPreallocation(H_, 27, nullptr, 27, nullptr));
+    PetscCallAbort(PETSC_COMM_WORLD, MatSetOption(H_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE));
+
+    assembleHelmholtz();
+
+    PetscCallAbort(PETSC_COMM_WORLD, MatCreateVecs(H_, &helmPsi_, &helmR_));
+    PetscCallAbort(PETSC_COMM_WORLD, VecDuplicate(helmR_, &helmDiag_));
+    updateHelmholtzDiagonal();
+
+    // Outer KSP: FGMRES (the nested solve is a variable preconditioner)
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetType(ksp_, KSPFGMRES));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGMRESSetRestart(ksp_, 20));
+
+    PC pc;
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGetPC(ksp_, &pc));
+    PetscCallAbort(PETSC_COMM_WORLD, PCSetType(pc, PCSHELL));
+    PetscCallAbort(PETSC_COMM_WORLD, PCShellSetContext(pc, this));
+    PetscCallAbort(PETSC_COMM_WORLD, PCShellSetApply(pc, PetscHelmholtzPCApply));
+
+    // Nested inner solver on the scalar H (shared across all 3 components)
+    PetscCallAbort(PETSC_COMM_WORLD, KSPCreate(PETSC_COMM_WORLD, &helmKSP_));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetOptionsPrefix(helmKSP_, "helm_"));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetOperators(helmKSP_, H_, H_));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetInitialGuessNonzero(helmKSP_, PETSC_FALSE));
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetNormType(helmKSP_, KSP_NORM_NONE));  // fixed sweeps
+
+    PC hpc;
+    PetscCallAbort(PETSC_COMM_WORLD, KSPGetPC(helmKSP_, &hpc));
+    if (hInner_ == HInner::AMG) {
+        PetscCallAbort(PETSC_COMM_WORLD, KSPSetType(helmKSP_, KSPRICHARDSON));
+        PetscCallAbort(PETSC_COMM_WORLD,
+            KSPSetTolerances(helmKSP_, PETSC_DEFAULT, PETSC_DEFAULT, PETSC_DEFAULT, hVcycles_));
+        if (hAMGType_ == "hypre") {
+            PetscCallAbort(PETSC_COMM_WORLD, PCSetType(hpc, PCHYPRE));
+            PetscCallAbort(PETSC_COMM_WORLD, PCHYPRESetType(hpc, "boomeramg"));
+        } else {
+            PetscCallAbort(PETSC_COMM_WORLD, PCSetType(hpc, PCGAMG));
+        }
+    } else {  // Chebyshev
+        PetscCallAbort(PETSC_COMM_WORLD, KSPSetType(helmKSP_, KSPCHEBYSHEV));
+        PetscCallAbort(PETSC_COMM_WORLD,
+            KSPSetTolerances(helmKSP_, PETSC_DEFAULT, PETSC_DEFAULT, PETSC_DEFAULT, hSweeps_));
+        PetscCallAbort(PETSC_COMM_WORLD, PCSetType(hpc, PCJACOBI));
+        PetscCallAbort(PETSC_COMM_WORLD, KSPChebyshevEstEigSet(helmKSP_, 0.0, 0.1, 0.0, 1.1));
+    }
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetFromOptions(helmKSP_));  // -helm_ksp_*, -helm_pc_* overrides
+    PetscCallAbort(PETSC_COMM_WORLD, KSPSetUp(helmKSP_));
+
+    if (diagnostics_) {
+        PetscReal normH, dmin, dmax;
+        PetscCallAbort(PETSC_COMM_WORLD, MatNorm(H_, NORM_FROBENIUS, &normH));
+        PetscCallAbort(PETSC_COMM_WORLD, VecMin(helmDiag_, nullptr, &dmin));
+        PetscCallAbort(PETSC_COMM_WORLD, VecMax(helmDiag_, nullptr, &dmax));
+        const double cthdt = c_ * th_ * dt_;
+        PetscCallAbort(PETSC_COMM_WORLD, PetscPrintf(PETSC_COMM_WORLD,
+            "\n=== Scalar-Helmholtz PC diagnostics (cycle 0) ===\n"
+            "  inner solver     = %s\n"
+            "  alpha=(c*th*dt)^2 = %.6e   (Laplacian weight)\n"
+            "  s=th*dt*4pi/V    = %.6e   (mass shift weight)\n"
+            "  diag(1+s*mbar)   in [%.6e, %.6e]\n"
+            "  ||H||_F          = %.6e\n"
+            "=================================================\n\n",
+            hInner_ == HInner::AMG ? (hAMGType_ == "hypre" ? "Richardson+HYPRE" : "Richardson+GAMG")
+                                   : "Chebyshev+Jacobi",
+            cthdt * cthdt, dt_ * th_ * FourPI_ * invVOL_,
+            (double)dmin, (double)dmax, (double)normH));
+
+        std::filesystem::create_directories(saveDir_);
+        std::string dumpPath = saveDir_ + "/" + simName_ + "_H_cycle0.bin";
+        PetscViewer viewer;
+        PetscCallAbort(PETSC_COMM_WORLD,
+            PetscViewerBinaryOpen(PETSC_COMM_WORLD, dumpPath.c_str(), FILE_MODE_WRITE, &viewer));
+        PetscCallAbort(PETSC_COMM_WORLD, MatView(H_, viewer));
+        PetscCallAbort(PETSC_COMM_WORLD, PetscViewerDestroy(&viewer));
+    }
+
+    if (rank == 0) {
+        if (hInner_ == HInner::AMG)
+            printf("Scalar-Helmholtz PC enabled: FGMRES outer; inner = Richardson+%s (%d V-cycles), massShift=%d\n",
+                   hAMGType_.c_str(), hVcycles_, (int)hMassShift_);
+        else
+            printf("Scalar-Helmholtz PC enabled: FGMRES outer; inner = Chebyshev+Jacobi (%d sweeps), massShift=%d\n",
+                   hSweeps_, (int)hMassShift_);
+    }
+}
+
+/*  Outer PCShell apply: solve the scalar Helmholtz system H·ψ = r independently for
+ *  each E-component (shared H, differing RHS), then pack back.  The component solves
+ *  decouple because the scalar reduction is isotropic.
+ */
+PetscErrorCode PetscHelmholtzPCApply(PC pc, Vec x, Vec y)
+{
+    PetscFunctionBeginUser;
+
+    void *ctx;
+    PetscCall(PCShellGetContext(pc, &ctx));
+    auto *solver = static_cast<PetscSolver*>(ctx);
+
+    const int nxn = solver->nxn_, nyn = solver->nyn_, nzn = solver->nzn_;
+    const int niX = solver->niX_, niY = solver->niY_, niZ = solver->niZ_;
+
+    const double *xarr;
+    double *yarr;
+    PetscCall(VecGetArrayRead(x, &xarr));
+    PetscCall(VecGetArray(y, &yarr));
+
+    array3_double &wX = *solver->pcWorkX_;
+    array3_double &wY = *solver->pcWorkY_;
+    array3_double &wZ = *solver->pcWorkZ_;
+    solver2phys(wX, wY, wZ, const_cast<double*>(xarr), nxn, nyn, nzn);
+
+    array3_double *comp[3] = {&wX, &wY, &wZ};
+    for (int c = 0; c < 3; c++) {
+        array3_double &w = *comp[c];
+
+        double *r;
+        PetscCall(VecGetArray(solver->helmR_, &r));
+        PetscInt idx = 0;
+        for (int i = 1; i <= niX; i++)
+            for (int j = 1; j <= niY; j++)
+                for (int k = 1; k <= niZ; k++)
+                    r[idx++] = w[i][j][k];
+        PetscCall(VecRestoreArray(solver->helmR_, &r));
+
+        PetscCall(KSPSolve(solver->helmKSP_, solver->helmR_, solver->helmPsi_));
+
+        const double *psi;
+        PetscCall(VecGetArrayRead(solver->helmPsi_, &psi));
+        idx = 0;
+        for (int i = 1; i <= niX; i++)
+            for (int j = 1; j <= niY; j++)
+                for (int k = 1; k <= niZ; k++)
+                    w[i][j][k] = psi[idx++];
+        PetscCall(VecRestoreArrayRead(solver->helmPsi_, &psi));
+    }
+
+    phys2solver(yarr, wX, wY, wZ, nxn, nyn, nzn);
+
+    PetscCall(VecRestoreArrayRead(x, &xarr));
+    PetscCall(VecRestoreArray(y, &yarr));
+
+    PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 /*  Solve  */
 void PetscSolver::solve(double *x, int size, const double *b, int cycle)
 {
@@ -747,6 +1062,9 @@ void PetscSolver::solve(double *x, int size, const double *b, int cycle)
     // Update block-diagonal D⁻¹ for PCShell (mass matrix changes every cycle)
     if (useSmoothPC_)
         updateDiagInv();
+    // Refresh the (1 + s·m̄) Helmholtz diagonal (mass matrix changes every cycle)
+    if (useHelmholtzPC_)
+        updateHelmholtzDiagonal();
 
     // Point the pre-allocated Vecs at the caller's arrays (zero-copy)
     PetscCallAbort(PETSC_COMM_WORLD, VecPlaceArray(petsc_x_, x));

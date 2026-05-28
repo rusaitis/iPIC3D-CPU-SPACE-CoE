@@ -275,6 +275,19 @@ void Collective::ReadInput(string inputfile)
         // Backward compat: PrecMatrix=true implies PrecType=Matrix if not explicitly set
         if (PrecMatrix && PrecType == "None")
             PrecType = "Matrix";
+        //* Physics-based scalar-Helmholtz preconditioner (PrecType = Helmholtz) knobs.
+        //*   HelmholtzInner   — inner solve for H·ψ=r: "AMG" (Richardson+GAMG/HYPRE) or
+        //*                      "Chebyshev" (Chebyshev+Jacobi). Both run on the same scalar H.
+        //*   HelmholtzAMGType — AMG backend when HelmholtzInner=AMG: "gamg" or "hypre".
+        //*   HelmholtzVcycles — inner Richardson/AMG sweeps (max_it of the nested KSP).
+        //*   HelmholtzSweeps  — inner Chebyshev iterations (max_it of the nested KSP).
+        //*   HelmholtzMassShift — include the (θΔt·4π/V)·m̄ plasma shift (true → Helmholtz,
+        //*                      false → pure Poisson α∇², for ablation).
+        HelmholtzInner     = config.read<string>("HelmholtzInner", "AMG");
+        HelmholtzAMGType   = config.read<string>("HelmholtzAMGType", "gamg");
+        HelmholtzVcycles   = config.read<int>   ("HelmholtzVcycles", 2);
+        HelmholtzSweeps    = config.read<int>   ("HelmholtzSweeps", 4);
+        HelmholtzMassShift = config.read<bool>  ("HelmholtzMassShift", true);
 
         //* Particle/grid shape function order
         //*   "Linear"    -> 8-node trilinear (CIC), default — byte-identical to legacy path
@@ -1532,6 +1545,8 @@ Collective::Collective(int argc, char **argv)
     vector<string> positional;
     string solver_override;
     string stencil_override;
+    string prec_override;
+    string helm_inner_override;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
@@ -1543,13 +1558,15 @@ Collective::Collective(int argc, char **argv)
                 string value = argv[i + 1];
                 if (flag == "-solver") solver_override = value;
                 else if (flag == "-stencil") stencil_override = value;
+                else if (flag == "-prec") prec_override = value;
+                else if (flag == "-helm-inner") helm_inner_override = value;
                 i++; // skip the value
             }
 
-            // iPIC3D recognises -solver and -stencil; PETSc flags (-ksp_*, -pc_*,
-            // -mat_*, -vec_*, -snes_*, -log_*, -options_*) are passed through to
-            // PETSc via KSPSetFromOptions.  Warn about anything else.
-            if (flag != "-solver" && flag != "-stencil"
+            // iPIC3D recognises -solver, -stencil, -prec, -helm-inner; PETSc flags
+            // (-ksp_*, -pc_*, -mat_*, -vec_*, -snes_*, -log_*, -options_*) are passed
+            // through to PETSc via KSPSetFromOptions.  Warn about anything else.
+            if (flag != "-solver" && flag != "-stencil" && flag != "-prec" && flag != "-helm-inner"
                 && flag.substr(0, 4) != "-ksp" && flag.substr(0, 3) != "-pc"
                 && flag.substr(0, 4) != "-mat" && flag.substr(0, 4) != "-vec"
                 && flag.substr(0, 5) != "-snes" && flag.substr(0, 4) != "-log"
@@ -1614,6 +1631,38 @@ Collective::Collective(int argc, char **argv)
         }
         cout << "  [-stencil] StencilOrder overridden to " << StencilOrder
              << " (n_ghost = " << stencilOrderInt << ")" << endl;
+    }
+
+    // Command-line -prec flag overrides input file PrecType (case-insensitive).
+    // Lets one input file drive a None/Matrix/Smooth/Helmholtz comparison sweep.
+    if (!prec_override.empty()) {
+        string lower;
+        for (char c : prec_override) lower += tolower(c);
+        if      (lower == "none")      PrecType = "None";
+        else if (lower == "matrix")    PrecType = "Matrix";
+        else if (lower == "smooth")    PrecType = "Smooth";
+        else if (lower == "helmholtz") PrecType = "Helmholtz";
+        else {
+            cout << "ERROR: -prec " << prec_override
+                 << " not recognised. Valid: None, Matrix, Smooth, Helmholtz." << endl;
+            MPI_Abort(MPI_COMM_WORLD, -1);
+        }
+        cout << "  [-prec] PrecType overridden to " << PrecType << endl;
+    }
+
+    // Command-line -helm-inner flag overrides HelmholtzInner (case-insensitive).
+    // Lets one input file drive an AMG-vs-Chebyshev inner-solver comparison.
+    if (!helm_inner_override.empty()) {
+        string lower;
+        for (char c : helm_inner_override) lower += tolower(c);
+        if      (lower == "amg")       HelmholtzInner = "AMG";
+        else if (lower == "chebyshev") HelmholtzInner = "Chebyshev";
+        else {
+            cout << "ERROR: -helm-inner " << helm_inner_override
+                 << " not recognised. Valid: AMG, Chebyshev." << endl;
+            MPI_Abort(MPI_COMM_WORLD, -1);
+        }
+        cout << "  [-helm-inner] HelmholtzInner overridden to " << HelmholtzInner << endl;
     }
 
     init_derived_parameters();

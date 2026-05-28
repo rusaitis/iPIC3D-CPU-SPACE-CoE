@@ -81,6 +81,7 @@ run_sweep() {
         --add-solver "HYPRE:PETSc:-pc_type hypre -pc_hypre_type boomeramg" \
         --add-solver "HYPRE_nodal:PETSc:-pc_type hypre -pc_hypre_type boomeramg -pc_hypre_boomeramg_nodal_coarsen 1 -pc_hypre_boomeramg_vec_interp_variant 2" \
         --add-solver "FieldSplit:PETSc:-pc_type fieldsplit -pc_fieldsplit_block_size 3 -pc_fieldsplit_type symmetric_multiplicative -fieldsplit_pc_type hypre" \
+        --add-solver "Helmholtz:PETSc:-prec Helmholtz" \
         $NO_PLOT $DRY_RUN "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
 }
 
@@ -99,10 +100,11 @@ run_scaling() {
         --grid-min 50 --grid-max 300 --grid-step 50 \
         --cycles "$CYCLES" --np "$NP" \
         --name pc_scaling --clean \
-        --solvers GMRES,PETSc_gmres,PCNONE,GAMG,HYPRE \
+        --solvers GMRES,PETSc_gmres,PCNONE,GAMG,HYPRE,Helmholtz \
         --add-solver "PCNONE:PETSc:-pc_type none" \
         --add-solver "GAMG:PETSc:-pc_type gamg" \
         --add-solver "HYPRE:PETSc:-pc_type hypre -pc_hypre_type boomeramg" \
+        --add-solver "Helmholtz:PETSc:-prec Helmholtz" \
         $NO_PLOT $DRY_RUN "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
 }
 

@@ -67,6 +67,7 @@ summarize      = { cmd = "python scripts/summarize.py", description = "CLI run s
 test-restart   = { cmd = "bash tests/test_restart.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], description = "Verify restart produces identical results" }
 test-energy    = { cmd = "bash tests/test_energy.sh", depends-on = ["build"], env = { EXE = "$IPIC3D_BUILD_DIR/iPIC3D" }, description = "Energy conservation regression: GEM np=1, Uniform np=1, GEM np=4 (Eps repro)" }
 test-ksp-sweep = { cmd = "bash tests/test.sh --exe $IPIC3D_BUILD_DIR/iPIC3D --cycles 20 --field-output 10 --add-solver 'PETSc_bcgs:PETSc:-ksp_type bcgs' --add-solver 'PETSc_fgmres:PETSc:-ksp_type fgmres -ksp_gmres_restart 50' --add-solver 'PETSc_jacobi:PETSc:-pc_type jacobi' --clean", depends-on = ["build"], description = "KSP/PC variant correctness: bcgs, fgmres, jacobi vs GMRES baseline" }
+test-helm   = { cmd = "bash tests/test_helm.sh --exe $IPIC3D_BUILD_DIR/iPIC3D", depends-on = ["build"], env = { EXE = "$IPIC3D_BUILD_DIR/iPIC3D" }, description = "Scalar-Helmholtz PC correctness: None vs Helmholtz (AMG+Chebyshev), np=1 & np=4 (L2 + energy enforced)" }
 
 [dependencies]
 petsc4py = ">=3.22.2,<4"

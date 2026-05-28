@@ -185,6 +185,12 @@ class Collective
     bool getPrecMatrix()                const{ return (PrecMatrix); }
     bool getPrecDiagnostics()           const{ return (PrecDiagnostics); }
     string getPrecType()                const{ return (PrecType); }
+    //* Scalar-Helmholtz preconditioner knobs (PrecType = Helmholtz).
+    string getHelmholtzInner()          const{ return (HelmholtzInner); }
+    string getHelmholtzAMGType()        const{ return (HelmholtzAMGType); }
+    int    getHelmholtzVcycles()        const{ return (HelmholtzVcycles); }
+    int    getHelmholtzSweeps()         const{ return (HelmholtzSweeps); }
+    bool   getHelmholtzMassShift()      const{ return (HelmholtzMassShift); }
     string getStencilOrder()            const{ return (StencilOrder); }
     int    getStencilOrderInt()         const{ return (stencilOrderInt); }
     int getNiterMover()                 const{ return (NiterMover); }
@@ -448,8 +454,15 @@ class Collective
     //* Print preconditioner diagnostics and dump matrix to file
     bool PrecDiagnostics;
 
-    //* Preconditioner type: "None" (default), "Matrix" (explicit P), "Smooth" (PCShell with smoothing)
+    //* Preconditioner type: "None" (default), "Matrix" (explicit P), "Smooth" (PCShell), "Helmholtz" (scalar Helmholtz)
     string PrecType;
+
+    //* Scalar-Helmholtz preconditioner knobs (PrecType = Helmholtz)
+    string HelmholtzInner;      // inner solve: "AMG" (Richardson+GAMG/HYPRE) | "Chebyshev" (Chebyshev+Jacobi)
+    string HelmholtzAMGType;    // AMG backend when HelmholtzInner=AMG: "gamg" | "hypre"
+    int    HelmholtzVcycles;    // inner AMG sweeps (nested KSP max_it)
+    int    HelmholtzSweeps;     // inner Chebyshev iterations (nested KSP max_it)
+    bool   HelmholtzMassShift;  // include (θΔt·4π/V)·m̄ plasma shift (true → Helmholtz, false → Poisson)
 
     //* Particle/grid shape function order: "Linear" (default, 8-node CIC) or "Quadratic" (27-node TSC)
     string StencilOrder;

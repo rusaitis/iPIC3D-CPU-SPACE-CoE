@@ -21,11 +21,15 @@ struct PetscSolverContext {
 
 class PetscSolver {
     friend PetscErrorCode PetscSmoothPCApply(PC pc, Vec x, Vec y);
+    friend PetscErrorCode PetscHelmholtzPCApply(PC pc, Vec x, Vec y);
 public:
     PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct,
                 double tol, const std::string &precType, bool diagnostics = false,
                 const std::string &simName = "",
-                const std::string &saveDir = "output");
+                const std::string &saveDir = "output",
+                const std::string &helmInner = "AMG",
+                const std::string &helmAMGType = "gamg",
+                int helmVcycles = 2, int helmSweeps = 4, bool helmMassShift = true);
     ~PetscSolver();
     PetscSolver(const PetscSolver&) = delete;
     PetscSolver& operator=(const PetscSolver&) = delete;
@@ -112,10 +116,47 @@ private:
     array3_double *pcWorkX_, *pcWorkY_, *pcWorkZ_;  // work arrays for PCApply
     double ccDiag_[3];       // curl-curl diagonal per E-component
     double *diagInv_;        // pre-inverted 3×3 blocks, nxn*nyn*nzn*9 doubles
+
+    // ── Physics-based scalar-Helmholtz preconditioner ────────────────────
+    //
+    // Activated by PrecType = Helmholtz.  Approximates the vector Maxwell
+    // operator A by a SCALAR Helmholtz operator applied independently to each
+    // E-component (auxiliary-space / Hiptmair–Xu style reduction):
+    //
+    //   H = (1 + s·m̄)·I  −  α·∇²       α = (cθΔt)²,  s = θΔt·4π/V,  m̄ = ⅓tr M[g=0]
+    //
+    // On the stiff solenoidal modes (∇·E≈0) the curl-curl reduces to −∇², so H
+    // captures the hard part of A while being SPD with a bounded condition
+    // number and NO null space (the +1 and plasma shift s·m̄ ~ (ωₚΔt)² lift it).
+    // Unlike the vector curl-curl operator (which defeats AMG via its gradient
+    // null space), H is exactly what AMG solves well.
+    //
+    // Both inner engines run on the same explicit scalar matrix H_ (the
+    // "matrix-free Chebyshev" variant is realized as PETSc's KSPCHEBYSHEV+PCJACOBI,
+    // which needs no hand-rolled matvec or halo exchange):
+    //   - AMG:       nested KSPRICHARDSON + PCGAMG/PCHYPRE, hVcycles_ sweeps
+    //   - Chebyshev: nested KSPCHEBYSHEV  + PCJACOBI,        hSweeps_  iterations
+    // Outer KSP is FGMRES (the nested solve is a variable preconditioner).
+    bool useHelmholtzPC_;
+    enum class HInner { AMG, Chebyshev };
+    HInner hInner_;
+    std::string hAMGType_;     // "gamg" | "hypre"
+    int  hVcycles_, hSweeps_;  // nested KSP max_it (AMG / Chebyshev)
+    bool hMassShift_;          // include s·m̄ plasma shift
+    double scalarLapStencil_[3][3][3];  // discrete node Laplacian ∇² (tensor-product, ≡ lapN2N on uniform grid)
+    Mat  H_;                   // scalar Helmholtz matrix (MATMPIAIJ, block size 1)
+    KSP  helmKSP_;             // nested inner solver for H·ψ = r
+    Vec  helmR_, helmPsi_;     // scalar RHS / solution work Vecs
+    Vec  helmDiag_;            // refreshed diagonal (−α·∇²_self + 1 + s·m̄) for MatDiagonalSet
+    void setupHelmholtzPC();
+    void assembleHelmholtz();          // build H_ off-diagonals + initial diagonal
+    void updateHelmholtzDiagonal();    // refresh (1 + s·m̄) diagonal each cycle
+    void computeScalarLaplacianStencil();
 };
 
 PetscErrorCode PetscMaxwellMatMult(Mat A, Vec x, Vec y);
 PetscErrorCode PetscSmoothPCApply(PC pc, Vec x, Vec y);
+PetscErrorCode PetscHelmholtzPCApply(PC pc, Vec x, Vec y);
 
 #endif // USE_PETSC
 #endif // PETSC_H
