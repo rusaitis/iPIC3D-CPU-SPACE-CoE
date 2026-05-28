@@ -9,6 +9,7 @@ examples/
 
 # Local notes, plans, and phase artifacts
 NOTES*.md
+TASKS*.md
 PLAN*.md
 plan*.md
 review*.md
