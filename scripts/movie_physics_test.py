@@ -253,7 +253,7 @@ def render_reconnection(panel, sim, args, theme):
 
 
 def render_2d(panels, sim, args, _theme):
-    """Side-by-side (or single) animated 2D pcolor — like movie_oblique_alfven."""
+    """Side-by-side (or single) animated 2D pcolor of one or more field panels."""
     n_panels = len(panels)
     Lx = sim.get('Lx', 1.0)
     Ly = sim.get('Ly', 1.0)

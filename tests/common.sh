@@ -54,3 +54,24 @@ warn_oversubscription() {
         echo ""
     fi
 }
+
+# Generate a parallel-decomposition .inp on the fly from an np=1 base input,
+# so we don't carry duplicate "_np4" files. Substitutes the MPI topology and
+# output-dir keys, then appends any extra KEY=VAL overrides (e.g. to flip
+# EpsilonReproducibility on for the cross-rank energy case).
+# Usage: make_np_variant BASE OUT XLEN YLEN ZLEN OUT_DIRNAME [KEY=VAL ...]
+make_np_variant() {
+    local base=$1 out=$2 x=$3 y=$4 z=$5 dir=$6; shift 6
+    sed -E \
+        -e "s|^([[:space:]]*XLEN[[:space:]]*=).*|\1 ${x}|" \
+        -e "s|^([[:space:]]*YLEN[[:space:]]*=).*|\1 ${y}|" \
+        -e "s|^([[:space:]]*ZLEN[[:space:]]*=).*|\1 ${z}|" \
+        -e "s|^([[:space:]]*SimulationName[[:space:]]*=).*|\1 $(basename "$dir")|" \
+        -e "s|^([[:space:]]*SaveDirName[[:space:]]*=).*|\1 ${dir}|" \
+        -e "s|^([[:space:]]*RestartDirName[[:space:]]*=).*|\1 ${dir}|" \
+        "$base" > "$out"
+    local kv
+    for kv in "$@"; do
+        printf '%s = %s\n' "${kv%%=*}" "${kv#*=}" >> "$out"
+    done
+}

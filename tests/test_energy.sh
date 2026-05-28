@@ -17,6 +17,7 @@
 set -euo pipefail
 
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO/tests/common.sh"
 EXE="${EXE:-${IPIC3D_BUILD_DIR:-$REPO/build}/iPIC3D}"
 OUTDIR="${OUTDIR:-$REPO/output/test_energy}"
 GEM_TOL="${GEM_TOL:-1e-13}"
@@ -34,18 +35,27 @@ mkdir -p "$OUTDIR"
 
 cd "$REPO"
 
+# run_case CASE NP BASE.inp [XLEN YLEN] [KEY=VAL ...]
+# For NP>1 the decomposition is generated on the fly from the np=1 base (see
+# make_np_variant in common.sh) — no committed "_np4" inputs. Output is forced
+# to output/test_energy/<case> so the check below finds it.
 run_case() {
-    local case=$1
-    local np=$2
-    local inp=$3
+    local case=$1 np=$2 base=$3 xlen=${4:-1} ylen=${5:-1}
+    shift $(( $# < 5 ? $# : 5 ))   # remaining args = extra KEY=VAL overrides
     local logfile="$OUTDIR/${case}.log"
-    echo "─── ${case}: mpirun -np ${np} $(basename "$EXE") inputfiles/$inp"
-    mpirun -np "$np" "$EXE" "inputfiles/$inp" > "$logfile" 2>&1
+    local inp="inputfiles/$base"
+    if [[ $np -gt 1 ]]; then
+        local tmp="$OUTDIR/${case}.inp"
+        make_np_variant "$inp" "$tmp" "$xlen" "$ylen" 1 "output/test_energy/${case}" "$@"
+        inp="$tmp"
+    fi
+    echo "─── ${case}: mpirun -np ${np} $(basename "$EXE") ${inp}"
+    mpirun -np "$np" "$EXE" "$inp" > "$logfile" 2>&1
 }
 
 run_case gem     1 ci_energy_gem.inp
 run_case uniform 1 ci_energy_uniform.inp
-run_case gem_np4 4 ci_energy_gem_np4.inp
+run_case gem_np4 4 ci_energy_gem.inp 2 2 EpsilonReproducibility=1
 
 # Inline check: read final |dE/E0| from each ConservedQuantities.txt and compare to tol.
 python3 - "$REPO/scripts" \
