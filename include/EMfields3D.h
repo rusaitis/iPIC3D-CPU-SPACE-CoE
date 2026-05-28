@@ -190,15 +190,9 @@ public:
     //* Compute the product of mass matrix with vector "V = (Vx, Vy, Vz)"
     void mass_matrix_times_vector(double* MEx, double* MEy, double* MEz, const_arr3_double vectX, const_arr3_double vectY, const_arr3_double vectZ, int i, int j, int k);
 
-    //* Energy-conserving smoothing
+    //* Energy-conserving smoothing (3-point binomial kernel)
     void energy_conserve_smooth(arr3_double data_X, arr3_double data_Y, arr3_double data_Z, int nx, int ny, int nz);
-    //* kernel_override: -1 -> use col->getSmoothKernelInt();
-    //*                  >=0 -> force this kernel (post-solve Helmholtz reuse).
-    void energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir, int kernel_override = -1);
-
-    //* Once-per-cycle Helmholtz low-pass on Eth, applied OUTSIDE the implicit
-    //* operator (does not restructure MaxwellImage).
-    void post_solve_filter_E(arr3_double Ex_field, arr3_double Ey_field, arr3_double Ez_field, int nx, int ny, int nz);
+    void energy_conserve_smooth_direction(double*** data, int nx, int ny, int nz, int dir);
 
     //* Enforce equality of the periodic-duplicate interior nodes (n_ghost_ and
     //* nxn-n_ghost_-1 on each periodic axis) on the solved E-field.

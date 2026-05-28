@@ -211,11 +211,6 @@ class Collective
 
     int getSmoothCycle()                const { return SmoothCycle; }
     int getNumSmoothings()              const { return num_smoothings; }
-    string getSmoothKernel()            const { return SmoothKernel; }
-    int    getSmoothKernelInt()         const { return smoothKernelInt; }
-    double getHelmholtzAlpha()          const { return HelmholtzAlpha; }
-    int    getHelmholtzNiter()          const { return HelmholtzNiter; }
-    bool   getPostSolveHelmholtz()      const { return PostSolveHelmholtz; }
     bool   getSubcycleMover()           const { return SubcycleMover; }
     bool   getKahanGather()                  const { return KahanGather; }
     int getCurrentCycle()               const { return CurrentCycle; }
@@ -254,25 +249,8 @@ class Collective
 
     int ImplSusceptMode; // "initial" (default), "explPredict", "implPredict"
     
-    //* Smoothing parameters
+    //* Smoothing parameters (3-point binomial kernel)
     double Smooth; int num_smoothings; int SmoothCycle;
-
-    //* binomial smoother kernel for energy_conserve_smooth_direction:
-    //*   "binomial"          (1,2,1)/4 per-dim, 27-point 3D, 1-cell half-width (default).
-    //*   "binomial5"         (1,4,6,4,1)/16 per-dim, 125-point 3D, 2-cell half-width (n_ghost>=2).
-    //*   "helmholtz"         (I - α ∇²) S_new = S_old via inner CG, α auto from L_max.
-    //*   "binomial5_refresh" (1,2,1)/4 → halo → (1,2,1)/4 — equivalent to binomial sm=2N.
-    string SmoothKernel;
-    int    smoothKernelInt;     // 0 = binomial (3-pt), 1 = binomial5 (5-pt), 2 = helmholtz, 3 = binomial5_refresh
-
-    //* Helmholtz smoother knobs
-    double HelmholtzAlpha;      // 0 (default) -> auto from box size; >0 -> explicit α
-    int    HelmholtzNiter;      // inner CG iterations per smoother call (default 12)
-
-    //* Once-per-cycle Helmholtz low-pass on (Ex, Ey, Ez) AFTER calculateE()
-    //* and BEFORE calculateB() / particle push. Decoupled from MaxwellImage
-    //* S·M·S so the implicit operator structure stays untouched.
-    bool   PostSolveHelmholtz;
 
     //* opt-in ECSIM-style combined velocity+position mover with adaptive
     //* sub-cycling (dt_sub = π·c/(4·|qom|·B)). Default off — legacy

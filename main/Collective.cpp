@@ -209,30 +209,6 @@ void Collective::ReadInput(string inputfile)
         SmoothCycle     = config.read<int>       ("SmoothCycle", 1);
         config.readInto(num_smoothings, "num_smoothings", 0);
 
-        //* smoother kernel selection (see Collective.h for semantics)
-        SmoothKernel    = config.read<string>    ("SmoothKernel", "binomial");
-        if (SmoothKernel == "binomial")
-            smoothKernelInt = 0;
-        else if (SmoothKernel == "binomial5")
-            smoothKernelInt = 1;
-        else if (SmoothKernel == "helmholtz")
-            smoothKernelInt = 2;
-        else if (SmoothKernel == "binomial5_refresh")
-            smoothKernelInt = 3;
-        else {
-            cout << "ERROR: Unknown SmoothKernel '" << SmoothKernel
-                 << "'. Valid values: binomial, binomial5, helmholtz, binomial5_refresh." << endl;
-            MPI_Abort(MPI_COMM_WORLD, -1);
-        }
-
-        //* Helmholtz smoother knobs. α = 0 auto-picks (max(Lx,Ly,Lz)/(2π))² so
-        //* the half-power point is the domain fundamental k = 2π/L_max.
-        HelmholtzAlpha  = config.read<double>    ("HelmholtzAlpha", 0.0);
-        HelmholtzNiter  = config.read<int>       ("HelmholtzNiter", 12);
-
-        //* post-`calculateE` Helmholtz hook (default off — opt-in).
-        PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
-
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 
@@ -1733,7 +1709,7 @@ void Collective::Print()
     cout << "Field solver type                      = " << getSolverType() << endl << endl;
 
     if (Smooth == 1)
-        cout << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s) using kernel '" << SmoothKernel << "'" << endl<< endl;
+        cout << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s)" << endl<< endl;
     else
         cout << "Smoothing is disabled" << endl << endl;
     
@@ -1823,7 +1799,7 @@ void Collective::save()
     my_file << "Tolerance of the field (GMRes) solver  = " << getGMREStol() << endl;
     my_file << "Field solver type                      = " << getSolverType() << endl << endl;
     if (Smooth == 1)
-        my_file << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s) using kernel '" << SmoothKernel << "'" << endl<< endl;
+        my_file << "Smoothing is enabled; data is smoothed " <<  num_smoothings << " times every " << SmoothCycle << " time cycle(s)" << endl<< endl;
     else
         my_file << "Smoothing is disabled" << endl;
 
