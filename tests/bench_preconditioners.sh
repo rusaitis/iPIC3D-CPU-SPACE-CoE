@@ -99,9 +99,10 @@ run_scaling() {
         --grid-min 50 --grid-max 300 --grid-step 50 \
         --cycles "$CYCLES" --np "$NP" \
         --name pc_scaling --clean \
-        --solvers GMRES,PETSc_gmres,PCNONE,GAMG \
+        --solvers GMRES,PETSc_gmres,PCNONE,GAMG,HYPRE \
         --add-solver "PCNONE:PETSc:-pc_type none" \
         --add-solver "GAMG:PETSc:-pc_type gamg" \
+        --add-solver "HYPRE:PETSc:-pc_type hypre -pc_hypre_type boomeramg" \
         $NO_PLOT $DRY_RUN "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
 }
 

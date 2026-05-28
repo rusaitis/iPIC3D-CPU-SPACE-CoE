@@ -19,6 +19,11 @@ petsc       = { version = ">=3.21", build = "real*" }          # real arithmetic
 [feature.build.activation.env]
 IPIC3D_BUILD_DIR   = "build"
 IPIC3D_CMAKE_EXTRA = "-DUSE_PETSC=ON"
+# conda's clang (target darwin20) can't resolve __stack_chk_* against the modern
+# macOS system SDK, so drive the openmpi wrappers with Apple clang instead — still
+# links conda's libmpi/PETSc, just uses a compiler that understands the host SDK.
+OMPI_CC            = "/usr/bin/clang"
+OMPI_CXX           = "/usr/bin/clang++"
 
 # ── Python core ─────────────────────────────────────────────────────
 [feature.py.dependencies]
