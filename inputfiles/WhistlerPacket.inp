@@ -1,4 +1,4 @@
-###! INPUT FILE — Whistler R-mode wave (Test 4: dispersive ω(k))
+###! INPUT FILE — Whistler R-mode wave
 #
 # Periodic box, guide field B0x = B0 along propagation direction. Right-
 # circularly-polarized B perturbation:
@@ -18,8 +18,7 @@
 #   k²c² = 101 → ω_R = 101·1 / (100 + 101) ≈ 0.5025  (mid-whistler band).
 #
 # Time: T = 2π/ω_R ≈ 12.5 code time. dt = 0.05; ncycles = 1000 → 4 periods.
-# FieldOutputCycle = 2 → 500 samples → FFT bin width 2π/(1000·0.05) ≈ 0.126.
-# Expected ω ≈ 0.503 → ~4 bins above DC.
+# Expected ω ≈ 0.503.
 #
 # nxc = 256 → dx = 0.039, k·dx ≈ 0.39 (well-resolved).
 # ω_pe·dt = 0.5 (ECSIM-accurate), ω_ce·dt = 0.05 (very accurate).

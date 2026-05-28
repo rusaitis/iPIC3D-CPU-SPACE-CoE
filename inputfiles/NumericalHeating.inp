@@ -1,4 +1,4 @@
-###! INPUT FILE — Numerical heating test (Test 6: CIC vs TSC stencil-order demo)
+###! INPUT FILE — Numerical heating test (CIC vs TSC stencil-order demo)
 #
 # Cold quiet Maxwellian plasma at a grid that DEEPLY violates the Debye
 # resolution criterion. With B0 = 0 and no perturbation, the only "physics"

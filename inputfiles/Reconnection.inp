@@ -1,4 +1,4 @@
-###! INPUT FILE — Magnetic reconnection (Test 7: GEM-challenge scaled-down)
+###! INPUT FILE — Magnetic reconnection (GEM-challenge scaled-down)
 #
 # A scaled-down version of the Birn et al. (2001) GEM challenge double-Harris
 # current sheet, sized to fit in the physics-validation suite (~5-15 min).

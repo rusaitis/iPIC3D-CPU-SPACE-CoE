@@ -2190,17 +2190,15 @@ void EMfields3D::sumMoments_vectorized_AoS(const Particles3Dcomm* part)
 //* Compute the product of mass matrix with vector "V = (Vx, Vy, Vz)"
 //*
 //* For the TSC stencil (NE_MASS = 63, offsets up to +/- 2) the partner reads can
-//* go +/- 2 nodes from (i, j, k). The MaxwellImage caller iterates the interior
-//* [1, nxn-2] which only guarantees a 1-cell ghost layer, so when stencil_order_
-//* >= 2 we must skip out-of-range partner reads at the boundary nodes. The skip
-//* drops at most a few "wing" contributions per boundary node — small enough to
-//* not break energy conservation in the bulk, but enough to keep us in bounds.
+//* go +/- 2 nodes from (i, j, k). The MaxwellImage caller iterates [1, nxn-2]
+//* with only a 1-cell ghost layer, so at stencil_order_ >= 2 we skip out-of-range
+//* partner reads at boundary nodes — dropping a few wing terms there, harmless to
+//* bulk energy conservation.
 void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz, const_arr3_double vectX, const_arr3_double vectY, const_arr3_double vectZ, int i, int j, int k)
 {
-    //* Kahan summation on resX/resY/resZ. The TSC stencil (~375 multiply-adds
-    //* per component per node) lets plain summation's O(N·ε) rounding dominate
-    //* cycle-1 drift; Kahan drops the no-smooth floor ~18× on TSC and ~2.5× in
-    //* the production smoothed case. CIC (14 groups) is essentially unaffected.
+    //* Kahan summation on resX/resY/resZ: the wide TSC stencil (~375 multiply-adds
+    //* per component) makes plain summation's O(N·ε) rounding non-negligible.
+    //* CIC (14 groups) is essentially unaffected.
     double resX = 0.0, cX = 0.0;
     double resY = 0.0, cY = 0.0;
     double resZ = 0.0, cZ = 0.0;
@@ -2487,23 +2485,14 @@ void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_dou
             }
 }
 
-//* Subspace-projecting variants. On a periodic-self axis (PERIODIC && {X,Y,Z}LEN==1),
-//* the phys-space nodes at indices `n_ghost` and `nxn-n_ghost-1` represent the same
-//* physical point. Treating them as two independent Krylov DOFs (legacy behaviour
-//* above) puts the GMRES iterate on the wrong side of the consistent-periodic
-//* subspace and double-weights duplicate nodes in the inner product, requiring
-//* an external projector (`unify_periodic_duplicates`, `SymmetrizeMaxwellImage`)
-//* to keep the solve stable.
-//*
-//* These overloads make the pack/unpack pair the canonical projector:
-//*   `phys2solver` zeroes the Krylov entry corresponding to the HI duplicate slot
-//*     (so duplicate DOFs contribute single weight in `dotP`).
-//*   `solver2phys` reads the LO Krylov entry and writes BOTH the LO and HI
-//*     phys positions equal (so the lifted phys-space vector is in the subspace
-//*     by construction).
-//* After this, every Krylov vector seen by GMRES carries exactly one DOF per
-//* unique physical node, and the matvec output is automatically restricted to
-//* the consistent subspace at FP-ULP without any explicit unify step.
+//* Subspace-projecting variants. On a periodic-self axis (PERIODIC && {X,Y,Z}LEN==1)
+//* the phys nodes at `n_ghost` and `nxn-n_ghost-1` are the same physical point;
+//* treating them as two Krylov DOFs double-weights the inner product and pushes the
+//* GMRES iterate off the consistent-periodic subspace. These overloads make the
+//* pack/unpack the canonical projector: `phys2solver` zeroes the HI duplicate slot
+//* (single weight in `dotP`); `solver2phys` writes the LO value into both LO and HI
+//* phys positions. GMRES then carries one DOF per unique node and the matvec stays
+//* in the subspace at FP-ULP with no explicit unify step.
 //* Average LO and HI duplicate slots into both, sequentially per axis. Same
 //* arithmetic as `EMfields3D::unify_periodic_duplicates` in phys space, applied
 //* directly to the packed Krylov layout. Sequential X→Y→Z averaging produces a
@@ -2618,15 +2607,10 @@ void phys2solver(double *vectSolver,
     //* This implicitly includes the HI duplicate values; we collapse them next.
     phys2solver(vectSolver, v1, v2, v3, nx, ny, nz, n_ghost);
 
-    //* Subspace projection in two steps:
-    //*   1. Average LO and HI duplicate Krylov entries (matches the in-MaxwellImage
-    //*      unify_periodic_duplicates that `SymmetrizeMaxwellImage` does — averaging
-    //*      here makes the flag a mathematical no-op).
-    //*   2. Zero the HI Krylov entry. The averaged value lives in LO; HI carries no
-    //*      weight in `dotP` and any FP-ε drift in the matvec output at HI is
-    //*      discarded.
-    //* GMRES iterates therefore stay strictly in the consistent-periodic subspace
-    //* with single-weight inner products at every unique physical node.
+    //* Subspace projection: average the LO and HI duplicate Krylov entries, then
+    //* zero the HI entry so the averaged value lives in LO and HI carries no weight
+    //* in `dotP`. GMRES iterates then stay in the consistent-periodic subspace with
+    //* single-weight inner products at every unique physical node.
     const int kx = nx - 2*n_ghost;
     const int ky = ny - 2*n_ghost;
     const int kz = nz - 2*n_ghost;

@@ -97,15 +97,11 @@ void communicateInterp(int nx, int ny, int nz, arr3_double _vector, arr3_double 
 void communicateNode_P(int nx, int ny, int nz, double*** vector, const VirtualTopology3D * vct, EMfields3D *EMf);
 void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const VirtualTopology3D * vct, EMfields3D *EMf);
 
-//* Multi-field batched halo wrappers. `vectors` is an array of `n_fields`
-//* pointers to 3D arrays sharing the same (nx, ny, nz) extents and Cart
-//* topology. At n_ghost > 1 (TSC) all fields exchange in one batched MPI
-//* message per direction; at n_ghost == 1 (CIC) the wrappers fall back to
-//* looping the single-field legacy path. Optional `vectors_c` companion
-//* (default nullptr) enables Neumaier compensation per field. Optional
-//* `unify_ps_dups` (default false) performs periodic-self LO=HI strict
-//* unify before the cross-rank pack so callers can drop the trailing
-//* Node_P refresh — used by the mass-matrix and ECSIM moment paths.
+//* Multi-field batched halo wrappers: `vectors` holds `n_fields` 3D arrays with
+//* the same extents/topology, exchanged in one message per direction (n_ghost>1)
+//* or looped single-field (n_ghost==1). Optional `vectors_c` enables per-field
+//* Neumaier compensation; `unify_ps_dups` does the periodic-self LO=HI unify
+//* before the cross-rank pack so callers drop the trailing Node_P refresh.
 void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf,
                               double ****vectors_c = nullptr,
@@ -113,15 +109,11 @@ void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****ve
 void communicateNode_P_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf);
 
-//* `n_ghost` (default 1) wraps the legacy 1-layer add in an outer loop over
-//  ghost layers; n_ghost > 1 sums each wider ghost layer back into the
-//  matching inner interior node.
-//* `skip_self_periodic` (default false): when true, axes whose left/right
-//* neighbours are myrank are SKIPPED — used by the TSC moment-halo fix where
-//* the periodic-self fold + copy upstream already produced the correct sum.
-//* `vector_c` (default nullptr): optional Kahan-compensation companion. Plain
-//* `+=` when null (legacy, byte-identical); Neumaier-compensated update with
-//* residual lands in `vector_c` when supplied.
+//* `n_ghost` (default 1) loops the add over ghost layers, summing each into the
+//* matching interior node. `skip_self_periodic` (default false) skips axes whose
+//* left/right neighbours are myrank (their fold+copy ran upstream). `vector_c`
+//* (default nullptr) is an optional Kahan companion: plain `+=` when null,
+//* Neumaier update with residual in `vector_c` when supplied.
 void addCorner(int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);
 void addEdgeX (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);
 void addEdgeY (int nx, int ny, int nz, double ***vector, const VirtualTopology3D * vct, int n_ghost = 1, bool skip_self_periodic = false, double ***vector_c = nullptr);

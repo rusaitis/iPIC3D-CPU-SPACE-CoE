@@ -1,4 +1,4 @@
-###! INPUT FILE — Landau damping (Test 8: kinetic resonance damping)
+###! INPUT FILE — Landau damping (kinetic resonance damping)
 #
 # Single-mode Langmuir wave seeded as δEx(x, 0) = E0·cos(2π m_x x / Lx)
 # in unmagnetized warm e-i plasma.  The cosine field couples directly to

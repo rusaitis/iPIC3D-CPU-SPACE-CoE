@@ -1,12 +1,10 @@
-###! INPUT FILE — Oblique shear Alfvén wave (Test 5: 2-axis BC stress)
+###! INPUT FILE — Oblique shear Alfvén wave (2-axis cross-rank halo stress)
 #
 # Periodic 2D box (Lx = Ly), guide field B0x along x. Walen-correct seed:
 #   δBz(x, y, 0) = δB · sin(k_x·x + k_y·y),   δBx = δBy = 0
 #   δv_z(x, y, 0) = -(δB/B0)·v_A · sin(k_x·x + k_y·y)   ← from oblique_alfven_seed
 # The matched B and v perturbation puts the system on the FORWARD shear-Alfvén
-# branch only — no backward partner, no equilibration transient. This is the
-# essential ingredient for clean ω measurement at oblique k; without δv (B-only
-# seed) the wave dies in <1 period from forward+backward standing-wave mixing.
+# branch only — no backward partner, needed for clean ω measurement at oblique k.
 #
 # Mode (m_x, m_y) = (1, 1) on Lx = Ly = 10:
 #   k_x = k_y = 2π/10 ≈ 0.628, |k| = √2·0.628 ≈ 0.889, θ_kB = 45°.
@@ -15,19 +13,13 @@
 # ω_expected = |k|·v_A·cos(45°) = 0.889·0.196/√2 ≈ 0.123.
 # (Same ω as 1D AlfvenWave m=1 — the projection k·cos(θ) = k_x is preserved.)
 #
-# Grid: 32×32×4 with ppc = 2×2×2 = 8 → 32,768 particles per rank. With the
-# Walen seed the wave is deterministic, so low ppc still gives clean ω
-# (random thermal noise averages over 32×32×4 = 4096 cells per spatial mode).
-# λ_oblique/dx ≈ 23 cells per wavelength.
+# Grid: 32×32×4, ppc = 2×2×2 = 8. The deterministic Walen seed gives clean ω
+# even at low ppc. λ_oblique/dx ≈ 23 cells per wavelength.
+# Period T ≈ 51 code time. dt = 0.25, ncycles = 800 → 4 periods; expected ω ≈ 0.123.
 #
-# Period T ≈ 51 code time. dt = 0.25, ncycles = 800 → 4 periods, FFT bin
-# 2π/(800·0.25) ≈ 0.0314 rad/t → expected ω ≈ 4 bins above DC.
-#
-# Why this test: 1D Alfvén only stresses a single decomposed axis. Oblique k
-# in the x-y plane forces wavefronts to cross diagonal X+Y rank corners every
-# cycle. Validates Phase E.14 (multi-axis corner SOR), E.16 (face-cell
-# completion), E.18 (diagonal edge-copy) on a physics quantity, not just an
-# energy-conservation regression.
+# Oblique k in the x-y plane forces wavefronts across diagonal X+Y rank corners
+# every cycle, validating the 2-axis cross-rank halo on a physics quantity, not
+# just an energy-conservation regression.
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                TEST CASE                                   %

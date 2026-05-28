@@ -1,4 +1,4 @@
-###! INPUT FILE — Plane electromagnetic wave in vacuum (Test 1: BC validation)
+###! INPUT FILE — Plane electromagnetic wave in vacuum
 #
 # Forward-propagating sinusoidal plane wave seeded at t=0:
 #   δEy(x, 0) = A · sin(2π m x / Lx)
@@ -9,8 +9,7 @@
 #
 # Domain: Lx = 10, m = 1 → k = 2π/10, T_period = Lx/(c m) = 10.
 # Resolution: dt = 0.1 (100 cycles per period); ncycles = 400 (4 periods).
-# Output cadence: FieldOutputCycle = 2 → 200 time samples.
-# FFT bin: 2π / (ncycles · dt) = 2π / 40 ≈ 0.157 → expected ω = 0.628 ≈ 4 bins.
+# Expected ω = c·k = 0.628.
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                                TEST CASE                                   %

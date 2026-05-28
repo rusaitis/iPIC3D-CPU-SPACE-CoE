@@ -67,7 +67,7 @@ constexpr HaloFlagBits to_flags(HaloKind k) {
 //*   kind           Which behavioural flag combination to apply (see
 //*                  HaloKind / to_flags above).
 //*   vectors_c      Optional Kahan-compensation companion array (per
-//*                  field). nullptr → legacy +=. Non-null → Neumaier
+//*                  field). nullptr → plain +=. Non-null → Neumaier
 //*                  sum-on-receive with residuals landing in vectors_c.
 //*   unify_ps_dups  At periodic-self axes, fold the LO=HI strict
 //*                  duplicate before the cross-rank pack so neighbours
@@ -80,13 +80,7 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
                                 bool unify_ps_dups = false);
 
 
-//! ================================================================================
-//* HaloContext: state computed once per NBDerivedHaloCommN call and shared by
-//* every phase helper. Holds n_ghost, the MPI communicator, per-axis neighbour
-//* ranks, the Cartesian topology cache, and the offsets / isCenterDim derived
-//* from the call's flags. Methods g_src and neighbour_at are reused by the
-//* phase helpers.
-//! ================================================================================
+// Halo state computed once per NBDerivedHaloCommN call, shared by the stage helpers.
 namespace {
 
 struct HaloContext {
@@ -104,27 +98,10 @@ struct HaloContext {
     int periods[3];
     bool any_xrank_periodic;
 
-    //* Field semantics.
     bool isCenterDim;
-    //* Two semantically distinct offsets:
-    //*   face_send_offset  — depth-from-boundary of the cell that gets
-    //*                       PACKED for cross-rank face/edge/corner sends.
-    //*                       At n_ghost==1: isCenterFlag ? 0 : 1
-    //*                         (Center sends LO dup at cell 1; Node sends
-    //*                         strict-near at cell 2 — buffer-swap idiom).
-    //*                       At n_ghost>1:  isCenterDim ? 0 : 1 (TSC uses
-    //*                         strict-near sends at needInterp because the
-    //*                         dup-pair is unified by do_xrank_completion).
-    //*   image_offset      — depth-from-boundary used in periodic-image
-    //*                       stride formulas (do_periodic_self_fold dst,
-    //*                       do_face_phase / do_edge_phase /
-    //*                       do_corner_periodic_self self-copy sources,
-    //*                       do_xrank_completion dst_idx).
-    //*                       At n_ghost==1: isCenterFlag ? 0 : 1 (matches
-    //*                         legacy buffer-swap: Center sources strict
-    //*                         neighbour at cell nx-2; Node sources cell nx-3
-    //*                         to skip the duplicated boundary node).
-    //*                       At n_ghost>1:  isCenterDim ? 0 : 1.
+    //* face_send_offset: depth-from-boundary of the cell packed for cross-rank
+    //* sends. image_offset: depth used in periodic-image stride formulas. Both
+    //* are (isCenterFlag ? 0 : 1) at n_ghost==1, (isCenterDim ? 0 : 1) at n_ghost>1.
     int  face_send_offset;
     int  image_offset;
 
@@ -179,11 +156,6 @@ static HaloContext make_halo_context(EMfields3D *EMf,
         (ctx.periods[2] && ctx.dims[2] > 1);
 
     ctx.isCenterDim = (isCenterFlag && !needInterp);
-    //* At n_ghost==1, offsets follow isCenterFlag (buffer-swap semantic):
-    //* Center+needInterp packs the LO dup at cell 1 for cross-rank dup unify,
-    //* and periodic_self_copies sources strict at cell nx-2.
-    //* At n_ghost>1, offsets follow isCenterDim — TSC unifies the dup pair
-    //* via do_xrank_completion instead, so packs send strict-near.
     if (ctx.n_ghost == 1) {
         ctx.face_send_offset = isCenterFlag ? 0 : 1;
         ctx.image_offset     = isCenterFlag ? 0 : 1;
@@ -201,20 +173,11 @@ static HaloContext make_halo_context(EMfields3D *EMf,
 
 }  // namespace
 
-//* ============================================================================
-//* DIAGONAL CART EDGE-COPY
-//*
-//* At a 2-axis cross-rank rank, the standard EDGE PHASE routes each edge
-//* through a SINGLE-axis Cart neighbour, which physically holds the WRONG cell
-//* for diagonal corners. This pass exchanges the (sa, sb) corner via the
-//* DIAGONAL Cart neighbour (which geometrically holds the correct cell) and
-//* OVERRIDES the standard EDGE PHASE write with COPY semantics. Range over c
-//* covers strict + dup so all stencil reaches are valid; ghost-c is excluded
-//* (FACE PHASE handles the c-axis separately). 3-axis (X+Y+Z) 8-rank corners
-//* are NOT closed here — would need an additional 3-axis CORNER override.
-//*
-//* No-op unless `any_xrank_periodic`. Tag base 500.
-//* ============================================================================
+//* Copies the (sa,sb) diagonal corner from the diagonal Cart neighbour, which
+//* holds the correct cell — the single-axis edge phase would route it through
+//* the wrong rank at a 2-axis cross-rank corner, so this overrides it (copy
+//* semantics, c over strict+dup). No-op unless any_xrank_periodic; 3-axis
+//* 8-rank corners are not closed here.
 static void do_diagonal_edge_copy(int nx, int ny, int nz,
                                    int n_fields, double ****vectors,
                                    const HaloContext &ctx)
@@ -350,35 +313,17 @@ static void do_diagonal_edge_copy(int nx, int ny, int nz,
     }
 }
 
-//* ============================================================================
-//* CROSS-RANK MOMENT COMPLETION
-//*
-//* Three nested passes that close the cross-rank moment-halo at TSC width:
-//*   A) 26-slot SOR pre-pass — partitions each rank's ghost region into 26
-//*      disjoint slabs indexed by (sx,sy,sz) ∈ {-1,0,+1}³ and sends each to
-//*      its Cartesian neighbour. Receiver SORs (sums) the slab into the
-//*      matching destination strict-interior + LO/HI duplicate. Tag base 200.
-//*   B) multi-axis corner completion — for each unordered pair (a,b) of
-//*      cross-rank axes, an extra face-a exchange restricted to b-dup
-//*      positions closes the 4-rank corner where SOR's diagonal slot only
-//*      paired 2 ranks. Tag base 300.
-//*   C) face-cell completion — for each ORDERED pair (a,b) of cross-rank
-//*      axes, an extra exchange along axis b restricted to
-//*      (i_a = a-dup, j_b ∈ b-ghost) brings the 4th rank's contribution
-//*      to the face-strict-near-bdry cell. Tag base 400.
-//*
-//* All three phases are no-ops outside (needInterp && n_ghost > 1 &&
-//* any_xrank_periodic). They share src_idx/dst_idx index helpers, hence the
-//* combined helper.
-//* ============================================================================
+//* Closes the cross-rank moment halo at TSC width with three sum passes sharing
+//* the src_idx/dst_idx helpers: a 26-slot ghost-slab exchange, a corner pass
+//* that completes 4-rank corners the diagonal slot only pairs 2 ranks for, and
+//* a face-cell pass for the 4th rank's contribution at face-strict cells.
+//* No-op unless (needInterp && n_ghost > 1 && any_xrank_periodic).
 static void do_xrank_completion(int nx, int ny, int nz,
                                  int n_fields, double ****vectors,
                                  const HaloContext &ctx, bool needInterp)
 {
-    //* SOR pre-pass runs at TSC only — `dst_idx` for sd=±1 degenerates at
-    //* n_ghost=1 (both ghost-h=0 and dup-h=ng map to the dup cell). At CIC,
-    //* cross-rank dup unify is handled by face_send_offset=0 + addFace
-    //* skip_self=false in the unified_cic_interp path.
+    //* TSC-only: at n_ghost=1 dst_idx degenerates; CIC unifies cross-rank dups
+    //* via face_send_offset=0 + addFace(skip_self=false) instead.
     if (!(needInterp && ctx.n_ghost > 1 && ctx.any_xrank_periodic)) return;
 
     const int       n_ghost      = ctx.n_ghost;
@@ -408,9 +353,7 @@ static void do_xrank_completion(int nx, int ny, int nz,
         return n_ghost + 1 + h;
     };
 
-    //! ============================================================
-    //* Phase A — 26-slot CROSS-RANK MOMENT SOR PRE-PASS
-    //! ============================================================
+    //* 26-slot ghost-slab SOR pre-pass.
     {
         const int strict_x = nx - 2 * n_ghost - 2;
         const int strict_y = ny - 2 * n_ghost - 2;
@@ -499,9 +442,7 @@ static void do_xrank_completion(int nx, int ny, int nz,
         }
     }
 
-    //! ============================================================
-    //* MULTI-AXIS CORNER COMPLETION
-    //! ============================================================
+    //* Multi-axis corner completion.
     {
         const bool xrank[3] = {
             periods[0] && dims[0] > 1,
@@ -511,7 +452,7 @@ static void do_xrank_completion(int nx, int ny, int nz,
         const int  nax[3]   = {nx, ny, nz};
 
         //* Tag scheme: 300 + axis_a*12 + ((sa+1)/2)*6 + axis_b*2 + dup_side.
-        //* Range [300, 335], disjoint from face tags (1..6) and Phase A (200..226).
+        //* Range [300, 335], disjoint from face tags (1..6) and the SOR pass (200..226).
         auto ctag = [](int axis_a, int sa, int axis_b, int dup_side) {
             return 300 + axis_a * 12 + ((sa + 1) / 2) * 6 + axis_b * 2 + dup_side;
         };
@@ -606,9 +547,7 @@ static void do_xrank_completion(int nx, int ny, int nz,
         }
     }
 
-    //! ============================================================
-    //* FACE-CELL COMPLETION
-    //! ============================================================
+    //* Face-cell completion.
     {
         const bool xrank[3] = {
             periods[0] && dims[0] > 1,
@@ -721,23 +660,11 @@ static void do_xrank_completion(int nx, int ny, int nz,
     }
 }
 
-//* ============================================================================
-//* EDGE PHASE — manual pack/unpack at N=1+
-//*
-//* Each axis has 4 edges (corners of the perpendicular face). For n_ghost > 1
-//* each corner expands to an n_ghost x n_ghost block in the cross-section
-//* perpendicular to the edge direction. Routing: yEdge → X neighbours,
-//* zEdge → Y neighbours, xEdge → Z neighbours; each Cart side carries its
-//* 2 perp corners (e.g., yEdge X-LO carries Z-LO + Z-HI corners) batched
-//* into one MPI message.
-//*
-//* Bit-identicality vs the legacy MPI-types path: legacy ran edge self-copies
-//* BEFORE the EDGE Waitall (Irecvs in flight, pre-progress reads). Manual
-//* pack/unpack mirrors that — self-copies run BEFORE Waitall+unpack so
-//* vector[sL] reads see the same FACE-post-unpack-but-EDGE-pre-Irecv state.
-//* Where self-copy and unpack target the same cell, unpack runs second and
-//* wins, matching the legacy "Irecv data overwrites self-copy" end state.
-//* ============================================================================
+//* Edge exchange (manual pack/unpack, n_ghost >= 1). Each axis has 4 edges; for
+//* n_ghost > 1 each expands to an n_ghost x n_ghost block. Routing: yEdge → X
+//* neighbours, zEdge → Y, xEdge → Z, each side batching its 2 perpendicular
+//* corners into one message. Self-copies run before Waitall+unpack, so unpack
+//* wins where both target the same cell.
 static void do_edge_phase(int nx, int ny, int nz,
                            int n_fields, double ****vectors,
                            const HaloContext &ctx)
@@ -957,7 +884,7 @@ static void do_edge_phase(int nx, int ny, int nz,
     //* copy the axis-ghost cells at perpendicular outermost-ghost positions.
     //* Reads only from face-exchange-filled cells. The widened face types
     //* cover inner ghost rows, so only outermost (index 0 / n-1) edges need
-    //* this pass. At n_ghost == 1 the g loop runs once and reduces to legacy.
+    //* this pass. At n_ghost == 1 the g loop runs once.
     for (int f = 0; f < n_fields; ++f) {
         if (rnX == myrank && lnX == myrank) {
             for (int g = 0; g < n_ghost; g++) {
@@ -1053,41 +980,14 @@ static void do_edge_phase(int nx, int ny, int nz,
 
     if (snd > 0) MPI_Waitall(snd, reqs, MPI_STATUSES_IGNORE);
 
-    //* Unpack edge recv buffers AFTER edge self-copies — at cells where
-    //* self-copy and unpack target the same ghost-corner, unpack runs
-    //* second and wins, matching the legacy "in-flight Irecv overwrites
-    //* the self-copy write" end state.
+    //* Unpack edge recv buffers AFTER edge self-copies — where both target the
+    //* same ghost-corner, unpack runs second and wins.
     unpack_edge_recvs();
 }
 
-//* ============================================================================
-//* FACE PHASE — manual pack/unpack at N=1+
-//*
-//* Each of the 6 face directions exchanges n_ghost slab layers, batched into
-//* one MPI message per direction.
-//* Bit-identical end state: same doubles in same destination cells. Manual
-//* pack/unpack also closes the buffer-reuse race structurally — Irecv targets
-//* a contiguous recv buffer, so periodic-self self-copies and sum-on-receive
-//* read vector untouched until the Waitall + unpack pair below.
-//*
-//* Ordering (preserves legacy bit-identicality):
-//*   - needInterp=true:  self-copies BEFORE Waitall+unpack — vector[sL]
-//*                        reads land on pre-Irecv (== local-gather) values,
-//*                        matching legacy when Irecvs were in flight.
-//*   - needInterp=false: Waitall+unpack BEFORE self-copies — vector[sL]
-//*                        reads see post-Irecv neighbour values, so the
-//*                        self-copy consumes the freshly received halo.
-//* ============================================================================
-
-//* ============================================================================
-//* PERIODIC-SELF FOLD — ghost → strict sum at periodic-self axes
-//*
-//* TSC gather deposits into ghost cells at periodic-self axes; this helper
-//* sums those ghost contributions into the matching strict-interior cells
-//* (n_ghost layers deep) so cross-rank packs that follow carry post-fold
-//* strict. No-op outside periodic-self (cnt[d] for cross-rank is handled by
-//* the FACE phase below). Caller gates on needInterp.
-//* ============================================================================
+//* Periodic-self fold: sums TSC ghost-cell deposits at periodic-self axes into
+//* the matching strict-interior cells (n_ghost deep) so following cross-rank
+//* packs carry post-fold strict. No-op outside periodic-self; gated on needInterp.
 static void do_periodic_self_fold(int nx, int ny, int nz,
                                    int n_fields, double ****vectors,
                                    const HaloContext &ctx)
@@ -1138,19 +1038,10 @@ static void do_periodic_self_fold(int nx, int ny, int nz,
     }
 }
 
-//* ============================================================================
-//* UNIFY PERIODIC-SELF DUPLICATES — average/sum LO=HI strict dup pair
-//*
-//* At periodic-self axes (np=1 + periodic), LO dup at i=n_ghost and HI dup
-//* at i=nx-n_ghost-1 are duplicates of the same physical node. Gather may
-//* scatter the deposit asymmetrically. Unify makes them equal:
-//*   - n_ghost > 1 (TSC): SUM (each carries half the physical-node deposit)
-//*   - n_ghost = 1 (CIC): AVG (each holds the full deposit; avg is no-op
-//*                              when LO == HI bit-exact)
-//* Run before the cross-rank pack so neighbours' ghosts inherit post-unify
-//* strict. Replaces the legacy in-place unify_periodic_duplicates + post-
-//* unify communicateNode_P refresh that lived at the call site.
-//* ============================================================================
+//* Unify the LO=HI periodic-self strict duplicates (same physical node at
+//* i=n_ghost and i=nx-n_ghost-1) that an asymmetric gather can split: SUM at
+//* n_ghost>1 (TSC, each carries half), AVG at n_ghost=1 (CIC, no-op when already
+//* equal). Runs before the cross-rank pack so neighbour ghosts inherit it.
 static void do_unify_ps_dups(int nx, int ny, int nz,
                               int n_fields, double ****vectors,
                               const HaloContext &ctx)
@@ -1203,7 +1094,12 @@ static void do_unify_ps_dups(int nx, int ny, int nz,
     }
 }
 
-//* ============================================================================
+//* Face exchange (manual pack/unpack, n_ghost >= 1): each of 6 directions sends
+//* n_ghost slab layers batched into one message. Irecv targets a separate recv
+//* buffer, so self-copies / sum-on-receive read vector untouched until unpack.
+//* Ordering: needInterp=true runs self-copies BEFORE Waitall+unpack (reads land
+//* on pre-Irecv local-gather values); needInterp=false unpacks first so the
+//* self-copy consumes the received halo.
 static void do_face_phase(int nx, int ny, int nz,
                            int n_fields, double ****vectors,
                            const HaloContext &ctx, bool needInterp)
@@ -1281,10 +1177,8 @@ static void do_face_phase(int nx, int ny, int nz,
                 vectors[f][i][j][iz] = buf[idx++];
     };
 
-    //* Pack send buffers from strict-interior cells (post-fold; periodic-self
-    //* sum-on-receive ran in do_periodic_self_fold before this phase, and
-    //* unify ran in do_unify_ps_dups when requested). g_src(g) = (n_ghost-1-g)
-    //* source-depth swap matches the legacy MPI-types path.
+    //* Pack send buffers from strict-interior cells (post-fold and, when
+    //* requested, post-unify). g_src(g) = (n_ghost-1-g) reverses ghost depth.
     for (int f = 0; f < n_fields; ++f) {
         for (int g = 0; g < n_ghost; ++g) {
             const int s = ctx.g_src(g);
@@ -1384,30 +1278,20 @@ static void do_face_phase(int nx, int ny, int nz,
     //* Unpack neighbour values into ghost slabs.
     unpack_face_recvs();
 
-    //* Periodic-self self-copies AFTER cross-rank unpack for both needInterp
-    //* and !needInterp paths. With manual pack/unpack into separate
-    //* face_recv_bufs (buffer-reuse race fix), vectors[sL] is decoupled from Irecv —
-    //* safe to read post-unpack. Running self-copy AFTER unpack ensures the
-    //* periodic-self ghost cells inherit the post-cross-rank-exchange strict
-    //* values; otherwise, ghost cells at (cross-rank-axis ghost) ∩
-    //* (periodic-self-axis ghost) — i.e., k=0/12 and k=nz-1/nz-2 columns
-    //* sitting in X- or Y-ghost — hold pre-exchange-strict data that
-    //* face_phase X/Y unpack cannot reach (it only writes k ∈ [1, nz-2]).
-    //* Required for mass-matrix's |offset|=2 stencil correctness when
-    //* unify_ps_dups=true and no trailing Node_P_multi runs.
+    //* Periodic-self self-copies run AFTER cross-rank unpack (separate recv
+    //* buffers decouple vectors[sL] from the Irecv) so periodic-self ghosts
+    //* inherit post-exchange strict. The (cross-rank ghost) ∩ (periodic-self
+    //* ghost) columns that face unpack cannot reach (it writes only k ∈ [1, nz-2])
+    //* need this for mass-matrix |offset|=2 correctness when unify_ps_dups=true
+    //* and no trailing Node_P_multi runs.
     periodic_self_copies();
 }
 
-//* ============================================================================
-//* CORNER PHASE — manual pack / unpack at N=1+
-//*
-//* Each X-LO/HI Cart side carries all 4 of its perp Y/Z corners (Y-LO/HI ×
-//* Z-LO/HI), each an n_ghost^3 cube, batched into one MPI message of
-//* 4 × n_ghost^3 × n_fields doubles. Replaces the legacy 32-scalar-MPI-
-//* message-per-side path. Only fires when both Y and Z directions have at
-//* least one cross-rank face neighbour — at np=1 along Y or Z, the corner
-//* cube is filled by the periodic-self self-copies further down.
-//* ============================================================================
+//* Corner exchange (manual pack/unpack, n_ghost >= 1). Each X-LO/HI Cart side
+//* carries all 4 of its perpendicular Y/Z corners (each an n_ghost^3 cube)
+//* batched into one message. Only fires when both Y and Z have a cross-rank
+//* face neighbour; at np=1 along Y or Z the cube is filled by the periodic-self
+//* self-copies below.
 static void do_corner_phase(int nx, int ny, int nz,
                              int n_fields, double ****vectors,
                              const HaloContext &ctx)
@@ -1507,12 +1391,9 @@ static void do_corner_phase(int nx, int ny, int nz,
     }
 }
 
-//* ============================================================================
-//* Periodic single-rank corner self-copies. Generalized from legacy CIC code:
-//* uses else-if cascade — for np=1 (all periodic) the first branch (X-self)
-//* handles all 8 corner cubes via the cascade face → edge → corner. Source
-//* cells were filled by edge self-copies in the EDGE PHASE.
-//* ============================================================================
+//* Periodic single-rank corner self-copies. The else-if cascade lets the first
+//* branch (X-self) fill all 8 corner cubes at np=1 via face → edge → corner;
+//* source cells were filled by the edge self-copies in do_edge_phase.
 static void do_corner_periodic_self(int nx, int ny, int nz,
                                      int n_fields, double ****vectors,
                                      const HaloContext &ctx)
@@ -1617,31 +1498,18 @@ static void NBDerivedHaloCommN(int nx, int ny, int nz,
         MPI_Errhandler_set(ctx.comm, MPI_ERRORS_RETURN);
     #endif
 
-    //! ============================================================
-    //  Phase order (each phase no-ops when its precondition fails):
-    //   1. Cross-rank moment completion (26-slot SOR pre-pass + corner
-    //      and face-cell completions). Only when (needInterp &&
-    //      n_ghost > 1 && any_xrank_periodic). Must precede the FACE
-    //      phase whose COPY semantics would overwrite the ghost values
-    //      the pre-pass needs to send.
-    //   2. Periodic-self fold (ghost → strict sum at periodic-self
-    //      axes). Only when (needInterp && !cic_interp): at cic_interp
-    //      the trailing addFace(skip_self=false) does the dup-pair
-    //      unify instead, and folding here would double-count.
-    //   3. Periodic-self LO=HI dup unify (SUM at TSC, AVG at CIC). Only
-    //      when caller opts in via unify_ps_dups (mass-matrix / ECSIM).
-    //   4. FACE phase (manual pack/unpack at N=1+).
-    //   5. EDGE / CORNER / diagonal Cart edge-copy / corner periodic-
-    //      self self-copies — only when !isFaceOnlyFlag.
-    //   6. Trailing addFace family at n_ghost==1 (CIC moments interp).
-    //   7. At cic_interp + unify_ps_dups: re-run FACE/EDGE/CORNER with
-    //      a Node-style ctx (offsets=1) to overwrite ghosts with
-    //      strict-near values, since step 6 leaves them at dup.
-    //
-    //  NOTE: at self-periodic thin axes where n_cells_per_rank < 2*n_ghost
-    //  the left/right addFace destinations overlap and double-count
-    //  periodic-wrap contributions. Require nxc_r >= 2*n_ghost - 1.
-    //! ============================================================
+    //* Stage order (each no-ops when its precondition fails):
+    //*  1. Cross-rank moment completion (TSC, any_xrank_periodic) — must precede
+    //*     FACE, whose copy semantics would overwrite the ghosts it sends.
+    //*  2. Periodic-self fold — skipped at cic_interp, where the trailing
+    //*     addFace(skip_self=false) does the dup-pair unify (folding here double-counts).
+    //*  3. Periodic-self LO=HI dup unify, when the caller sets unify_ps_dups.
+    //*  4. FACE, then 5. EDGE/CORNER/diagonal/corner-self (skipped if isFaceOnlyFlag).
+    //*  6. Trailing addFace family at n_ghost==1 (CIC interp).
+    //*  7. At cic_interp + unify_ps_dups, re-run FACE/EDGE/CORNER with a Node-style
+    //*     ctx (offsets=1) to replace the dup ghosts left by step 6 with strict-near.
+    //* Thin self-periodic axes double-count when n_cells_per_rank < 2*n_ghost;
+    //* require nxc_r >= 2*n_ghost - 1.
     const bool cic_interp = (ctx.n_ghost == 1) && needInterp;
     do_xrank_completion(nx, ny, nz, n_fields, vectors, ctx, needInterp);
     if (needInterp && !cic_interp)
@@ -1810,19 +1678,14 @@ void communicateCenterBoxStencilBC_P(int nx, int ny, int nz, arr3_double _vector
 
 
 /** add the values of ghost cells faces to the 3D physical vector */
-//  For n_ghost == 1 the loop runs once with g = 0, reproducing the
-//  byte-identical literal indices of the original implementation.
-//  For n_ghost > 1, ghost layer g (counted from the outermost) is summed into
-//  the corresponding interior layer at depth g from the boundary node:
-//      left:  vector[n_ghost + g]   += vector[g]
+//  Ghost layer g (from the outermost) is summed into the interior layer at
+//  depth g from the boundary node:
+//      left:  vector[n_ghost + g]    += vector[g]
 //      right: vector[nx-1-n_ghost-g] += vector[nx-1-g]
-//  No chained accumulation: each (src, dst) pair is independent because the
-//  src lives in the ghost slab and the dst lives strictly inside the interior.
-//* Per-axis periodic-self skip flags. When `skip_self_periodic` is on
-//* AND an axis's left and right neighbours are myrank, the periodic-self
-//* fold + copy upstream already handled that axis; running the add*
-//* helpers on it would double-count. All five add* functions begin with
-//* this same computation — hoist it.
+//  Each (src, dst) pair is independent (src in ghost slab, dst strictly interior).
+//* Per-axis periodic-self skip: when skip_self_periodic is set and an axis's
+//* left/right neighbours are both myrank, the upstream fold+copy already handled
+//* it, so the add* helpers skip it to avoid double-counting.
 struct AxisSkip { bool x, y, z; };
 
 static inline AxisSkip axis_skip(const VirtualTopology3D * vct, bool skip_self_periodic)
@@ -2075,26 +1938,14 @@ void communicateNode_P(int nx, int ny, int nz, arr3_double _vector, const Virtua
     communicateNode_P(nx, ny, nz, _vector.fetch_arr3(), vct, EMf);
 }
 
-//* ================================================================================
-//  Multi-field call-site wrappers.
-//
-//  Batches N ≥ 1 fields sharing the same (nx, ny, nz) extents and the same
-//  MPI Cartesian topology into one halo exchange per direction. At the
-//  EMfields3D mass-matrix call sites, replacing N sequential single-field
-//  calls with one batched call cuts MPI message count by N× and amortises
-//  per-message latency over an N×-larger payload.
-//
-//  Forward straight to NBDerivedHaloCommN — the unified helper handles the
-//  full halo end-to-end including the post-trailing Node-style ghost
-//  refresh at CIC + unify_ps_dups + needInterp.
-//* ================================================================================
+//* Multi-field call-site wrappers: batch N >= 1 fields sharing the same extents
+//* and topology into one exchange per direction, cutting MPI message count N×.
+//* All forward to NBDerivedHaloCommN.
 
-//* Multi-field interpolation halo. Optional `vectors_c` companion array
-//* (parallel layout to `vectors`) routes the receive through Neumaier
-//* compensation per field. When `unify_ps_dups=true` the halo also performs
-//* the periodic-self LO=HI strict unify before the cross-rank pack — so
-//* cross-rank ghosts inherit post-unify strict and no trailing Node_P call
-//* is needed at the call site.
+//* Multi-field interpolation halo. Optional `vectors_c` companion array routes
+//* the receive through per-field Neumaier compensation. With unify_ps_dups=true
+//* the halo also does the periodic-self LO=HI unify before the cross-rank pack,
+//* so no trailing Node_P call is needed at the call site.
 void communicateInterp_multi(int nx, int ny, int nz, int n_fields, double ****vectors,
                               const VirtualTopology3D *vct, EMfields3D *EMf,
                               double ****vectors_c, bool unify_ps_dups)

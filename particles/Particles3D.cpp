@@ -1626,7 +1626,7 @@ void Particles3D::ECSIM_position(Field *EMf)
     }
 }
 
-//? ECSIM combined velocity+position mover — port of ecsim/particles/Particles3D.cpp:4209
+//? ECSIM combined velocity+position mover (ported from the ECSIM reference code).
 //  Differs from iPIC3D's ECSIM_velocity+ECSIM_position split:
 //   (a) NiterMover inner iterations of Boris midpoint converge the uptilde velocity
 //       at the midpoint position (xptilde + uptilde * dt_sub/2).

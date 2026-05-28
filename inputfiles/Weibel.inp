@@ -1,4 +1,4 @@
-###! INPUT FILE — Weibel filamentation (Test 9: anisotropy-driven B generation)
+###! INPUT FILE — Weibel filamentation (anisotropy-driven B generation)
 #
 # Two cold counter-streaming electron populations along z (drifting at ±u_b)
 # in a 2D box with B = 0 at t = 0.  Their transverse current density is

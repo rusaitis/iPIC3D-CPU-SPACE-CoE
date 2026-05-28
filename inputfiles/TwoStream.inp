@@ -1,4 +1,4 @@
-###! INPUT FILE — Cold two-stream instability (Test 3: linear growth-rate γ)
+###! INPUT FILE — Cold two-stream instability (linear growth-rate γ)
 #
 # Counter-streaming electron beams in a periodic box; ions provide a stationary
 # neutralizing background. Reuses Case = Maxwellian (no new C++ init function);

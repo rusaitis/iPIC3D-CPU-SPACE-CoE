@@ -82,7 +82,7 @@ B0z                            = 0.0                                            
 #   Ion cyclotron period T_ci ≈ 65       Alfvén transit (box) L/v_A ≈ 309
 #   Current sheet transit δ/v_A ≈ 2.6    Tearing e-fold ≈ 20–100
 #
-#   Phase                    Time         Cycles   What to expect
+#   Stage                    Time         Cycles   What to expect
 #   Initial transient        0–25         0–200    Perturbation adjustment
 #   X-point formation        50–100       400–800  Reconnected flux, outflow jets
 #   Peak reconnection        100–250      800–2000 Dramatic island growth
@@ -106,32 +106,17 @@ SmoothCycle                    = 1	                                           # 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                             ENERGY CONSERVATION                            %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# Hard-coded fixes that close iPIC3D's historical energy-conservation gap to
-# ε_mach (DoubleGEM np=1 and np=4):
-#   - offset-by-one self-periodic NODE halo convention (Com3DNonblk.cpp)
-#   - subspace-projecting solver2phys/phys2solver pair (collapses duplicate
-#     periodic-DOFs out of the Krylov representation)
-#   - lap_graddiv self-adjoint Maxwell operator (selected below)
+# ECSIM conserves energy to ε_mach (np=1 and np=4) with the self-adjoint
+# lap_graddiv operator below; see NOTES-PETSC.md for halo/solver details.
 
 MaxwellOperator                = lap_graddiv                                   # Self-adjoint form (-grad div + lap); curl_curl is not self-adjoint
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                       EPSILON REPRODUCIBILITY (CI)                         %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# `EpsilonReproducibility=1` is a composite meta-flag that lifts the defaults
-# of six Kahan + determinism knobs below. Enabling it produces a run where
-# np=1 and np=4 match each other to ~2 ULPs on conserved quantities, and
-# each matches ECSIM's ε_mach energy-conservation class. NOT strict byte
-# reproducibility — residuals ~1-2 ULPs remain from MPI_Allreduce tree
-# ordering. Recommended use: dedicated CI reproducibility job, reference-run
-# generation, and regression detection below FP noise.
-#
-# Cost when enabled: +2x companion-array memory for deposited fields,
-# ~10-20% wall-clock. Default OFF so production runs keep legacy performance.
-# (Threading speed preserved — KahanGather gives multi-thread bit-identity
-# without forcing single-thread gather.)
-#
-# Individual flags can still be overridden below. Uncomment to enable:
+# Composite meta-flag: lifts the six Kahan + determinism knobs below so np=1 and
+# np=4 agree to ~2 ULPs on conserved quantities (off by default; ~10-20% slower).
+# Uncomment to enable, or set individual sub-flags to override:
 # EpsilonReproducibility         = 1
 # Sub-flags (all default = EpsilonReproducibility; set explicitly to override):
 #   DeterministicMPIReductions   = 1                                           # Rank-ordered Gather+sum+Bcast

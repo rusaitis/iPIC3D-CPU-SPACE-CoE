@@ -239,17 +239,13 @@ void Collective::ReadInput(string inputfile)
         SaveDirName     = config.read<string>    ("SaveDirName", "data");
         RestartDirName  = config.read<string>    ("RestartDirName", "data");
 
-        //* Composite knob — lifts the defaults of the seven determinism + Kahan
-        //* flags below to true so np=1 and np=4 match within ~2 ULPs on conserved
-        //* quantities. Individual flags still override explicitly. Not strict byte
-        //* reproducibility (cross-np residuals ~1-2 ULP from MPI tree order remain).
+        //* Composite knob: lifts the determinism + Kahan flags below so np=1 and
+        //* np=4 match within ~2 ULPs on conserved quantities (a ~2-ULP MPI-tree-
+        //* order residual remains; not strict byte reproducibility).
         const bool eps_repro = config.read<bool>("EpsilonReproducibility", false);
 
-        //* Bit-determinism knobs. Default off (legacy perf) unless eps_repro flips them.
-        //* Note: DeterministicThreadMoments is NOT lifted by eps_repro — KahanGather
-        //* alone gives multi-thread bit-identity (compensated accumulation is order-
-        //* independent), preserving threading speed. DTM remains opt-in for the
-        //* legacy single-thread reproducibility path.
+        //* Bit-determinism knobs, default off for performance. DeterministicThreadMoments
+        //* is NOT lifted by eps_repro — KahanGather already gives multi-thread bit-identity.
         DeterministicMPIReductions = config.read<bool>("DeterministicMPIReductions", eps_repro);
         DeterministicThreadMoments = config.read<bool>("DeterministicThreadMoments", false);
         DeterministicParticleComm  = config.read<bool>("DeterministicParticleComm", eps_repro);
