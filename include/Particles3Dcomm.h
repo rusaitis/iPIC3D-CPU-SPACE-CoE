@@ -128,11 +128,6 @@ public:
     void sort_particles_serial();
     void sort_particles_serial_AoS();
 
-    //* Cross-code particle init dump. Writes `{dir}/particles_init_s{ns}_r{rank}.txt`
-    //* as plain-text 17-digit `x y z u v w q` per line. ECSIM's `LoadParticlesInit`
-    //* reads the same format so both codes start from byte-identical state.
-    void dump_particles_init(const std::string& dir) const;
-
     //* Particle creation methods
     void reserve_remaining_particle_IDs()
     {

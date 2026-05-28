@@ -233,38 +233,6 @@ void Collective::ReadInput(string inputfile)
         //* post-`calculateE` Helmholtz hook (default off — opt-in).
         PostSolveHelmholtz = config.read<bool>   ("PostSolveHelmholtz", false);
 
-        //* Per-stage MaxwellImage dump (default off). When on, the first
-        //* matvec of cycle `DumpMaxwellImageStagesCycle` (default 1) writes
-        //* per-stage binary fields into SaveDirName for cross-code byte diff.
-        DumpMaxwellImageStages      = config.read<bool>("DumpMaxwellImageStages", false);
-        DumpMaxwellImageStagesCycle = config.read<int> ("DumpMaxwellImageStagesCycle", 1);
-
-        //* Cross-code particle init dump (default off).
-        DumpParticlesInit           = config.read<bool>("DumpParticlesInit", false);
-
-        //* Mass-matrix diagonal dump (default off).
-        DumpMassMatrixDiag          = config.read<bool>("DumpMassMatrixDiag", false);
-
-        //* Diagnostic: zero M·E or curl² contribution to MaxwellImage. Default off.
-        DisableMassMatrixInImage    = config.read<bool>("DisableMassMatrixInImage", false);
-        DisableCurl2InImage         = config.read<bool>("DisableCurl2InImage", false);
-
-        //* Eigenmode probe: sweep plane-wave test fields through MaxwellImage at
-        //* cycle 1, dump CSV of (mode, k, real, imag) per axis, then exit. Used
-        //* to compare Linear vs TSC operator spectra. Default off.
-        EigenmodeProbe              = config.read<bool>("EigenmodeProbe", false);
-
-        //* Diagnostic: in mass_matrix_times_vector skip groups whose offsets
-        //* lie outside the 3-cube [-1, 1]^3 (i.e., the TSC-only di=±2 etc.
-        //* couplings). Default off.
-        RestrictMassMatrix3Cube     = config.read<bool>("RestrictMassMatrix3Cube", false);
-
-        //* Stage-by-stage M dump inside the mass-matrix halo pipeline. Writes
-        //* Mxx[0]/Myy[0]/Mzz[0] at four points (pre-halo, post-addFace,
-        //* post-self-copy, post-unify) at cycle 1 to localise where the boundary
-        //* band is introduced.
-        DumpMassMatrixStages        = config.read<bool>("DumpMassMatrixStages", false);
-
         //* ECSIM-style combined velocity+position mover (opt-in).
         SubcycleMover      = config.read<bool>   ("SubcycleMover", false);
 

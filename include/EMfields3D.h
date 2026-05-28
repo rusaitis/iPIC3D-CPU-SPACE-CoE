@@ -154,9 +154,6 @@ public:
     void PoissonImage(double *image, double *vector);
     /*! Image of Maxwell Solver (for Solver) */
     void MaxwellImage(double *im, double *vector);
-    /*! Eigenmode probe — sweeps plane-wave test fields through MaxwellImage and
-     *  writes a CSV of (axis, mode, k, projection re/im) for spectral diagnosis. */
-    void eigenmode_probe();
     /*! Maxwell source term (for SOLVER) */
     void MaxwellSource(double *bkrylov);
     /*! Impose a constant charge inside a spherical zone of the domain */
@@ -206,12 +203,6 @@ public:
     //* Enforce equality of the periodic-duplicate interior nodes (n_ghost_ and
     //* nxn-n_ghost_-1 on each periodic axis) on the solved E-field.
     void unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr3_double Ezf, int nx, int ny, int nz);
-
-    //* Per-stage dump inside MaxwellImage. Writes a full nxn×nyn×nzn IEEE-754
-    //* double-precision array to {SaveDirName}/maxwell_stage_c{cycle}_m0_{stage}_{x|y|z}_r{rank}.bin
-    //* in row-major C order with k (z) fastest. Called only on the first matvec
-    //* of the target cycle when DumpMaxwellImageStages is true.
-    void dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3_double aY, arr3_double aZ);
 
     /*! communicate ghost for densities and interp rho from node to center */
     void interpDensitiesN2C();
@@ -657,11 +648,6 @@ private:
     const Collective& _col;
     const Grid& _grid;
     const VirtualTopology3D&_vct;
-
-    //* Per-stage MaxwellImage dump bookkeeping. mi_last_dump_cycle_ tracks the
-    //* most recent cycle in which we already dumped (one set of stage files per
-    //* run, on the first matvec of the target cycle). -1 = never dumped.
-    int mi_last_dump_cycle_ = -1;
 
     /*! light speed */
     double c;

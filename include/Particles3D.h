@@ -129,14 +129,6 @@ class Particles3D:public Particles3Dcomm
 
     //? ============================================================================ ? //
 
-    /** DEPRECATED — ghost declaration, NO definition in .cpp. Safe to delete this line. */
-    void mover_explicit(Field * EMf);
-   
-    /** DEPRECATED — legacy IMM mover, unreachable in ECSIM runs.
-     *  ParticlesMover() dispatches to ECSIM_velocity/ECSIM_position.
-     *  Retained for reference; safe to delete. */
-    void mover_PC(Field * EMf);
-    
     //* ECSIM (RelSIM) - velocity and position update
     void ECSIM_velocity(Field * EMf);
     void RelSIM_velocity(Field * EMf);
@@ -159,22 +151,6 @@ class Particles3D:public Particles3Dcomm
     //* ECSIM - fix dimension of the problem
     void fixPosition();
 
-    /** DEPRECATED — legacy IMM mover (AoS). Unreachable in ECSIM runs; safe to delete. */
-    void mover_PC_AoS(Field * EMf);
-    /** DEPRECATED — legacy IMM mover (relativistic AoS). Unreachable in ECSIM runs; safe to delete. */
-    void mover_PC_AoS_Relativistic(Field * EMf);
-    /** DEPRECATED — legacy IMM mover (vectorized AoS). Unreachable in ECSIM runs; safe to delete. */
-    void mover_PC_AoS_vec(Field * EMf);
-    /** DEPRECATED — legacy IMM mover (MIC intrinsics). Unreachable in ECSIM runs; safe to delete. */
-    void mover_PC_AoS_vec_intr(Field * EMf);
-    /** DEPRECATED — ghost declaration, NO definition in .cpp. Safe to delete this line.
-     *  Original comment noted: "this computes garbage". */
-    void mover_PC_AoS_vec_onesort(Field * EMf);
-    /** DEPRECATED — ghost declaration, NO definition in .cpp. Safe to delete this line. */
-    void mover_PC_vectorized(Field * EMf);
-    /** DEPRECATED — legacy IMM relativistic mover, zero call sites. Safe to delete. */
-    int mover_relativistic(Field * EMf);
-   
     private:
     /** repopulate particles in a single cell */
     void populate_cell_with_particles(int i, int j, int k, double q, double dx_per_pcl, double dy_per_pcl, double dz_per_pcl);

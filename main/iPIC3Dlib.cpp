@@ -341,14 +341,6 @@ int c_Solver::Init(int argc, char **argv)
             particles[i].fixPosition();
         }
 
-        //* Cross-code particle init dump. Per-rank text file into SaveDirName so
-        //* ECSIM's LoadParticlesInit consumes the same state. No-op when off.
-        if (col->getDumpParticlesInit())
-        {
-            for (int i = 0; i < ns; i++)
-                particles[i].dump_particles_init(col->getSaveDirName());
-        }
-
     }
 
     //* Allocate test particles (if any)
@@ -606,17 +598,6 @@ void c_Solver::ComputeEMFields(int cycle)
     #ifdef __PROFILING__
     time_e.start();
     #endif
-    
-    //* Eigenmode probe (one-shot at cycle 1 if flag set; exits after dump).
-    if (col->getEigenmodeProbe() && cycle == 1)
-    {
-        EMf->eigenmode_probe();
-        if (vct->getCartesian_rank() == 0)
-            std::cout << "*** EigenmodeProbe done — exiting before calculateE ***" << std::endl;
-        MPI_Barrier(MPI_COMM_WORLD);
-        MPI_Finalize();
-        exit(0);
-    }
 
     //? Compute E
     EMf->calculateE();

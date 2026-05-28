@@ -202,7 +202,7 @@ static HaloContext make_halo_context(EMfields3D *EMf,
 }  // namespace
 
 //* ============================================================================
-//* Phase E.18 — DIAGONAL CART EDGE-COPY
+//* DIAGONAL CART EDGE-COPY
 //*
 //* At a 2-axis cross-rank rank, the standard EDGE PHASE routes each edge
 //* through a SINGLE-axis Cart neighbour, which physically holds the WRONG cell
@@ -236,8 +236,9 @@ static void do_diagonal_edge_copy(int nx, int ny, int nz,
     const int  nax[3]   = {nx, ny, nz};
 
     //* Tag scheme: 500 + (axis_a*3 + axis_b)*16 + ((sa+1)/2)*8 + ((sb+1)/2)*4.
-    //* Range fits in [500, 547]. Disjoint from face tags (1..6), 26-slot SOR
-    //* (200..226), Phase E.14 (300..335), and Phase E.16 (400..443).
+    //* Range fits in [500, 547]. Disjoint from face tags (1..6), the 26-slot
+    //* cross-rank SOR (200..226), the corner-completion pass (300..335), and
+    //* the face-cell completion pass (400..443).
     auto detag = [](int axis_a, int axis_b, int sa, int sb) {
         return 500 + (axis_a * 3 + axis_b) * 16
                     + ((sa + 1) / 2) * 8
@@ -350,19 +351,19 @@ static void do_diagonal_edge_copy(int nx, int ny, int nz,
 }
 
 //* ============================================================================
-//* CROSS-RANK MOMENT COMPLETION (Phases A + B + C)
+//* CROSS-RANK MOMENT COMPLETION
 //*
 //* Three nested passes that close the cross-rank moment-halo at TSC width:
 //*   A) 26-slot SOR pre-pass — partitions each rank's ghost region into 26
 //*      disjoint slabs indexed by (sx,sy,sz) ∈ {-1,0,+1}³ and sends each to
 //*      its Cartesian neighbour. Receiver SORs (sums) the slab into the
 //*      matching destination strict-interior + LO/HI duplicate. Tag base 200.
-//*   B) Phase E.14 multi-axis corner completion — for each unordered pair
-//*      (a,b) of cross-rank axes, an extra face-a exchange restricted to
-//*      b-dup positions closes the 4-rank corner where SOR's diagonal slot
-//*      only paired 2 ranks. Tag base 300.
-//*   C) Phase E.16 face-cell completion — for each ORDERED pair (a,b) of
-//*      cross-rank axes, an extra exchange along axis b restricted to
+//*   B) multi-axis corner completion — for each unordered pair (a,b) of
+//*      cross-rank axes, an extra face-a exchange restricted to b-dup
+//*      positions closes the 4-rank corner where SOR's diagonal slot only
+//*      paired 2 ranks. Tag base 300.
+//*   C) face-cell completion — for each ORDERED pair (a,b) of cross-rank
+//*      axes, an extra exchange along axis b restricted to
 //*      (i_a = a-dup, j_b ∈ b-ghost) brings the 4th rank's contribution
 //*      to the face-strict-near-bdry cell. Tag base 400.
 //*
@@ -499,7 +500,7 @@ static void do_xrank_completion(int nx, int ny, int nz,
     }
 
     //! ============================================================
-    //* Phase E.14 — MULTI-AXIS CORNER COMPLETION
+    //* MULTI-AXIS CORNER COMPLETION
     //! ============================================================
     {
         const bool xrank[3] = {
@@ -606,7 +607,7 @@ static void do_xrank_completion(int nx, int ny, int nz,
     }
 
     //! ============================================================
-    //* Phase E.16 — FACE-CELL COMPLETION
+    //* FACE-CELL COMPLETION
     //! ============================================================
     {
         const bool xrank[3] = {
@@ -617,8 +618,8 @@ static void do_xrank_completion(int nx, int ny, int nz,
         const int  nax[3]   = {nx, ny, nz};
 
         //* Tag: 400 + axis_a*16 + axis_b*4 + sa_side*2 + (sb+1)/2.
-        //* Range [400, 443], disjoint from face (1..6), Phase A (200..226),
-        //* Phase E.14 (300..335).
+        //* Range [400, 443], disjoint from face (1..6), the 26-slot SOR
+        //* (200..226), and the corner-completion pass (300..335).
         auto ftag = [](int axis_a, int axis_b, int sa_side, int sb) {
             return 400 + axis_a * 16 + axis_b * 4 + sa_side * 2 + (sb + 1) / 2;
         };
@@ -1065,17 +1066,17 @@ static void do_edge_phase(int nx, int ny, int nz,
 //* Each of the 6 face directions exchanges n_ghost slab layers, batched into
 //* one MPI message per direction.
 //* Bit-identical end state: same doubles in same destination cells. Manual
-//* pack/unpack also closes the Phase E.20 race window structurally — Irecv
-//* targets a contiguous recv buffer, so periodic-self self-copies and sum-
-//* on-receive read vector untouched until the Waitall + unpack pair below.
+//* pack/unpack also closes the buffer-reuse race structurally — Irecv targets
+//* a contiguous recv buffer, so periodic-self self-copies and sum-on-receive
+//* read vector untouched until the Waitall + unpack pair below.
 //*
 //* Ordering (preserves legacy bit-identicality):
 //*   - needInterp=true:  self-copies BEFORE Waitall+unpack — vector[sL]
 //*                        reads land on pre-Irecv (== local-gather) values,
 //*                        matching legacy when Irecvs were in flight.
 //*   - needInterp=false: Waitall+unpack BEFORE self-copies — vector[sL]
-//*                        reads see post-Irecv neighbour values, matching
-//*                        legacy E.20-conditional Waitall-then-self-copy.
+//*                        reads see post-Irecv neighbour values, so the
+//*                        self-copy consumes the freshly received halo.
 //* ============================================================================
 
 //* ============================================================================
@@ -1377,7 +1378,7 @@ static void do_face_phase(int nx, int ny, int nz,
         }
     };
 
-    //* Waitall (unconditional — manual pack/unpack closes the E.20 race).
+    //* Waitall (unconditional — manual pack/unpack closes the buffer-reuse race).
     if (snd > 0) MPI_Waitall(snd, reqs, MPI_STATUSES_IGNORE);
 
     //* Unpack neighbour values into ghost slabs.
@@ -1385,7 +1386,7 @@ static void do_face_phase(int nx, int ny, int nz,
 
     //* Periodic-self self-copies AFTER cross-rank unpack for both needInterp
     //* and !needInterp paths. With manual pack/unpack into separate
-    //* face_recv_bufs (E.20 race fix), vectors[sL] is decoupled from Irecv —
+    //* face_recv_bufs (buffer-reuse race fix), vectors[sL] is decoupled from Irecv —
     //* safe to read post-unpack. Running self-copy AFTER unpack ensures the
     //* periodic-self ghost cells inherit the post-cross-rank-exchange strict
     //* values; otherwise, ghost cells at (cross-rank-axis ghost) ∩

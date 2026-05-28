@@ -2219,14 +2219,11 @@ void EMfields3D::mass_matrix_times_vector(double* MEx, double* MEy, double* MEz,
     kadd(resZ, cZ, vectX[i][j][k]*Mxz[0][i][j][k] + vectY[i][j][k]*Myz[0][i][j][k] + vectZ[i][j][k]*Mzz[0][i][j][k]);
 
     //* Neighbours
-    const bool restrict3cube = _col.getRestrictMassMatrix3Cube();
     for (int g = 1; g < ne_mass_; g++)
     {
         const int dxg = NeNo.getX(g);
         const int dyg = NeNo.getY(g);
         const int dzg = NeNo.getZ(g);
-        //* Diagnostic: skip 5-cube-only groups (any |offset| > 1).
-        if (restrict3cube && (std::abs(dxg) > 1 || std::abs(dyg) > 1 || std::abs(dzg) > 1)) continue;
 
         const int i1 = i + dxg;
         const int j1 = j + dyg;
@@ -2353,24 +2350,12 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     //  group m in [0, ne_mass_).
     //* Kahan-aware halo sum.
     const bool kahan_halo = _col.getKahanHalo();
-    const bool dump_stages = _col.getDumpMassMatrixStages() && _col.getCurrentCycle() == 1;
 
-    //* Stage 0 — raw deposit, pre any halo communication. Captures gather
-    //* output before addFace sum-on-receive, before ghost-copy, before unify.
-    if (dump_stages)
-    {
-        arr3_double a_xx(convert_to_arr3(Mxx[0]), nxn, nyn, nzn);
-        arr3_double a_yy(convert_to_arr3(Myy[0]), nxn, nyn, nzn);
-        arr3_double a_zz(convert_to_arr3(Mzz[0]), nxn, nyn, nzn);
-        dump_maxwell_stage("Mstage0_pre_halo", a_xx, a_yy, a_zz);
-    }
-
-    //* PR-B: pack all 9 components × ne_mass_ stencil groups into one flat
-    //* array and post a single batched halo per phase. Reduces mass-matrix
-    //* halo calls from 2 × ne_mass_ (PR-A: ~126 at TSC) to 2 (interp +
-    //* node_P), each carrying 9 × ne_mass_ field slabs in one MPI message
-    //* per direction. Layout: comps_all[m * 9 + idx], idx ∈ [xx, xy, xz,
-    //* yx, yy, yz, zx, zy, zz].
+    //* Pack all 9 components × ne_mass_ stencil groups into one flat array and
+    //* post a single batched halo per phase, so the mass-matrix halo costs 2
+    //* calls (interp + node_P) instead of 2 × ne_mass_, each carrying
+    //* 9 × ne_mass_ field slabs in one MPI message per direction. Layout:
+    //* comps_all[m * 9 + idx], idx ∈ [xx, xy, xz, yx, yy, yz, zx, zy, zz].
     const int n_total = 9 * ne_mass_;
     std::vector<double***> comps_all(n_total);
     for (int m = 0; m < ne_mass_; ++m) {
@@ -2408,43 +2393,6 @@ void EMfields3D::communicateGhostP2G_mass_matrix()
     } else {
         communicateInterp_multi(nxn, nyn, nzn, n_total, comps_all.data(), vct, this,
                                  /*vectors_c=*/nullptr, /*unify_ps_dups=*/true);
-    }
-
-    //* Stage 1 — after communicateInterp (face/edge/corner pack/unpack +
-    //* periodic-self fold + in-halo unify_ps_dups + periodic-self ghost copies
-    //* run AFTER cross-rank unpack inside do_face_phase). Captures m=0.
-    if (dump_stages)
-    {
-        arr3_double a_xx(comps_all[0], nxn, nyn, nzn);
-        arr3_double a_yy(comps_all[4], nxn, nyn, nzn);
-        arr3_double a_zz(comps_all[8], nxn, nyn, nzn);
-        dump_maxwell_stage("Mstage1_post_addFace", a_xx, a_yy, a_zz);
-    }
-
-    //* Diagnostic — dump M's diagonal slabs (g=0 stencil group, the "self"
-    //* mass-matrix entry at each node) post-halo, once per cycle 1. If LO and
-    //* HI duplicates differ here, the gather/halo isn't unifying periodic
-    //* duplicates of M.
-    if (_col.getDumpMassMatrixDiag() && _col.getCurrentCycle() == 1)
-    {
-        double ***mM_xx = convert_to_arr3(Mxx[0]);
-        double ***mM_yy = convert_to_arr3(Myy[0]);
-        double ***mM_zz = convert_to_arr3(Mzz[0]);
-        arr3_double a_xx(mM_xx, nxn, nyn, nzn);
-        arr3_double a_yy(mM_yy, nxn, nyn, nzn);
-        arr3_double a_zz(mM_zz, nxn, nyn, nzn);
-        dump_maxwell_stage("Mdiag_g0", a_xx, a_yy, a_zz);
-    }
-
-    //* Stage 3 — kept for parity with the DumpMassMatrixDiag location; now
-    //* bit-identical to Stage 1 since unify and self-copies are folded into
-    //* communicateInterp_multi.
-    if (dump_stages)
-    {
-        arr3_double a_xx(convert_to_arr3(Mxx[0]), nxn, nyn, nzn);
-        arr3_double a_yy(convert_to_arr3(Myy[0]), nxn, nyn, nzn);
-        arr3_double a_zz(convert_to_arr3(Mzz[0]), nxn, nyn, nzn);
-        dump_maxwell_stage("Mstage3_post_unify", a_xx, a_yy, a_zz);
     }
 }
 
@@ -2734,19 +2682,6 @@ void EMfields3D::calculateE()
     const bool ps_y = col->getPERIODICY() && vct->getYLEN() == 1;
     const bool ps_z = col->getPERIODICZ() && vct->getZLEN() == 1;
 
-    //* Cross-code byte-diff probe: explicit A·b call before GMRES so the
-    //* dumped first matvec sees the deterministic source vector (vs Krylov
-    //* normalised V[0] which depends on solver internals). Cheap one-matvec
-    //* no-op when DumpMaxwellImageStages is off.
-    if (col->getDumpMaxwellImageStages()
-        && col->getCurrentCycle() == col->getDumpMaxwellImageStagesCycle())
-    {
-        double *Ab = new double[krylov_size];
-        eqValue(0.0, Ab, krylov_size);
-        MaxwellImage(Ab, bkrylov);
-        delete[] Ab;
-    }
-
     //* Move to Krylov space from physical space
     phys2solver(xkrylov, Ex, Ey, Ez, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
@@ -2765,8 +2700,8 @@ void EMfields3D::calculateE()
         // Restart=40 from empirical sweep: +5-20% wall-clock vs r=20 on stiff
         // cases (dt≥0.75) and matches v1 baseline on easy cases (dt<0.5).
         // Iter budget = 40 × 25 = 1000.
-        // NiterGMRES > 0 forces m=N, max_iter=1 (hard-cap, no restart) for
-        // Krylov-iter bisection experiments.
+        // NiterGMRES > 0 forces m=N, max_iter=1 (hard-cap, no restart) to pin
+        // an exact Krylov iteration count.
         const int niter_override = col->getNiterGMRES();
         if (niter_override > 0)
             GMRES(&Field::MaxwellImage, xkrylov, krylov_size, bkrylov, niter_override, 1, GMREStol, this);
@@ -2973,136 +2908,6 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 // the ghost nodes and solver2phys() would populate them via communication. Note that it would also be possible, if
 // desired, to give duplicated nodes equal weight by rescaling their values in these two methods.
 
-//* Per-stage MaxwellImage dump for cross-code byte diff. Writes one binary file
-//* per (stage, component, rank) into SaveDirName, full nxn×nyn×nzn doubles,
-//* row-major C order with k (z) fastest. See dump_maxwell_stage declaration.
-void EMfields3D::dump_maxwell_stage(const char* stage_name, arr3_double aX, arr3_double aY, arr3_double aZ)
-{
-    const Collective *col = &get_col();
-    const int rank = (&get_vct())->getCartesian_rank();
-    const int cycle = col->getCurrentCycle();
-
-    auto write_arr3 = [&](const char* comp, arr3_double a)
-    {
-        std::ostringstream p;
-        p << col->getSaveDirName() << "/maxwell_stage_c" << cycle
-          << "_m0_" << stage_name << "_" << comp
-          << "_r" << rank << ".bin";
-        std::ofstream f(p.str(), std::ios::binary);
-        if (!f) eprintf("dump_maxwell_stage: cannot open %s", p.str().c_str());
-        for (int i = 0; i < nxn; i++)
-            for (int j = 0; j < nyn; j++)
-                for (int k = 0; k < nzn; k++)
-                {
-                    const double v = a[i][j][k];
-                    f.write(reinterpret_cast<const char*>(&v), sizeof(double));
-                }
-    };
-
-    write_arr3("x", aX);
-    write_arr3("y", aY);
-    write_arr3("z", aZ);
-}
-
-//* Eigenmode probe. After moments are gathered (M filled), apply MaxwellImage
-//* to plane-wave test fields E_test = sin(k_x x) e_x sweeping mode m = 1..N/2,
-//* project the X-component of the image onto sin/cos basis, and write a CSV
-//* `eigenmode_probe_r{rank}.csv` to SaveDirName. The expected eigenvalue at
-//* low k is 1 + (cθΔt)² k² + (4πθΔt)² ω_p² (curl² + scalar mass term).
-//* Linear vs TSC deviations at high k expose stencil-specific operator bugs.
-void EMfields3D::eigenmode_probe()
-{
-    const Collective *col = &get_col();
-    const VirtualTopology3D *vct = &get_vct();
-    const Grid *grid = &get_grid();
-    const int rank = vct->getCartesian_rank();
-    const int ng = n_ghost_;
-    const int nx_int = nxn - 2*ng;
-    const int ny_int = nyn - 2*ng;
-    const int nz_int = nzn - 2*ng;
-    const int dof = 3 * nx_int * ny_int * nz_int;
-    const double Lx = col->getLx();
-
-    std::vector<double> vec_in(dof, 0.0);
-    std::vector<double> vec_out(dof, 0.0);
-    arr3_double EtX(nxn, nyn, nzn);
-    arr3_double EtY(nxn, nyn, nzn);
-    arr3_double EtZ(nxn, nyn, nzn);
-    arr3_double imX(nxn, nyn, nzn);
-    arr3_double imY(nxn, nyn, nzn);
-    arr3_double imZ(nxn, nyn, nzn);
-
-    std::ostringstream path;
-    path << col->getSaveDirName() << "/eigenmode_probe_r" << rank << ".csv";
-    FILE *fp = fopen(path.str().c_str(), "w");
-    if (!fp) { eprintf("eigenmode_probe: cannot open %s", path.str().c_str()); return; }
-    fprintf(fp, "axis,mode,k,re_xx,im_xx,re_yx,im_yx,re_zx,im_zx,norm2_im\n");
-
-    //* X-axis sweep. Modes m = 1..nxc_r/2 cover up to Nyquist on the unique-cell grid.
-    const int M_max = col->getNxc() / 2;
-    for (int m = 1; m <= M_max; m++)
-    {
-        const double k = 2.0 * M_PI * (double)m / Lx;
-
-        //* Build E_test in physical (full guarded grid) space.
-        for (int i = 0; i < nxn; i++) {
-            const double x = grid->getXN(i);
-            const double s = sin(k * x);
-            for (int j = 0; j < nyn; j++)
-                for (int kk = 0; kk < nzn; kk++) {
-                    EtX[i][j][kk] = s;
-                    EtY[i][j][kk] = 0.0;
-                    EtZ[i][j][kk] = 0.0;
-                }
-        }
-
-        //* Pack to Krylov DOFs (interior only, X/Y/Z interleaved).
-        phys2solver(vec_in.data(), EtX, EtY, EtZ, nxn, nyn, nzn, ng);
-
-        //* Apply MaxwellImage.
-        std::fill(vec_out.begin(), vec_out.end(), 0.0);
-        MaxwellImage(vec_out.data(), vec_in.data());
-
-        //* Unpack image back to physical.
-        solver2phys(imX, imY, imZ, vec_out.data(), nxn, nyn, nzn, ng);
-
-        //* Project image components onto sin(k x) / cos(k x) over interior only.
-        //  Dot products normalized by ½·N_int (so `<sin, sin> = 1` for unit-amplitude sin).
-        double re_xx = 0.0, im_xx = 0.0;
-        double re_yx = 0.0, im_yx = 0.0;
-        double re_zx = 0.0, im_zx = 0.0;
-        double norm2_im = 0.0;
-        const int N_proj = nx_int * ny_int * nz_int;
-        for (int i = ng; i < nxn - ng; i++) {
-            const double x = grid->getXN(i);
-            const double s = sin(k * x);
-            const double c = cos(k * x);
-            for (int j = ng; j < nyn - ng; j++)
-                for (int kk = ng; kk < nzn - ng; kk++) {
-                    const double ix = imX[i][j][kk];
-                    const double iy = imY[i][j][kk];
-                    const double iz = imZ[i][j][kk];
-                    re_xx += ix * s;  im_xx += ix * c;
-                    re_yx += iy * s;  im_yx += iy * c;
-                    re_zx += iz * s;  im_zx += iz * c;
-                    norm2_im += ix*ix + iy*iy + iz*iz;
-                }
-        }
-        const double half_N = 0.5 * (double)N_proj;
-        re_xx /= half_N; im_xx /= half_N;
-        re_yx /= half_N; im_yx /= half_N;
-        re_zx /= half_N; im_zx /= half_N;
-        norm2_im /= (double)N_proj;
-
-        fprintf(fp, "X,%d,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e\n",
-                m, k, re_xx, im_xx, re_yx, im_yx, re_zx, im_zx, norm2_im);
-    }
-
-    fclose(fp);
-    if (rank == 0)
-        std::cout << "*** eigenmode_probe: wrote " << path.str() << " ***" << std::endl;
-}
-
 void EMfields3D::MaxwellImage(double *im, double* vector)
 {
     //* double *im      : Output
@@ -3121,12 +2926,6 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
     const bool ps_y = col->getPERIODICY() && vct->getYLEN() == 1;
     const bool ps_z = col->getPERIODICZ() && vct->getZLEN() == 1;
 
-    //* Per-stage dump gate. Fires only on the first matvec of the target cycle.
-    //* Cheap no-op when DumpMaxwellImageStages is off.
-    const bool mi_dump = col->getDumpMaxwellImageStages()
-                      && col->getCurrentCycle() == col->getDumpMaxwellImageStagesCycle()
-                      && mi_last_dump_cycle_ != col->getCurrentCycle();
-
     //? Move from Krylov space to physical space
     solver2phys(tempX, tempY, tempZ, vector, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
 
@@ -3135,23 +2934,12 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
 	communicateNodeBC(nxn, nyn, nzn, tempY, col->bcEy[0],col->bcEy[1],col->bcEy[2],col->bcEy[3],col->bcEy[4],col->bcEy[5], vct, this);
 	communicateNodeBC(nxn, nyn, nzn, tempZ, col->bcEz[0],col->bcEz[1],col->bcEz[2],col->bcEz[3],col->bcEz[4],col->bcEz[5], vct, this);
 
-    //* Stage A — post input halo refresh. Equals S·E under "halo refresh = smoothing at Smooth=0".
-    if (mi_dump) dump_maxwell_stage("A_post_halo_in", tempX, tempY, tempZ);
-
     //? curl²(E) assembly. Two paths selected by MaxwellOperator:
     //*   "curl_curl"   — legacy composition curlC2N(curlN2C(E)).
     //*   "lap_graddiv" — ECSIM-style identity curl²(E) = -∇²E + ∇(∇·E) via
     //*                   composed lapN2N and divN2C→gradC2N (default).
-    //* Diagnostic flag DisableCurl2InImage zeros the curl² contribution.
-    const bool disable_curl2 = col->getDisableCurl2InImage();
     const std::string maxwell_op = col->getMaxwellOperator();
-    if (disable_curl2)
-    {
-        eqValue(0.0, imageX, nxn, nyn, nzn);
-        eqValue(0.0, imageY, nxn, nyn, nzn);
-        eqValue(0.0, imageZ, nxn, nyn, nzn);
-    }
-    else if (maxwell_op == "lap_graddiv")
+    if (maxwell_op == "lap_graddiv")
     {
         grid->lapN2N(imageX, tempX, this);
         grid->lapN2N(imageY, tempY, this);
@@ -3191,47 +2979,25 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageZ[i][j][k] = tempZ[i][j][k] + factor * imageZ[i][j][k];
             }
 
-    //* Stage B — post (I + (cθΔt)²·curl²)·E assembly, before M·E block. Gap here
-    //* points at the curl² stencil (lap_graddiv vs curl_curl) or the (I + ...) order.
-    if (mi_dump) dump_maxwell_stage("B_post_curl2", imageX, imageY, imageZ);
-
     //* Energy-conserving smoothing (BC nodes are taken care of in the smoothing process)
     energy_conserve_smooth(tempX, tempY, tempZ, nxn, nyn, nzn);
-
-    //* Stage B2 — tempX after the inner smoothing that precedes M·E.
-    if (mi_dump) dump_maxwell_stage("B2_pre_ME_temp", tempX, tempY, tempZ);
 
     //* mass_matrix_times_vector handles bounds internally for the wider TSC stencil
     //* (mass-matrix product cube reaches +/- stencil_order_ nodes), so we keep the
     //* full interior [n_ghost_, nxn-n_ghost_) for both Linear and Quadratic.
-    //* Diagnostic flag DisableMassMatrixInImage zeros the M·E contribution so
-    //* A becomes (I + curl²·factor) only.
-    const bool disable_M = col->getDisableMassMatrixInImage();
-    if (disable_M)
-    {
-        eqValue(0.0, temp2X, nxn, nyn, nzn);
-        eqValue(0.0, temp2Y, nxn, nyn, nzn);
-        eqValue(0.0, temp2Z, nxn, nyn, nzn);
-    }
-    else
-    {
-        #pragma omp parallel for collapse(3) schedule(static)
-        for (int i = n_ghost_; i < nxn - n_ghost_; i++)
-            for (int j = n_ghost_; j < nyn - n_ghost_; j++)
-                for (int k = n_ghost_; k < nzn - n_ghost_; k++)
-                {
-                    double MEx, MEy, MEz;
+    #pragma omp parallel for collapse(3) schedule(static)
+    for (int i = n_ghost_; i < nxn - n_ghost_; i++)
+        for (int j = n_ghost_; j < nyn - n_ghost_; j++)
+            for (int k = n_ghost_; k < nzn - n_ghost_; k++)
+            {
+                double MEx, MEy, MEz;
 
-                    mass_matrix_times_vector(&MEx, &MEy, &MEz, tempX, tempY, tempZ, i, j, k);
+                mass_matrix_times_vector(&MEx, &MEy, &MEz, tempX, tempY, tempZ, i, j, k);
 
-                    temp2X[i][j][k] = dt*th*FourPI*MEx;
-                    temp2Y[i][j][k] = dt*th*FourPI*MEy;
-                    temp2Z[i][j][k] = dt*th*FourPI*MEz;
-                }
-    }
-
-    //* Stage C — raw M·E output × (dt·θ·4π), pre outer halo and smoothing.
-    if (mi_dump) dump_maxwell_stage("C_raw_ME", temp2X, temp2Y, temp2Z);
+                temp2X[i][j][k] = dt*th*FourPI*MEx;
+                temp2Y[i][j][k] = dt*th*FourPI*MEy;
+                temp2Z[i][j][k] = dt*th*FourPI*MEz;
+            }
 
     //* Energy-conserving smoothing of M·E before the invVOL scaling. The directional
     //* smoother refreshes the halo on entry, so no extra `communicateNodeBC` is
@@ -3247,9 +3013,6 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 temp2Z[i][j][k] *= invVOL;
             }
 
-    //* Stage D — S·M·S·E, post outer halo + smooth + invVOL.
-    if (mi_dump) dump_maxwell_stage("D_SMS_invVOL", temp2X, temp2Y, temp2Z);
-
     for (int i = n_ghost_; i < nxn - n_ghost_; i++)
         for (int j = n_ghost_; j < nyn - n_ghost_; j++)
             for (int k = n_ghost_; k < nzn - n_ghost_; k++)
@@ -3259,15 +3022,9 @@ void EMfields3D::MaxwellImage(double *im, double* vector)
                 imageZ[i][j][k] = temp2Z[i][j][k] + imageZ[i][j][k];
             }
 
-    //* Stage E — full A·E assembled.
-    if (mi_dump) dump_maxwell_stage("E_full_Ae", imageX, imageY, imageZ);
-
     //? Move from physical space to Krylov space (averages LO+HI duplicate
     //? Krylov entries into LO and zeros HI on each periodic-self axis).
     phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn, n_ghost_, ps_x, ps_y, ps_z);
-
-    //* Per-stage-dump bookkeeping — fire only on the first matvec of the cycle.
-    if (mi_dump) mi_last_dump_cycle_ = col->getCurrentCycle();
 }
 
 //? Update the values of magnetic field at the nodes at time n+1
@@ -3630,7 +3387,7 @@ void EMfields3D::unify_periodic_duplicates(arr3_double Exf, arr3_double Eyf, arr
     //* Cross-rank dup pair averaging only. Periodic-self LO==HI is enforced
     //* upstream (Eth: solver2phys `ps_x/y/z` projection; Bxn/Byn/Bzn: by the
     //* per-call-site communicateNodeBC routing through NBDerivedHaloCommN —
-    //* face_phase periodic-self copies after cross-rank unpack since E.20+).
+    //* face_phase periodic-self copies run after the cross-rank unpack).
     const bool periodicX_xrank = col->getPERIODICX() && vct->getXLEN() > 1;
     const bool periodicY_xrank = col->getPERIODICY() && vct->getYLEN() > 1;
     const bool periodicZ_xrank = col->getPERIODICZ() && vct->getZLEN() > 1;
