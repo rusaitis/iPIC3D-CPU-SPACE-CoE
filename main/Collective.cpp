@@ -275,6 +275,12 @@ void Collective::ReadInput(string inputfile)
         // Backward compat: PrecMatrix=true implies PrecType=Matrix if not explicitly set
         if (PrecMatrix && PrecType == "None")
             PrecType = "Matrix";
+        //* PrecReuse (PrecType=Matrix): build the AMG hierarchy once from the cycle-0
+        //* preconditioner P and freeze it (KSPSetReusePreconditioner) instead of
+        //* rebuilding every cycle. The curl-curl + identity structure of P is constant;
+        //* only the mass matrix drifts, so the cycle-0 hierarchy stays effective and the
+        //* outer Krylov absorbs the small mismatch — amortizing the dominant AMG setup.
+        PrecReuse                   = config.read<bool>     ("PrecReuse", false);
         //* Physics-based scalar-Helmholtz preconditioner (PrecType = Helmholtz) knobs.
         //*   HelmholtzInner   — inner solve for H·ψ=r: "AMG" (Richardson+GAMG/HYPRE) or
         //*                      "Chebyshev" (Chebyshev+Jacobi). Both run on the same scalar H.
@@ -1547,6 +1553,7 @@ Collective::Collective(int argc, char **argv)
     string stencil_override;
     string prec_override;
     string helm_inner_override;
+    bool   prec_reuse_override = false;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
@@ -1563,10 +1570,14 @@ Collective::Collective(int argc, char **argv)
                 i++; // skip the value
             }
 
-            // iPIC3D recognises -solver, -stencil, -prec, -helm-inner; PETSc flags
-            // (-ksp_*, -pc_*, -mat_*, -vec_*, -snes_*, -log_*, -options_*) are passed
-            // through to PETSc via KSPSetFromOptions.  Warn about anything else.
-            if (flag != "-solver" && flag != "-stencil" && flag != "-prec" && flag != "-helm-inner"
+            // -prec-reuse is a value-less boolean flag (freeze the AMG hierarchy).
+            if (flag == "-prec-reuse") prec_reuse_override = true;
+
+            // iPIC3D recognises -solver, -stencil, -prec, -helm-inner, -prec-reuse;
+            // PETSc flags (-ksp_*, -pc_*, -mat_*, -vec_*, -snes_*, -log_*, -options_*)
+            // are passed through to PETSc via KSPSetFromOptions.  Warn about anything else.
+            if (flag != "-solver" && flag != "-stencil" && flag != "-prec"
+                && flag != "-helm-inner" && flag != "-prec-reuse"
                 && flag.substr(0, 4) != "-ksp" && flag.substr(0, 3) != "-pc"
                 && flag.substr(0, 4) != "-mat" && flag.substr(0, 4) != "-vec"
                 && flag.substr(0, 5) != "-snes" && flag.substr(0, 4) != "-log"
@@ -1663,6 +1674,12 @@ Collective::Collective(int argc, char **argv)
             MPI_Abort(MPI_COMM_WORLD, -1);
         }
         cout << "  [-helm-inner] HelmholtzInner overridden to " << HelmholtzInner << endl;
+    }
+
+    // Command-line -prec-reuse flag forces PrecReuse=true (freeze the AMG hierarchy).
+    if (prec_reuse_override) {
+        PrecReuse = true;
+        cout << "  [-prec-reuse] PrecReuse enabled (AMG hierarchy built once, then frozen)" << endl;
     }
 
     init_derived_parameters();

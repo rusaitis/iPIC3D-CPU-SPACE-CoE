@@ -66,9 +66,11 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
                          double tol, const std::string &precType, bool diagnostics,
                          const std::string &simName, const std::string &saveDir,
                          const std::string &helmInner, const std::string &helmAMGType,
-                         int helmVcycles, int helmSweeps, bool helmMassShift)
+                         int helmVcycles, int helmSweeps, bool helmMassShift,
+                         bool reusePrec)
     : localSize_(localSize), petsc_x_(nullptr), petsc_b_(nullptr),
-      usePrecMatrix_(precType == "Matrix"), needsReassembly_(false), diagnostics_(diagnostics),
+      usePrecMatrix_(precType == "Matrix"), needsReassembly_(false),
+      reusePrec_(reusePrec), diagnostics_(diagnostics),
       simName_(simName), saveDir_(saveDir),
       P_(nullptr), emf_(emf), globalBlockOffset_(0),
       nsp_(nullptr),
@@ -1057,6 +1059,8 @@ void PetscSolver::solve(double *x, int size, const double *b, int cycle)
 {
     assert(size == localSize_);
     // Re-assemble P if it contains cycle-dependent terms (e.g. mass matrix).
+    // In reuse mode, needsReassembly_ is cleared after the first solve below, so P is
+    // assembled (and the AMG hierarchy built) once from the cycle-0 state, then frozen.
     if (usePrecMatrix_ && needsReassembly_)
         assembleP();
     // Update block-diagonal D⁻¹ for PCShell (mass matrix changes every cycle)
@@ -1088,6 +1092,16 @@ void PetscSolver::solve(double *x, int size, const double *b, int cycle)
         PetscCallAbort(PETSC_COMM_WORLD,
             PetscPrintf(PETSC_COMM_WORLD, "WARNING: PETSc KSP did NOT converge: cycle=%d reason=%d iterations=%d residual=%e\n",
                         cycle, (int)reason, (int)iter, (double)residual));
+    }
+
+    // Reuse mode: after the first solve has built the AMG hierarchy from the cycle-0
+    // preconditioner, freeze it. Subsequent cycles skip both assembleP() (above) and
+    // PCSetUp() (here), reusing the frozen hierarchy — the dominant per-cycle cost of a
+    // full AMG rebuild is paid only once. The mass matrix drift is absorbed by the outer
+    // Krylov iterations (a few extra), which is the intended cost/quality trade.
+    if (usePrecMatrix_ && reusePrec_ && needsReassembly_) {
+        PetscCallAbort(PETSC_COMM_WORLD, KSPSetReusePreconditioner(ksp_, PETSC_TRUE));
+        needsReassembly_ = false;
     }
 
     // Release the caller's arrays from the Vecs (does NOT free them)

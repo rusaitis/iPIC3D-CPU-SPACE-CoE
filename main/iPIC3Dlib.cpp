@@ -272,7 +272,8 @@ int c_Solver::Init(int argc, char **argv)
     if (col->getSolverType() == "PETSc") {
         int localSize = 3 * (grid->getNXN() - 2) * (grid->getNYN() - 2) * (grid->getNZN() - 2);
         petscSolver = new PetscSolver(localSize, EMf, vct, col->getGMREStol(), col->getPrecType(), col->getPrecDiagnostics(), col->getSimName(), col->getSaveDirName(),
-                                      col->getHelmholtzInner(), col->getHelmholtzAMGType(), col->getHelmholtzVcycles(), col->getHelmholtzSweeps(), col->getHelmholtzMassShift());
+                                      col->getHelmholtzInner(), col->getHelmholtzAMGType(), col->getHelmholtzVcycles(), col->getHelmholtzSweeps(), col->getHelmholtzMassShift(),
+                                      col->getPrecReuse());
         EMf->setPetscSolver(petscSolver);
         if (myrank == 0)
             cout << "PETSc solver enabled for E-field computation" << endl;

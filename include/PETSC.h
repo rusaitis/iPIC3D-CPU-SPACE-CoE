@@ -29,7 +29,8 @@ public:
                 const std::string &saveDir = "output",
                 const std::string &helmInner = "AMG",
                 const std::string &helmAMGType = "gamg",
-                int helmVcycles = 2, int helmSweeps = 4, bool helmMassShift = true);
+                int helmVcycles = 2, int helmSweeps = 4, bool helmMassShift = true,
+                bool reusePrec = false);
     ~PetscSolver();
     PetscSolver(const PetscSolver&) = delete;
     PetscSolver& operator=(const PetscSolver&) = delete;
@@ -55,6 +56,7 @@ private:
     // Preconditioner matrix (27-point stencil: I + curl-curl + mass matrix)
     bool usePrecMatrix_;
     bool needsReassembly_;  // true if P contains cycle-dependent terms (e.g. mass matrix)
+    bool reusePrec_;        // freeze the AMG hierarchy after cycle 0 (KSPSetReusePreconditioner)
     bool diagnostics_;      // print norms and dump matrix to file
     std::string simName_;   // simulation name for output file prefixes
     std::string saveDir_;   // output directory (from input file SaveDirName)
