@@ -35,6 +35,8 @@ GRIDS="100 200"
 DTS="0.125 0.25 0.5 1.0"
 NZC=1
 TOPO=""                       # auto: square-ish XY factorization of NP
+BSWEEP=""                     # optional: sweep B0x (magnetization) over this list
+RHOSWEEP=""                   # optional: sweep rhoINIT (plasma density) over this list
 TAG="dt_sweep"
 # Solver set: "label=extra-cli-args" separated by ';'.  PrecType comes from the
 # template (Matrix); -prec None/Helmholtz override it, -pc_type selects the PC.
@@ -49,6 +51,8 @@ while [[ $# -gt 0 ]]; do
         --dts)     DTS="$2";     shift 2 ;;
         --nzc)     NZC="$2";     shift 2 ;;
         --topo)    TOPO="$2";    shift 2 ;;
+        --b0x)     BSWEEP="$2";  shift 2 ;;
+        --rho)     RHOSWEEP="$2"; shift 2 ;;
         --tag)     TAG="$2";     shift 2 ;;
         --solvers) SOLVERS="$2"; shift 2 ;;
         --template) TEMPLATE="$2"; shift 2 ;;
@@ -88,7 +92,7 @@ if (( XLEN*YLEN*ZLEN != NP )); then
     echo "ERROR: topo ${XLEN}x${YLEN}x${ZLEN} != np $NP" >&2; exit 2
 fi
 
-echo "study,dt,nxc,nyc,nzc,np,topo,cycles,solver,mean_iters,max_iters,nonconv,field_total_s,field_per_cycle_ms,wall_s" > "$CSV"
+echo "study,dt,b0x,rho,nxc,nyc,nzc,np,topo,cycles,solver,mean_iters,max_iters,nonconv,field_total_s,field_per_cycle_ms,wall_s" > "$CSV"
 
 echo "=================================================================="
 echo " Stiffness frontier:  np=$NP  topo=${XLEN}x${YLEN}x${ZLEN}  cycles=$CYCLES"
@@ -98,8 +102,10 @@ echo "   csv -> $CSV"
 echo "=================================================================="
 
 run_one() {
-    local dt="$1" nxc="$2" nyc="$3" nzc="$4" label="$5" extra="$6"
-    local tagn="${label}_${nxc}x${nyc}x${nzc}_dt${dt}"
+    local dt="$1" nxc="$2" nyc="$3" nzc="$4" b0x="$5" rho="$6" label="$7" extra="$8"
+    local btag=""; [[ -n "$b0x" ]] && btag="_B${b0x}"
+    local rtag=""; [[ -n "$rho" ]] && rtag="_R${rho}"
+    local tagn="${label}_${nxc}x${nyc}x${nzc}_dt${dt}${btag}${rtag}"
     local inp="$WORK/inp/${tagn}.inp"
     local log="$WORK/logs/${tagn}.log"
     local sdir="$WORK/out/${tagn}"
@@ -122,6 +128,17 @@ run_one() {
       -e "s|^SaveDirName.*=.*|SaveDirName = $sdir|" \
       -e "s|^RestartDirName.*=.*|RestartDirName = $sdir|" \
       "$TEMPLATE" > "$inp"
+    # Optional magnetization override (portable in-place edit)
+    if [[ -n "$b0x" ]]; then
+        sed -E "s|^B0x.*=.*|B0x = $b0x|" "$inp" > "$inp.tmp" && mv "$inp.tmp" "$inp"
+    fi
+    # Optional density override: set rhoINIT for every species (read ns from the input)
+    if [[ -n "$rho" ]]; then
+        local nsp; nsp=$(grep -E '^ns[[:space:]]*=' "$inp" | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
+        nsp="${nsp:-1}"; local rhostr=""; local s
+        for (( s=0; s<nsp; s++ )); do rhostr="$rhostr $rho"; done
+        sed -E "s|^rhoINIT.*=.*|rhoINIT =$rhostr|" "$inp" > "$inp.tmp" && mv "$inp.tmp" "$inp"
+    fi
 
     local t0 t1 wall
     t0=$(_now)
@@ -146,23 +163,32 @@ run_one() {
         fpc=$(awk -v f="$field_total" -v c="$CYCLES" 'BEGIN{printf "%.2f", 1000.0*f/c}')
     fi
 
-    printf "%s,%s,%d,%d,%d,%d,%dx%dx%d,%d,%s,%s,%s,%s,%s,%s,%s\n" \
-        "$TAG" "$dt" "$nxc" "$nyc" "$nzc" "$NP" "$XLEN" "$YLEN" "$ZLEN" \
+    printf "%s,%s,%s,%s,%d,%d,%d,%d,%dx%dx%d,%d,%s,%s,%s,%s,%s,%s,%s\n" \
+        "$TAG" "$dt" "${b0x:-base}" "${rho:-base}" "$nxc" "$nyc" "$nzc" "$NP" "$XLEN" "$YLEN" "$ZLEN" \
         "$CYCLES" "$label" "$mean_it" "$max_it" "$nonconv" "$field_total" "$fpc" "$wall" >> "$CSV"
 
-    printf "  dt=%-5s %dx%dx%d  %-12s iters mean=%-6s max=%-4s nonconv=%-2s  field=%ss (%s ms/cyc)\n" \
-        "$dt" "$nxc" "$nyc" "$nzc" "$label" "$mean_it" "$max_it" "$nonconv" "$field_total" "$fpc"
+    printf "  dt=%-5s B0x=%-5s rho=%-5s %dx%dx%d  %-12s iters mean=%-6s max=%-4s nonconv=%-2s  field=%ss (%s ms/cyc)\n" \
+        "$dt" "${b0x:-base}" "${rho:-base}" "$nxc" "$nyc" "$nzc" "$label" "$mean_it" "$max_it" "$nonconv" "$field_total" "$fpc"
 }
 
+# Sweep lists: the swept values, or a "__base__" sentinel (use the template value).
+BLIST="$BSWEEP";   [[ -z "$BLIST" ]] && BLIST="__base__"
+RLIST="$RHOSWEEP"; [[ -z "$RLIST" ]] && RLIST="__base__"
 for g in $GRIDS; do
     for dt in $DTS; do
-        echo "---- grid ${g}x${g}x${NZC}  dt=$dt ----"
-        # Iterate solver specs (";"-separated "label=args")
-        IFS=';' read -ra SPECS <<< "$SOLVERS"
-        for spec in "${SPECS[@]}"; do
-            label="${spec%%=*}"
-            extra="${spec#*=}"
-            run_one "$dt" "$g" "$g" "$NZC" "$label" "$extra"
+        for b0x in $BLIST; do
+            [[ "$b0x" == "__base__" ]] && b0x=""
+            for rho in $RLIST; do
+                [[ "$rho" == "__base__" ]] && rho=""
+                echo "---- grid ${g}x${g}x${NZC}  dt=$dt  B0x=${b0x:-base}  rho=${rho:-base} ----"
+                # Iterate solver specs (";"-separated "label=args")
+                IFS=';' read -ra SPECS <<< "$SOLVERS"
+                for spec in "${SPECS[@]}"; do
+                    label="${spec%%=*}"
+                    extra="${spec#*=}"
+                    run_one "$dt" "$g" "$g" "$NZC" "$b0x" "$rho" "$label" "$extra"
+                done
+            done
         done
     done
 done

@@ -7,13 +7,14 @@ data*/
 # Example files
 examples/
 
-# Local notes, plans, and phase artifacts
+# Local notes, plans, slide decks, and phase artifacts
 NOTES*.md
 TASKS*.md
 PLAN*.md
 plan*.md
 review*.md
 phase*
+slides/
 
 # Pixi
 .pixi/
