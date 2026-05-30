@@ -67,10 +67,11 @@ PetscSolver::PetscSolver(int localSize, EMfields3D *emf, const VCtopology3D *vct
                          const std::string &simName, const std::string &saveDir,
                          const std::string &helmInner, const std::string &helmAMGType,
                          int helmVcycles, int helmSweeps, bool helmMassShift,
-                         bool reusePrec)
+                         bool reusePrec, int precDumpCycle)
     : localSize_(localSize), petsc_x_(nullptr), petsc_b_(nullptr),
       usePrecMatrix_(precType == "Matrix"), needsReassembly_(false),
       reusePrec_(reusePrec), diagnostics_(diagnostics),
+      precDumpCycle_(precDumpCycle),
       simName_(simName), saveDir_(saveDir),
       P_(nullptr), emf_(emf), globalBlockOffset_(0),
       nsp_(nullptr),
@@ -1063,6 +1064,13 @@ void PetscSolver::solve(double *x, int size, const double *b, int cycle)
     // assembled (and the AMG hierarchy built) once from the cycle-0 state, then frozen.
     if (usePrecMatrix_ && needsReassembly_)
         assembleP();
+    // Operator-movie diagnostics: dump the freshly assembled P every precDumpCycle_ cycles so
+    // the matrix's time evolution (block norms, spectrum) can be visualized. 0 = cycle-0 only.
+    if (usePrecMatrix_ && precDumpCycle_ > 0 && cycle >= 0 && cycle % precDumpCycle_ == 0) {
+        std::filesystem::create_directories(saveDir_);
+        std::string dumpPath = saveDir_ + "/" + simName_ + "_P_cycle" + std::to_string(cycle) + ".bin";
+        dumpP(dumpPath.c_str());
+    }
     // Update block-diagonal D⁻¹ for PCShell (mass matrix changes every cycle)
     if (useSmoothPC_)
         updateDiagInv();

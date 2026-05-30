@@ -186,6 +186,7 @@ class Collective
     bool getPrecDiagnostics()           const{ return (PrecDiagnostics); }
     string getPrecType()                const{ return (PrecType); }
     bool getPrecReuse()                 const{ return (PrecReuse); }
+    int  getPrecDumpCycle()             const{ return (PrecDumpCycle); }
     //* Scalar-Helmholtz preconditioner knobs (PrecType = Helmholtz).
     string getHelmholtzInner()          const{ return (HelmholtzInner); }
     string getHelmholtzAMGType()        const{ return (HelmholtzAMGType); }
@@ -460,6 +461,9 @@ class Collective
 
     //* Reuse the AMG hierarchy across cycles (PrecType=Matrix): build once, then freeze
     bool PrecReuse;
+
+    //* Dump the assembled preconditioner P every N cycles for operator movies (0 = cycle-0 only; needs PrecMatrix=true)
+    int PrecDumpCycle;
 
     //* Scalar-Helmholtz preconditioner knobs (PrecType = Helmholtz)
     string HelmholtzInner;      // inner solve: "AMG" (Richardson+GAMG/HYPRE) | "Chebyshev" (Chebyshev+Jacobi)

@@ -281,6 +281,8 @@ void Collective::ReadInput(string inputfile)
         //* only the mass matrix drifts, so the cycle-0 hierarchy stays effective and the
         //* outer Krylov absorbs the small mismatch — amortizing the dominant AMG setup.
         PrecReuse                   = config.read<bool>     ("PrecReuse", false);
+        //* Dump the assembled preconditioner P every N cycles for operator movies (0 = cycle-0 only).
+        PrecDumpCycle               = config.read<int>      ("PrecDumpCycle", 0);
         //* Physics-based scalar-Helmholtz preconditioner (PrecType = Helmholtz) knobs.
         //*   HelmholtzInner   — inner solve for H·ψ=r: "AMG" (Richardson+GAMG/HYPRE) or
         //*                      "Chebyshev" (Chebyshev+Jacobi). Both run on the same scalar H.
